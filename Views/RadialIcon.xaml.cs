@@ -47,6 +47,55 @@ public partial class RadialIcon : UserControl
     public Brush LabelBrush { get; }
     public string DisplayName { get; }
 
+    private bool _isRunning;
+
+    /// <summary>
+    /// When true the icon shows a flowing blue light around its square border,
+    /// indicating the target program is currently running.
+    /// </summary>
+    public bool IsRunning
+    {
+        get => _isRunning;
+        set
+        {
+            if (_isRunning == value)
+                return;
+            _isRunning = value;
+            UpdateRunningVisual();
+        }
+    }
+
+    private void UpdateRunningVisual()
+    {
+        if (_isRunning)
+        {
+            RunningBorder.Visibility = Visibility.Visible;
+            RunningGlowBorder.Visibility = Visibility.Visible;
+            // Sweep the bright spot continuously around the border. A linear
+            // 0..360 rotation on the brush is GPU-composited, so it stays smooth.
+            var sweep = new DoubleAnimation(0, 360, new Duration(TimeSpan.FromSeconds(2.8)))
+            {
+                RepeatBehavior = RepeatBehavior.Forever,
+            };
+            RunningSweep.BeginAnimation(RotateTransform.AngleProperty, sweep);
+            // Gentle breathing glow on the static blurred border (Opacity is a
+            // cheap, composited property — no per-frame bitmap-effect recompute).
+            var pulse = new DoubleAnimation(0.35, 0.8, new Duration(TimeSpan.FromSeconds(1.6)))
+            {
+                AutoReverse = true,
+                RepeatBehavior = RepeatBehavior.Forever,
+            };
+            RunningGlowBorder.BeginAnimation(OpacityProperty, pulse);
+        }
+        else
+        {
+            RunningSweep.BeginAnimation(RotateTransform.AngleProperty, null);
+            RunningGlowBorder.BeginAnimation(OpacityProperty, null);
+            RunningBorder.Visibility = Visibility.Collapsed;
+            RunningGlowBorder.Visibility = Visibility.Collapsed;
+        }
+    }
+
     private void OnEnter(object sender, MouseEventArgs e)
     {
         Scale.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(HoverScale, Anim));

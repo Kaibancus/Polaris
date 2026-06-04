@@ -57,6 +57,7 @@ public partial class App : Application
 
         _panel = new RadialWindow(_config, Persist);
         _panel.RequestOpenSettings += OpenSettings;
+        _panel.Realize();   // realise once (stays shown, fully transparent) to avoid show/hide flicker
 
         RebuildHook();
         SetupPinnedHooks();
@@ -111,7 +112,7 @@ public partial class App : Application
         _escHook = new KeyboardHook(VK_ESCAPE);
         _escHook.KeyPressed += () =>
         {
-            if (_panel?.IsVisible == true)
+            if (_panel?.IsShown == true)
                 _panel.HidePanel();
         };
         _escHook.Start();

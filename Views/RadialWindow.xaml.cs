@@ -56,6 +56,20 @@ public partial class RadialWindow : Window
     private readonly Action _persist;
     private readonly Dictionary<string, BitmapSource?> _iconCache = new();
 
+    // Periodically refreshes each icon's running indicator while the panel is shown.
+    private readonly System.Windows.Threading.DispatcherTimer _runningTimer;
+
+    // Set while showing the window so the SizeChanged fired by Show() does not
+    // trigger a premature (wrong-centre) Rebuild that would flash the ring.
+    private bool _suppressRebuild;
+
+    // Intended visible state. Guards the deferred build callback so it does not
+    // re-apply a fade after the panel was hidden again (fast key press/release).
+    private bool _shown;
+
+    // Whether the window has been realised (shown once) at startup.
+    private bool _realized;
+
     private Point _center;
     private double _outerRadius;
     private readonly List<Point> _slotPositions = new();
@@ -93,7 +107,13 @@ public partial class RadialWindow : Window
 
         SizeToPrimaryScreen();
         Loaded += (_, _) => Rebuild();
-        SizeChanged += (_, _) => Rebuild();
+        SizeChanged += (_, _) => { if (!_suppressRebuild) Rebuild(); };
+
+        _runningTimer = new System.Windows.Threading.DispatcherTimer
+        {
+            Interval = TimeSpan.FromSeconds(1.5),
+        };
+        _runningTimer.Tick += (_, _) => RefreshRunningStates();
     }
 
     private void SizeToPrimaryScreen()
@@ -123,14 +143,7 @@ public partial class RadialWindow : Window
     public void ShowPanel()
     {
         IsPinned = false;
-        SizeToPrimaryScreen();
-        Rebuild();
-        Opacity = 0;
-        Show();
-        Activate();
-        Topmost = true;
-        var fade = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(120));
-        BeginAnimation(OpacityProperty, fade);
+        ShowFaded(pinned: false);
     }
 
     /// <summary>
@@ -139,23 +152,68 @@ public partial class RadialWindow : Window
     /// </summary>
     public void ShowPinned()
     {
+        ShowFaded(pinned: true);
+    }
+
+    /// <summary>True while the overlay is faded in and interactive.</summary>
+    public bool IsShown => _shown;
+
+    /// <summary>
+    /// Realises the transparent overlay once at startup and keeps it shown but
+    /// fully transparent. Re-showing an <c>AllowsTransparency</c> window with
+    /// Hide()/Show() recreates its layered surface and flashes a frame every
+    /// time; staying shown and only fading the opacity avoids that flicker.
+    /// While Opacity is 0 the layered window is fully transparent, so mouse
+    /// clicks pass straight through to the desktop beneath.
+    /// </summary>
+    public void Realize()
+    {
+        if (_realized) return;
+        _realized = true;
+        _suppressRebuild = true;
         SizeToPrimaryScreen();
-        Rebuild();
         Opacity = 0;
-        Show();
-        Activate();
+        Show();                         // one-time; the window then stays shown
+        _suppressRebuild = false;
+        Rebuild();
+        _runningTimer.Stop();           // nothing to poll while hidden
+    }
+
+    /// <summary>
+    /// Fades the already-realised overlay in. No Hide()/Show() is involved, so
+    /// there is no layered-surface flash.
+    /// </summary>
+    private void ShowFaded(bool pinned)
+    {
+        Realize();                      // safety: ensure the window exists
+        _shown = true;
+        if (pinned)
+            IsPinned = true;
+
+        SizeToPrimaryScreen();
+        _suppressRebuild = false;
+        Rebuild();                      // pick up any config changes
         Topmost = true;
-        IsPinned = true;
-        var fade = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(120));
+        Activate();
+        _runningTimer.Start();
+
+        BeginAnimation(OpacityProperty, null);
+        Opacity = 0;
+        var fade = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(240));
         BeginAnimation(OpacityProperty, fade);
     }
 
     public void HidePanel()
     {
+        _shown = false;
         IsPinned = false;
         CancelDrag();
+        _runningTimer.Stop();
+
+        // Fade out instead of hiding; at Opacity 0 the window is click-through.
         BeginAnimation(OpacityProperty, null);
-        Hide();
+        var fade = new DoubleAnimation(Opacity, 0, TimeSpan.FromMilliseconds(200));
+        BeginAnimation(OpacityProperty, fade);
     }
 
     /// <summary>Hides the panel only if it is not pinned (used on key-release).</summary>
@@ -164,6 +222,24 @@ public partial class RadialWindow : Window
         if (!IsPinned)
             HidePanel();
     }
+
+    protected override void OnSourceInitialized(EventArgs e)
+    {
+        base.OnSourceInitialized(e);
+        // Keep the always-shown overlay out of Alt+Tab and the taskbar.
+        var hwnd = new System.Windows.Interop.WindowInteropHelper(this).Handle;
+        int ex = GetWindowLong(hwnd, GWL_EXSTYLE);
+        SetWindowLong(hwnd, GWL_EXSTYLE, ex | WS_EX_TOOLWINDOW);
+    }
+
+    private const int GWL_EXSTYLE = -20;
+    private const int WS_EX_TOOLWINDOW = 0x00000080;
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
 
     protected override void OnKeyDown(KeyEventArgs e)
     {
@@ -197,7 +273,7 @@ public partial class RadialWindow : Window
             Width = pw,
             Height = ph,
             IsHitTestVisible = false,
-            Opacity = 0.88,                   // match the planet's translucency
+            Opacity = 0.78,                   // match the planet's translucency
             RenderTransformOrigin = new Point(0.5, 0.5),
             RenderTransform = _innerOrbit,
         };
@@ -206,7 +282,7 @@ public partial class RadialWindow : Window
             Width = pw,
             Height = ph,
             IsHitTestVisible = false,
-            Opacity = 0.88,                   // match the planet's translucency
+            Opacity = 0.78,                   // match the planet's translucency
             RenderTransformOrigin = new Point(0.5, 0.5),
             RenderTransform = _outerOrbit,
         };
@@ -229,6 +305,33 @@ public partial class RadialWindow : Window
 
         DrawCenterButton();
         StartOrbits();
+        RefreshRunningStates();
+    }
+
+    /// <summary>Updates each icon's flowing-blue running indicator.</summary>
+    private void RefreshRunningStates()
+    {
+        // Enumerate processes on a background thread so the (relatively slow)
+        // snapshot never blocks the UI thread and stutters the light animation.
+        var icons = new List<RadialIcon>(_iconElements);
+        System.Threading.Tasks.Task.Run(() =>
+        {
+            var running = RunningAppTracker.SnapshotRunningWindowNames();
+            Dispatcher.BeginInvoke(() =>
+            {
+                foreach (var icon in icons)
+                {
+                    try
+                    {
+                        icon.IsRunning = RunningAppTracker.IsRunningByName(icon.Entry.Path, running);
+                    }
+                    catch
+                    {
+                        icon.IsRunning = false;
+                    }
+                }
+            });
+        });
     }
 
     /// <summary>Starts (or restarts) the inner/outer ring revolution at periods
@@ -364,10 +467,10 @@ public partial class RadialWindow : Window
             // then the very broad, diffuse E ring fading to the disc edge.
             // (G/E are radially compressed to sit close to F inside the disc.) --
             double gIn = rF + outerIcon * 0.34;            // tighter Roche-to-G gap
-            DrawRingZone(gIn, gIn + icon * 0.06, icyG, 0.16, 0.22, icon * 0.5); // G ring (narrow)
+            DrawRingZone(gIn, gIn + icon * 0.06, icyG, 0.18, 0.25, icon * 0.5); // G ring (narrow)
             double eIn = gIn + icon * 0.18;
             double eOut = r - icon * 0.04;
-            DrawRingZone(eIn, eOut, icyG, 0.13, 0.03, icon);                    // E ring (broad halo)
+            DrawRingZone(eIn, eOut, icyG, 0.147, 0.034, icon);                  // E ring (broad halo)
         }
 
         _ringLayer = null; // subsequent draws (icons, planet) stay on PanelCanvas
@@ -478,7 +581,7 @@ public partial class RadialWindow : Window
             Cursor = Cursors.Hand,
             Background = Brushes.Transparent, // keep the full square hit-testable
             ToolTip = "设置",
-            Opacity = 0.88,                   // planet slightly translucent
+            Opacity = 0.78,                   // planet slightly translucent
             RenderTransformOrigin = new Point(0.5, 0.5),
         };
 
@@ -1210,6 +1313,19 @@ public partial class RadialWindow : Window
     private void Launch(AppEntry entry)
     {
         HidePanel();
+
+        // If the program is already running, bring its existing window to the
+        // foreground instead of starting a second instance.
+        try
+        {
+            if (RunningAppTracker.ActivateExisting(entry.Path))
+                return;
+        }
+        catch
+        {
+            // Fall through to a normal launch if activation fails.
+        }
+
         try
         {
             var psi = new ProcessStartInfo

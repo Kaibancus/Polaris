@@ -6,6 +6,7 @@
         Background="{x:Null}"
         ShowInTaskbar="False"
         Topmost="True"
+        ShowActivated="False"
         ResizeMode="NoResize"
         WindowStartupLocation="Manual"
         AllowDrop="True"

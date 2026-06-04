@@ -26,6 +26,45 @@
                    Source="{Binding IconImage, RelativeSource={RelativeSource AncestorType=UserControl}}"/>
         </Border>
 
+        <!-- Running indicator: a square border washed with a flowing blue light.
+             A bright spot in the gradient sweeps around the edge (driven by a
+             rotating RelativeTransform in code-behind). Hidden unless running.
+             No bitmap effect here so the sweep stays GPU-composited and smooth;
+             the soft glow is provided by a separate static blurred border. -->
+        <Border x:Name="RunningGlowBorder"
+                Width="{Binding IconSize, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                Height="{Binding IconSize, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                CornerRadius="12"
+                BorderThickness="2.5"
+                BorderBrush="#3FA9FF"
+                Opacity="0"
+                IsHitTestVisible="False"
+                Visibility="Collapsed">
+            <Border.Effect>
+                <BlurEffect Radius="10"/>
+            </Border.Effect>
+        </Border>
+        <Border x:Name="RunningBorder"
+                Width="{Binding IconSize, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                Height="{Binding IconSize, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                CornerRadius="12"
+                BorderThickness="2.5"
+                IsHitTestVisible="False"
+                Visibility="Collapsed">
+            <Border.BorderBrush>
+                <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                    <LinearGradientBrush.RelativeTransform>
+                        <RotateTransform x:Name="RunningSweep" CenterX="0.5" CenterY="0.5" Angle="0"/>
+                    </LinearGradientBrush.RelativeTransform>
+                    <GradientStop Color="#103DA9FF" Offset="0.0"/>
+                    <GradientStop Color="#6657C8FF" Offset="0.28"/>
+                    <GradientStop Color="#FF6FD3FF" Offset="0.5"/>
+                    <GradientStop Color="#6657C8FF" Offset="0.72"/>
+                    <GradientStop Color="#103DA9FF" Offset="1.0"/>
+                </LinearGradientBrush>
+            </Border.BorderBrush>
+        </Border>
+
         <!-- Name label. Hosted on a zero-size Canvas so it never affects the
              icon's measured size / centering. Positioned + sized in code-behind.
              Hidden by default, fades in on hover. -->
