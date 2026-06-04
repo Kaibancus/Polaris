@@ -26,7 +26,14 @@ public sealed class AppSettings
     public double IconSize { get; set; } = 56;
 
     /// <summary>Maximum icons allowed on a single ring.</summary>
-    public int MaxIconsPerRing { get; set; } = 13;
+    public int MaxIconsPerRing { get; set; } = 12;
+
+    /// <summary>
+    /// Number of icons on the inner ring. 0 = auto (fill the inner ring up to
+    /// 12, remaining icons go to the outer ring). Adjusted as the user drags
+    /// icons between the two rings.
+    /// </summary>
+    public int Ring0Count { get; set; } = 0;
 
     /// <summary>
     /// Virtual-key code of the hold-to-show trigger key. Default 0xA5 (Right Alt).

@@ -29,6 +29,13 @@ public partial class App : Application
     {
         base.OnStartup(e);
 
+        // Render every WPF animation at a steady 60 fps. Overriding the default
+        // metadata of the Timeline.DesiredFrameRate attached property applies
+        // this globally to all animations in the app.
+        System.Windows.Media.Animation.Timeline.DesiredFrameRateProperty.OverrideMetadata(
+            typeof(System.Windows.Media.Animation.Timeline),
+            new FrameworkPropertyMetadata(60));
+
         // Single-instance guard: if another DesktopPanel is already running,
         // notify the user and exit immediately.
         _singleInstanceMutex = new Mutex(true, @"Global\DesktopPanel_SingleInstance", out bool createdNew);
