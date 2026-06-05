@@ -46,8 +46,12 @@ BundleArtifacts/
 *.msixbundle
 [Pp]ublish/
 publish-fd/
+publish-sc/
 publish.xml
 *.pubxml.user
+
+# Release artifacts
+Polaris-v*.zip
 
 # Test results
 [Tt]est[Rr]esult*/
