@@ -577,6 +577,16 @@ public partial class RadialWindow : Window
             AddSpoke(rAin, rAout, _outerOrbit, phaseDeg: 210, widthDeg: 5.0, alpha: 0.16);
             AddRingBlob(rAmid, _outerOrbit, phaseDeg: 150, rx: rAmid * 0.13, ry: rAmid * 0.04,
                         color: Lighten(tanA, 0.30), alpha: 0.16);
+
+            // --- Saturn's shepherd moons: five faint bright points embedded in
+            // the rings, each at its real ring location, revolving with the
+            // outer orbit so they sweep along the ring plane.
+            double moonD = Math.Max(2.2, icon * 0.05);
+            AddMoon(MapR(REncke), _outerOrbit, phaseDeg: 18, dia: moonD);                 // Pan (Encke gap)
+            AddMoon(MapR(RAout) - icon * 0.05, _outerOrbit, phaseDeg: 104, dia: moonD * 0.85); // Daphnis (Keeler gap)
+            AddMoon(MapR(RAout) + icon * 0.09, _outerOrbit, phaseDeg: 200, dia: moonD * 1.05); // Atlas (A ring edge)
+            AddMoon(rF - icon * 0.10, _outerOrbit, phaseDeg: 286, dia: moonD * 1.15);     // Prometheus (inner F)
+            AddMoon(rF + icon * 0.10, _outerOrbit, phaseDeg: 330, dia: moonD);            // Pandora (outer F)
         }
 
 
@@ -758,6 +768,42 @@ public partial class RadialWindow : Window
         (byte)Math.Clamp(c.G + 4, 0, 255),
         (byte)Math.Clamp(c.B - 16, 0, 255));
 
+    /// <summary>Adds a faint shepherd-moon point on the ring at <paramref name="radius"/>
+    /// and <paramref name="phaseDeg"/>: a tiny bright core wrapped in a soft glow,
+    /// revolved with <paramref name="orbit"/> and tilted into the ring plane.</summary>
+    private void AddMoon(double radius, RotateTransform orbit, double phaseDeg, double dia)
+    {
+        var center = new Point(_center.X + radius, _center.Y);
+
+        // Soft glow halo.
+        var halo = new System.Windows.Shapes.Path
+        {
+            IsHitTestVisible = false,
+            Fill = new RadialGradientBrush
+            {
+                GradientStops =
+                {
+                    new GradientStop(Color.FromArgb(95, 0xFF, 0xF6, 0xE2), 0.0),
+                    new GradientStop(Color.FromArgb(0, 0xFF, 0xF6, 0xE2), 1.0),
+                },
+            },
+            Data = new EllipseGeometry(center, dia * 1.9, dia * 1.9),
+            Effect = new System.Windows.Media.Effects.BlurEffect { Radius = 1.6 },
+        };
+        halo.RenderTransform = RingRevolveTransform(orbit, phaseDeg);
+        (_ringLayer ?? PanelCanvas).Children.Add(halo);
+
+        // Bright core.
+        var core = new System.Windows.Shapes.Path
+        {
+            IsHitTestVisible = false,
+            Fill = new SolidColorBrush(Color.FromArgb(200, 0xFF, 0xFB, 0xF0)),
+            Data = new EllipseGeometry(center, dia * 0.5, dia * 0.5),
+        };
+        core.RenderTransform = RingRevolveTransform(orbit, phaseDeg);
+        (_ringLayer ?? PanelCanvas).Children.Add(core);
+    }
+
     /// <summary>
     /// Draws one named Saturn ring zone as a dense stack of concentric particle
     /// strokes from <paramref name="rInner"/> to <paramref name="rOuter"/>, with
@@ -920,9 +966,9 @@ public partial class RadialWindow : Window
         root.Effect = new System.Windows.Media.Effects.DropShadowEffect
         {
             Color = Colors.Black,
-            BlurRadius = 22,
+            BlurRadius = 12,
             ShadowDepth = 0,
-            Opacity = 0.55,
+            Opacity = 0.5,
         };
 
         Color amber = Color.FromRgb(0xE2, 0xBE, 0x82);
@@ -1087,12 +1133,12 @@ public partial class RadialWindow : Window
 
         // Base hexagon: a brighter blue-grey storm so it stands out from the
         // amber bands without being a dark hole.
-        Color hexBase = Color.FromRgb(0x5C, 0x6B, 0x7E);
-        Color hexLight = Color.FromRgb(0x86, 0x97, 0xAC);
-        Color hexDark = Color.FromRgb(0x3C, 0x47, 0x57);
+        Color hexBase = Color.FromRgb(0x66, 0x6E, 0x72);
+        Color hexLight = Color.FromRgb(0x93, 0x9A, 0x98);
+        Color hexDark = Color.FromRgb(0x45, 0x49, 0x4C);
         var hex = new System.Windows.Shapes.Path
         {
-            Stroke = new SolidColorBrush(Color.FromArgb(180, 0x9A, 0xAB, 0xC0)),
+            Stroke = new SolidColorBrush(Color.FromArgb(180, 0xAE, 0xB2, 0xA8)),
             StrokeThickness = Math.Max(1.0, size * 0.012),
             Fill = new SolidColorBrush(hexBase),
             Data = hexGeo,
@@ -1197,9 +1243,9 @@ public partial class RadialWindow : Window
                 GradientStops =
                 {
                     new GradientStop(Color.FromArgb(0, 0, 0, 0), 0.0),
-                    new GradientStop(Color.FromArgb(0, 0, 0, 0), 0.52),
-                    new GradientStop(Color.FromArgb(120, 0x16, 0x0D, 0x04), 0.84),
-                    new GradientStop(Color.FromArgb(225, 0x0C, 0x07, 0x02), 1.0),
+                    new GradientStop(Color.FromArgb(0, 0, 0, 0), 0.74),
+                    new GradientStop(Color.FromArgb(110, 0x16, 0x0D, 0x04), 0.92),
+                    new GradientStop(Color.FromArgb(235, 0x0C, 0x07, 0x02), 1.0),
                 },
             },
         };
