@@ -36,10 +36,6 @@ public partial class SettingsWindow : Window
         ("F12", 0x7B),
     };
 
-    private static readonly string[] ThemeOptions =
-    {
-        "土星（默认）",
-    };
 
     public SettingsWindow(AppConfig config, Action persist)
     {
@@ -60,14 +56,29 @@ public partial class SettingsWindow : Window
         IconSizeSlider.Value = s.IconSize;
         StartupCheck.IsChecked = StartupManager.IsEnabled() || s.RunAtStartup;
 
-        foreach (var name in ThemeOptions)
-            ThemeCombo.Items.Add(new ComboBoxItem { Content = name });
-        ThemeCombo.SelectedIndex = 0;
+        foreach (var theme in ThemeRegistry.All)
+            ThemeCombo.Items.Add(new ComboBoxItem { Content = theme.DisplayName, Tag = theme.Id });
+        SelectTheme(s.Theme);
 
         foreach (var opt in TriggerKeyOptions)
             TriggerKeyCombo.Items.Add(new ComboBoxItem { Content = opt.Name, Tag = opt.Vk });
         SelectTriggerKey(s.TriggerKey);
         UpdateHint();
+    }
+
+    private void SelectTheme(string id)
+    {
+        foreach (ComboBoxItem item in ThemeCombo.Items)
+        {
+            if (item.Tag is string tid &&
+                string.Equals(tid, id, StringComparison.OrdinalIgnoreCase))
+            {
+                ThemeCombo.SelectedItem = item;
+                return;
+            }
+        }
+        if (ThemeCombo.Items.Count > 0)
+            ThemeCombo.SelectedIndex = 0;
     }
 
     private void SelectTriggerKey(int vk)
@@ -203,7 +214,14 @@ public partial class SettingsWindow : Window
 
     private void OnThemeChanged(object sender, SelectionChangedEventArgs e)
     {
-        // TODO: apply the selected theme. Only the default Saturn theme exists.
+        if (!_loaded)
+            return;
+        if (ThemeCombo.SelectedItem is ComboBoxItem item && item.Tag is string id)
+        {
+            _config.Settings.Theme = id;
+            _persist();
+            Changed?.Invoke();
+        }
     }
 
     private void OnCheckUpdate(object sender, RoutedEventArgs e)

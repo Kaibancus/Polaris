@@ -156,7 +156,8 @@ public partial class App : Application
         _settings = new SettingsWindow(_config, Persist);
         _settings.Changed += () =>
         {
-            // No-op: the panel rebuilds itself from _config on next show.
+            // Re-render the panel so theme / layout / size changes apply live.
+            _panel?.RefreshFromConfig();
         };
         _settings.TriggerKeyChanged += RebuildHook;
         _settings.Closed += (_, _) => _settings = null;

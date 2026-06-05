@@ -67,6 +67,9 @@ public partial class RadialWindow : Window
     private readonly Action _persist;
     private readonly Dictionary<string, BitmapSource?> _iconCache = new();
 
+    // Active visual theme (layout + background). Resolved from config on Rebuild.
+    private PanelTheme _theme = ThemeRegistry.Get("saturn");
+
     // Periodically refreshes each icon's running indicator while the panel is shown.
     private readonly System.Windows.Threading.DispatcherTimer _runningTimer;
 
@@ -308,51 +311,128 @@ public partial class RadialWindow : Window
     private void Rebuild()
     {
         UpdateCenter();
+
+        // Resolve the active theme from config each rebuild so switching the
+        // theme in settings takes effect on the next render.
+        _theme = ThemeRegistry.Get(_config.Settings.Theme);
+        RootGrid.Background = _theme.WindowBackground;
+
         PanelCanvas.Children.Clear();
         _iconElements.Clear();
         _hoverIcon = null;
-        ComputeLayout(_config.Apps.Count);
 
-        // Two rotating layers that carry the ring bands so the inner and outer
-        // ring groups revolve about the planet at real Saturn proportions. The
-        // layers span the whole panel so their rotation centre (0.5,0.5)
-        // coincides with the panel centre. Icons are NOT placed on these layers.
-        double pw = _center.X * 2.0;
-        double ph = _center.Y * 2.0;
-        _innerOrbitLayer = new Canvas
+        // --- Layout (theme-driven) -------------------------------------------
+        if (_theme.IsSaturn)
         {
-            Width = pw,
-            Height = ph,
-            IsHitTestVisible = false,
-            Opacity = 0.78,                   // match the planet's translucency
-        };
-        _outerOrbitLayer = new Canvas
+            ComputeLayout(_config.Apps.Count);
+        }
+        else
         {
-            Width = pw,
-            Height = ph,
-            IsHitTestVisible = false,
-            Opacity = 0.78,                   // match the planet's translucency
-        };
-        PanelCanvas.Children.Add(_innerOrbitLayer);
-        PanelCanvas.Children.Add(_outerOrbitLayer);
+            _slotPositions.Clear();
+            _slotPositions.AddRange(_theme.ComputeSlots(
+                _config.Apps.Count, _center, _config.Settings, out _outerRadius));
+        }
 
-        DrawBackingDisc();
+        // --- Background / animation (Saturn only) ----------------------------
+        if (_theme.IsSaturn)
+        {
+            // Two rotating layers that carry the ring bands so the inner and
+            // outer ring groups revolve about the planet at real Saturn
+            // proportions. The layers span the whole panel so their rotation
+            // centre (0.5,0.5) coincides with the panel centre. Icons are NOT
+            // placed on these layers.
+            double pw = _center.X * 2.0;
+            double ph = _center.Y * 2.0;
+            _innerOrbitLayer = new Canvas
+            {
+                Width = pw,
+                Height = ph,
+                IsHitTestVisible = false,
+                Opacity = 0.78,                   // match the planet's translucency
+            };
+            _outerOrbitLayer = new Canvas
+            {
+                Width = pw,
+                Height = ph,
+                IsHitTestVisible = false,
+                Opacity = 0.78,                   // match the planet's translucency
+            };
+            PanelCanvas.Children.Add(_innerOrbitLayer);
+            PanelCanvas.Children.Add(_outerOrbitLayer);
 
-        int r0 = EffectiveRing0Count(_config.Apps.Count);
-        for (int i = 0; i < _config.Apps.Count; i++)
+            DrawBackingDisc();
+        }
+        else
+        {
+            _innerOrbitLayer = null;
+            _outerOrbitLayer = null;
+        }
+
+        int r0 = _theme.IsSaturn ? EffectiveRing0Count(_config.Apps.Count) : int.MaxValue;
+        for (int i = 0; i < _config.Apps.Count && i < _slotPositions.Count; i++)
         {
             var entry = _config.Apps[i];
-            double size = i < r0 ? _config.Settings.IconSize
-                                 : _config.Settings.IconSize * OuterIconScale;
+            double size = (_theme.IsSaturn && i >= r0)
+                ? _config.Settings.IconSize * OuterIconScale
+                : _config.Settings.IconSize;
             var icon = CreateIcon(entry, size);
             PlaceCentered(icon, _slotPositions[i]);
             PanelCanvas.Children.Add(icon);
             _iconElements.Add(icon);
         }
 
-        DrawCenterButton();
-        StartOrbits();
+        if (_theme.IsSaturn)
+        {
+            DrawCenterButton();
+            StartOrbits();
+        }
+        else
+        {
+            DrawSimpleCenterButton();
+        }
+
         RefreshRunningStates();
+    }
+
+    /// <summary>Refreshes the panel from the current config (e.g. after the
+    /// theme or icon size changes in settings).</summary>
+    public void RefreshFromConfig()
+    {
+        if (IsLoaded)
+            Rebuild();
+    }
+
+    /// <summary>A minimal centre control used by non-Saturn themes: a small
+    /// circular button (placed above the grid) that opens settings.</summary>
+    private void DrawSimpleCenterButton()
+    {
+        double s = Math.Max(34, _config.Settings.IconSize * 0.7);
+        var btn = new Border
+        {
+            Width = s,
+            Height = s,
+            CornerRadius = new CornerRadius(s / 2),
+            Background = new SolidColorBrush(Color.FromArgb(0x22, 0x20, 0x20, 0x20)),
+            BorderBrush = new SolidColorBrush(Color.FromArgb(0x55, 0x60, 0x60, 0x60)),
+            BorderThickness = new Thickness(1),
+            Cursor = System.Windows.Input.Cursors.Hand,
+            Child = new TextBlock
+            {
+                Text = "⚙",
+                FontSize = s * 0.5,
+                Foreground = new SolidColorBrush(Color.FromArgb(0xCC, 0x33, 0x33, 0x33)),
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+            },
+        };
+        btn.MouseLeftButtonUp += (_, e) => { e.Handled = true; RequestOpenSettings?.Invoke(); };
+
+        // Place it above the grid so it never overlaps the icon cells.
+        double gridTop = _center.Y - 2 * (_config.Settings.IconSize * 2.1);
+        Canvas.SetLeft(btn, _center.X - s / 2);
+        Canvas.SetTop(btn, gridTop - s - _config.Settings.IconSize * 0.6);
+        Panel.SetZIndex(btn, 2000);
+        PanelCanvas.Children.Add(btn);
     }
 
     /// <summary>Updates each icon's flowing-blue running indicator.</summary>
@@ -1508,7 +1588,9 @@ public partial class RadialWindow : Window
 
         // Push other icons aside to reveal the slot the dragged icon is over.
         // Skip while the icon is dragged out past the outer ring (delete zone).
-        if (dist <= DeleteRadius)
+        // Only the Saturn ring layout supports live reorder; the grid test theme
+        // keeps drag-to-launch and drag-out-to-delete but no live reflow.
+        if (_theme.IsSaturn && dist <= DeleteRadius)
         {
             int src = _iconElements.IndexOf(_pressedIcon);
             var (ring, pos) = ComputeDragTarget(p, src);
@@ -1862,14 +1944,21 @@ public partial class RadialWindow : Window
         {
             DeleteEntry(icon.Entry);
         }
-        else
+        else if (_theme.IsSaturn)
         {
             CommitArrangement(icon.Entry, ring, pos, p);
+        }
+        else
+        {
+            // Grid test theme: no reorder — snap the dragged icon back.
+            Rebuild();
         }
     }
 
     /// <summary>Distance past the outer ring beyond which a dropped icon is deleted.</summary>
-    private double DeleteRadius => InnerRadius + RingStep + _config.Settings.IconSize * 1.25;
+    private double DeleteRadius => _theme.IsSaturn
+        ? InnerRadius + RingStep + _config.Settings.IconSize * 1.25
+        : _outerRadius + _config.Settings.IconSize * 0.8;
 
     private void CommitArrangement(AppEntry entry, int ring, int pos, Point dropPoint)
     {

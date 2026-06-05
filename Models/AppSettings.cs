@@ -19,6 +19,11 @@ public sealed class AppSettings
     /// <summary>Icon label font color (hex).</summary>
     public string FontColor { get; set; } = "#FFFFFF";
 
+    /// <summary>Active visual theme id (see <c>ThemeRegistry</c>). Controls the
+    /// icon layout and the panel background/animation. Global effects (icon
+    /// hover zoom, running-app glow) are independent of the theme.</summary>
+    public string Theme { get; set; } = "saturn";
+
     /// <summary>Whether to launch on Windows startup.</summary>
     public bool RunAtStartup { get; set; } = true;
 
