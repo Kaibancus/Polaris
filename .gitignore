@@ -45,6 +45,7 @@ BundleArtifacts/
 *.msix
 *.msixbundle
 [Pp]ublish/
+publish-fd/
 publish.xml
 *.pubxml.user
 
