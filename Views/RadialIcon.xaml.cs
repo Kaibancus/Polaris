@@ -254,7 +254,17 @@ public partial class RadialIcon : UserControl
         ClosePopupUi();
         _tileHosts.Clear();
 
-        var strip = new StackPanel { Orientation = Orientation.Horizontal };
+        // Lay tiles out in a wrapping grid so ALL windows are visible (a single
+        // horizontal row would overflow the popup width and, with the scrollbar
+        // hidden, silently clip the extra tiles). Cap the row width at up to 5
+        // columns; further windows wrap onto additional rows.
+        const double TileWidth = PreviewThumbWidth + 24; // 220 content + padding + margin
+        int columns = Math.Min(windows.Count, 5);
+        var strip = new System.Windows.Controls.WrapPanel
+        {
+            Orientation = Orientation.Horizontal,
+            MaxWidth = Math.Max(1, columns) * TileWidth,
+        };
         foreach (var w in windows)
             strip.Children.Add(BuildTile(w));
 
@@ -274,9 +284,9 @@ public partial class RadialIcon : UserControl
             },
             Child = new ScrollViewer
             {
-                HorizontalScrollBarVisibility = ScrollBarVisibility.Hidden,
-                VerticalScrollBarVisibility = ScrollBarVisibility.Disabled,
-                MaxWidth = 920,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                MaxHeight = 720,
                 Content = strip,
             },
         };
