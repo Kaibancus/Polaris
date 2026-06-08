@@ -160,6 +160,13 @@ public static class WindowPreviewService
                 _thumbCache.TryRemove(key, out _);
     }
 
+    /// <summary>Returns the last captured thumbnail for this window from the
+    /// cache without performing a (slow) fresh PrintWindow capture, or null if
+    /// none is cached yet. Lets the preview popup render instantly with the
+    /// previous frame while a fresh capture runs in the background.</summary>
+    public static BitmapSource? TryGetCachedThumbnail(IntPtr hWnd)
+        => _thumbCache.TryGetValue(hWnd, out var cached) ? cached : null;
+
     /// <summary>
     /// Captures a still bitmap of the window, scaled so its width is at most
     /// <paramref name="maxWidth"/>. Returns a frozen <see cref="BitmapSource"/>

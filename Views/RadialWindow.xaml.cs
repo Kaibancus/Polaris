@@ -37,7 +37,7 @@ public partial class RadialWindow : Window
 
     // Extra per-theme scale applied on top of _uiScale. The Saturn theme is
     // drawn larger overall than the grid themes; 1.0 for everything else.
-    private const double SaturnEnlarge = 1.12;
+    private const double SaturnEnlarge = 1.10;
     private double _themeScale = 1.0;
 
     // Ring radii scaled by the current resolution + theme factors.

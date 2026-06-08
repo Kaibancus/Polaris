@@ -160,6 +160,10 @@ public partial class RadialIcon : UserControl
     private bool _pointerInPopup;
     private int _previewToken;
 
+    // Maps a window handle to its tile's thumbnail host so a background capture
+    // can swap in the fresh image once it finishes.
+    private readonly Dictionary<IntPtr, Border> _tileHosts = new();
+
     private void OnOpenTimerTick(object? sender, EventArgs e)
     {
         _openTimer.Stop();
@@ -177,8 +181,12 @@ public partial class RadialIcon : UserControl
             // Only worth a preview for genuinely multi-window apps.
             if (windows.Count < 2)
                 return;
+
+            // Seed each tile with any thumbnail we already cached from a previous
+            // hover so the popup can pop up INSTANTLY (after the open delay)
+            // instead of waiting for every slow PrintWindow capture to finish.
             foreach (var w in windows)
-                w.Thumbnail = WindowPreviewService.CaptureThumbnail(w.Handle, PreviewThumbWidth);
+                w.Thumbnail = WindowPreviewService.TryGetCachedThumbnail(w.Handle);
 
             Dispatcher.BeginInvoke(() =>
             {
@@ -186,6 +194,23 @@ public partial class RadialIcon : UserControl
                     return;
                 ShowPreview(windows);
             });
+
+            // Capture fresh frames in the background and swap each tile's image
+            // in as it completes, so a stale/empty tile updates without blocking
+            // the popup's appearance.
+            foreach (var w in windows)
+            {
+                var fresh = WindowPreviewService.CaptureThumbnail(w.Handle, PreviewThumbWidth);
+                if (fresh == null)
+                    continue;
+                IntPtr handle = w.Handle;
+                Dispatcher.BeginInvoke(() =>
+                {
+                    if (token != _previewToken)
+                        return;
+                    UpdateTileThumbnail(handle, fresh);
+                });
+            }
         });
     }
 
@@ -198,7 +223,11 @@ public partial class RadialIcon : UserControl
 
     private void ShowPreview(List<WindowPreview> windows)
     {
-        ClosePreview();
+        // Close any existing popup UI WITHOUT bumping _previewToken — the
+        // background capture loop that opened this preview is still running and
+        // matches the current token; bumping here would reject its tile updates.
+        ClosePopupUi();
+        _tileHosts.Clear();
 
         var strip = new StackPanel { Orientation = Orientation.Horizontal };
         foreach (var w in windows)
@@ -262,6 +291,7 @@ public partial class RadialIcon : UserControl
             Background = new SolidColorBrush(Color.FromArgb(0xFF, 0x2A, 0x2A, 0x2A)),
             ClipToBounds = true,
         };
+        _tileHosts[w.Handle] = thumbHost;
         if (w.Thumbnail != null)
         {
             thumbHost.Child = new Image
@@ -318,6 +348,21 @@ public partial class RadialIcon : UserControl
         return tile;
     }
 
+    /// <summary>Swaps a freshly-captured thumbnail into its tile (called on the
+    /// UI thread once a background capture finishes).</summary>
+    private void UpdateTileThumbnail(IntPtr handle, BitmapSource thumb)
+    {
+        if (!_tileHosts.TryGetValue(handle, out var host))
+            return;
+        host.Child = new Image
+        {
+            Source = thumb,
+            Stretch = Stretch.Uniform,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+    }
+
     /// <summary>Closes and disposes the preview popup if it is open.</summary>
     public void ClosePreview()
     {
@@ -325,6 +370,15 @@ public partial class RadialIcon : UserControl
         _openTimer.Stop();
         _closeTimer.Stop();
         _pointerInPopup = false;
+        ClosePopupUi();
+    }
+
+    /// <summary>Tears down the popup window only, leaving _previewToken and the
+    /// timers untouched (used by ShowPreview when replacing a prior popup while
+    /// the same capture batch keeps streaming in fresh thumbnails).</summary>
+    private void ClosePopupUi()
+    {
+        _tileHosts.Clear();
         if (_previewPopup != null)
         {
             _previewPopup.IsOpen = false;
