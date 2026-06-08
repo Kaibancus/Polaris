@@ -135,17 +135,17 @@ public partial class App : Application
 
     /// <summary>
     /// Dedicated global hotkeys for the pinned (drag-to-add) panel:
-    /// press Ctrl+2 to summon it, press Esc to dismiss it. The '2' key is
-    /// swallowed only while Ctrl is held, so a normal '2' keystroke is
+    /// press Ctrl+4 to summon it, press Esc to dismiss it. The '4' key is
+    /// swallowed only while Ctrl is held, so a normal '4' keystroke is
     /// unaffected.
     /// </summary>
     private void SetupPinnedHooks()
     {
-        const int VK_2 = 0x32;
+        const int VK_4 = 0x34;
         const int VK_ESCAPE = 0x1B;
 
-        // Ctrl+2 pops the pinned panel immediately.
-        _pinnedHook = new KeyboardHook(VK_2, suppressKey: true, requireCtrl: true);
+        // Ctrl+4 pops the pinned panel immediately.
+        _pinnedHook = new KeyboardHook(VK_4, suppressKey: true, requireCtrl: true);
         _pinnedHook.KeyPressed += () => _panel?.ShowPinned();
         _pinnedHook.Start();
 
@@ -194,7 +194,7 @@ public partial class App : Application
         {
             Icon = LoadAppIcon(),
             Visible = true,
-            Text = "Polaris — 长按呼出键临时显示 / Ctrl+2 固定显示（Esc关闭）",
+            Text = "Polaris — 长按呼出键临时显示 / Ctrl+4 固定显示（Esc关闭）",
             ContextMenuStrip = menu,
         };
         _tray.DoubleClick += (_, _) => OpenSettings();
