@@ -90,19 +90,15 @@ public sealed class KeyboardHook : IDisposable
         {
             int msg = (int)wParam;
             int vk = Marshal.ReadInt32(lParam); // KBDLLHOOKSTRUCT.vkCode is first field
-            int flags = Marshal.ReadInt32(lParam + 8); // KBDLLHOOKSTRUCT.flags
-
-            // Ignore synthetic/injected keystrokes (e.g. our own Caps Lock
-            // compensation) so they do not re-trigger the hook.
-            const int LLKHF_INJECTED = 0x10;
-            if ((flags & LLKHF_INJECTED) != 0)
-                return CallNextHookEx(_hookId, nCode, wParam, lParam);
 
             if (vk == _triggerVk)
             {
                 // For a Ctrl+key chord, only react while a Ctrl key is held.
+                // GetAsyncKeyState reads the real-time key state, which stays
+                // accurate even when the chord is injected (e.g. a trackpad
+                // gesture remapped to Ctrl+4) rather than physically typed.
                 bool ctrlOk = !_requireCtrl ||
-                    (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+                    (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
 
                 if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN)
                 {
@@ -154,7 +150,7 @@ public sealed class KeyboardHook : IDisposable
     private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
 
     [DllImport("user32.dll")]
-    private static extern short GetKeyState(int nVirtKey);
+    private static extern short GetAsyncKeyState(int nVirtKey);
 
     [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
     private static extern IntPtr GetModuleHandle(string? lpModuleName);
