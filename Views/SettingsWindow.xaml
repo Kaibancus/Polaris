@@ -70,11 +70,11 @@
                     <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
 
-                <TextBlock Grid.Row="0" Grid.Column="0" x:Name="TransparencyLabel" Text="面板透明度" Margin="0,4,8,4"/>
+                <TextBlock Grid.Row="0" Grid.Column="0" x:Name="TransparencyLabel" Text="面板透明度" Width="120" Margin="0,4,8,4"/>
                 <Slider Grid.Row="0" Grid.Column="1" x:Name="TransparencySlider" Minimum="0.0" Maximum="0.95"
                         VerticalAlignment="Center" Margin="0,4" ValueChanged="OnSettingChanged"/>
 
-                <TextBlock Grid.Row="0" Grid.Column="2" x:Name="IconSizeLabel" Text="图标大小" Margin="12,4,8,4"/>
+                <TextBlock Grid.Row="0" Grid.Column="2" x:Name="IconSizeLabel" Text="图标大小" Width="104" Margin="12,4,8,4"/>
                 <Slider Grid.Row="0" Grid.Column="3" x:Name="IconSizeSlider" Minimum="40" Maximum="96"
                         VerticalAlignment="Center" Margin="0,4" ValueChanged="OnSettingChanged"/>
 
