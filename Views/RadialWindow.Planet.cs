@@ -474,8 +474,8 @@ public partial class RadialWindow
         // Hover: snap up to speed quickly (short ramp) so the planet visibly
         // accelerates the instant the cursor lands on it. Leaving uses the long
         // gentle ramp to coast back down.
-        root.MouseEnter += (_, _) => StartSpin(3.0, rampTime: 0.18);
-        root.MouseLeave += (_, _) => StartSpin(PlanetSpinSeconds, rampTime: 0.9);
+        root.MouseEnter += (_, _) => StartSpin(3.0, rampTime: 0.24);
+        root.MouseLeave += (_, _) => StartSpin(PlanetSpinSeconds, rampTime: 0.72);
 
         root.MouseLeftButtonUp += (_, e) =>
         {
