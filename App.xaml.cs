@@ -37,13 +37,18 @@ public partial class App : Application
 
         // Render WPF animations at the display's native refresh rate. The
         // default metadata under-samples short transitions (they look "slow
-        // motion"), but forcing a fixed 120 over-samples on a 60 Hz panel —
-        // the render thread advances every animation twice per displayed frame,
-        // wasting half its budget (the same thread the Saturn spin and hover
-        // scale compete for). Matching the actual refresh rate keeps motion
-        // smooth on high-refresh panels while removing the wasted work on 60 Hz,
-        // which is visually lossless.
-        int refreshHz = (int)Math.Clamp(GetPrimaryRefreshRate(), 60, 240);
+        // motion"), but the choice of value interacts subtly with the display's
+        // ACTUAL refresh, which is never an exact integer (a "60 Hz" panel runs
+        // at 59.94 Hz). Ticking the timeline at exactly 60 against a 59.94 Hz
+        // present makes the two beat against each other, periodically dropping or
+        // doubling a frame -> visible judder that reads as a frame-rate drop.
+        // Over-sampling at ~2x the refresh puts two animation samples in every
+        // presented frame, halving that sampling error and masking the beat, so
+        // motion looks markedly smoother on 60 Hz panels. Genuine high-refresh
+        // panels (>=90 Hz) already present fast enough that the beat is invisible,
+        // so we drive the timeline at their native rate there.
+        int hz = (int)Math.Clamp(GetPrimaryRefreshRate(), 60, 240);
+        int refreshHz = hz < 90 ? Math.Min(hz * 2, 240) : hz;  // 60->120, 144->144
         System.Windows.Media.Animation.Timeline.DesiredFrameRateProperty.OverrideMetadata(
             typeof(System.Windows.Media.Animation.Timeline),
             new FrameworkPropertyMetadata(refreshHz));
