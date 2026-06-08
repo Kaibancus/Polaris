@@ -22,9 +22,11 @@ public sealed class KeyboardHook : IDisposable
     private const int WM_KEYUP = 0x0101;
     private const int WM_SYSKEYDOWN = 0x0104;
     private const int WM_SYSKEYUP = 0x0105;
+    private const int VK_CONTROL = 0x11;
 
     private readonly int _triggerVk;
     private readonly bool _suppress;
+    private readonly bool _requireCtrl;
     private readonly LowLevelKeyboardProc _proc;
     private readonly Dispatcher _dispatcher;
     private IntPtr _hookId = IntPtr.Zero;
@@ -33,10 +35,13 @@ public sealed class KeyboardHook : IDisposable
     /// <param name="triggerVirtualKey">Virtual-key code, e.g. 0x78 for F9.</param>
     /// <param name="suppressKey">When true the trigger key is swallowed so it does
     /// not reach other applications (e.g. to stop Caps Lock from toggling).</param>
-    public KeyboardHook(int triggerVirtualKey, bool suppressKey = false)
+    /// <param name="requireCtrl">When true the press only fires while either Ctrl
+    /// key is held down, turning the trigger into a Ctrl+key chord.</param>
+    public KeyboardHook(int triggerVirtualKey, bool suppressKey = false, bool requireCtrl = false)
     {
         _triggerVk = triggerVirtualKey;
         _suppress = suppressKey;
+        _requireCtrl = requireCtrl;
         _proc = HookCallback;
         _dispatcher = Dispatcher.CurrentDispatcher;
     }
@@ -95,9 +100,13 @@ public sealed class KeyboardHook : IDisposable
 
             if (vk == _triggerVk)
             {
+                // For a Ctrl+key chord, only react while a Ctrl key is held.
+                bool ctrlOk = !_requireCtrl ||
+                    (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+
                 if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN)
                 {
-                    if (!_isDown)
+                    if (!_isDown && ctrlOk)
                     {
                         _isDown = true;
                         _dispatcher.BeginInvoke(() => KeyPressed?.Invoke());
@@ -114,7 +123,7 @@ public sealed class KeyboardHook : IDisposable
 
                 // Swallow the key so it never reaches other apps (prevents the
                 // Caps Lock LED/state from toggling when used as a trigger).
-                if (_suppress)
+                if (_suppress && _isDown)
                     return (IntPtr)1;
             }
         }
@@ -143,6 +152,9 @@ public sealed class KeyboardHook : IDisposable
 
     [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
     private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    private static extern short GetKeyState(int nVirtKey);
 
     [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
     private static extern IntPtr GetModuleHandle(string? lpModuleName);

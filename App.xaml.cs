@@ -20,7 +20,6 @@ public partial class App : Application
     private KeyboardHook? _hook;
     private KeyboardHook? _pinnedHook;
     private KeyboardHook? _escHook;
-    private DispatcherTimer? _capsHoldTimer;
     private RadialWindow? _panel;
     private SettingsWindow? _settings;
     private Forms.NotifyIcon? _tray;
@@ -136,34 +135,18 @@ public partial class App : Application
 
     /// <summary>
     /// Dedicated global hotkeys for the pinned (drag-to-add) panel:
-    /// hold Caps Lock to summon it, press Esc to dismiss it. Caps is NOT
-    /// swallowed, so a quick tap still toggles Caps Lock normally; only a
-    /// deliberate long press (>= the hold delay) pops the panel, and we undo the
-    /// single toggle that the physical key-down caused so Caps state is unchanged.
+    /// press Ctrl+1 to summon it, press Esc to dismiss it. The '1' key is
+    /// swallowed only while Ctrl is held, so a normal '1' keystroke is
+    /// unaffected.
     /// </summary>
     private void SetupPinnedHooks()
     {
-        const int VK_CAPITAL = 0x14;
+        const int VK_1 = 0x31;
         const int VK_ESCAPE = 0x1B;
 
-        // Caps must be held this long before the pinned panel pops up.
-        _capsHoldTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(600) };
-        _capsHoldTimer.Tick += (_, _) =>
-        {
-            _capsHoldTimer!.Stop();
-            // The physical key-down already toggled Caps Lock; flip it back so a
-            // long hold leaves the Caps state untouched.
-            ToggleCapsLock();
-            _panel?.ShowPinned();
-        };
-
-        _pinnedHook = new KeyboardHook(VK_CAPITAL);
-        _pinnedHook.KeyPressed += () =>
-        {
-            _capsHoldTimer!.Stop();
-            _capsHoldTimer.Start();
-        };
-        _pinnedHook.KeyReleased += () => _capsHoldTimer!.Stop();
+        // Ctrl+1 pops the pinned panel immediately.
+        _pinnedHook = new KeyboardHook(VK_1, suppressKey: true, requireCtrl: true);
+        _pinnedHook.KeyPressed += () => _panel?.ShowPinned();
         _pinnedHook.Start();
 
         _escHook = new KeyboardHook(VK_ESCAPE);
@@ -174,18 +157,6 @@ public partial class App : Application
         };
         _escHook.Start();
     }
-
-    /// <summary>Sends one Caps Lock keystroke to flip the lock state.</summary>
-    private static void ToggleCapsLock()
-    {
-        const byte VK_CAPITAL = 0x14;
-        const uint KEYEVENTF_KEYUP = 0x0002;
-        keybd_event(VK_CAPITAL, 0, 0, UIntPtr.Zero);
-        keybd_event(VK_CAPITAL, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
-    }
-
-    [DllImport("user32.dll")]
-    private static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
 
     private void OnHotkeyPressed() => _panel?.ShowPanel();
     private void OnHotkeyReleased() => _panel?.HideIfNotPinned();
@@ -223,7 +194,7 @@ public partial class App : Application
         {
             Icon = LoadAppIcon(),
             Visible = true,
-            Text = "Polaris — 长按呼出键临时显示 / 长按Caps固定显示（Esc关闭）",
+            Text = "Polaris — 长按呼出键临时显示 / Ctrl+1 固定显示（Esc关闭）",
             ContextMenuStrip = menu,
         };
         _tray.DoubleClick += (_, _) => OpenSettings();
