@@ -80,6 +80,46 @@ public static class WindowPreviewService
     [DllImport("gdi32.dll")]
     private static extern bool DeleteObject(IntPtr hObject);
 
+    [DllImport("shell32.dll")]
+    private static extern int SHGetPropertyStoreForWindow(IntPtr hwnd, ref Guid riid,
+        [MarshalAs(UnmanagedType.Interface)] out IPropertyStore? ppv);
+
+    [DllImport("propsys.dll")]
+    private static extern int PropVariantToStringAlloc(ref PROPVARIANT propvar, out IntPtr ppszOut);
+
+    [DllImport("ole32.dll")]
+    private static extern int PropVariantClear(ref PROPVARIANT pvar);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct PROPERTYKEY { public Guid fmtid; public uint pid; }
+
+    [StructLayout(LayoutKind.Explicit)]
+    private struct PROPVARIANT
+    {
+        [FieldOffset(0)] public ushort vt;
+        [FieldOffset(8)] public IntPtr p;
+    }
+
+    private static Guid IID_IPropertyStore = new("886d8eeb-8cf2-4446-8d02-cdba1dbdcf99");
+
+    // PKEY_AppUserModel_ID: fmtid {9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3}, pid 5.
+    private static readonly PROPERTYKEY PKEY_AppUserModel_ID = new()
+    {
+        fmtid = new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3"),
+        pid = 5,
+    };
+
+    [ComImport, Guid("886d8eeb-8cf2-4446-8d02-cdba1dbdcf99"),
+     InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IPropertyStore
+    {
+        [PreserveSig] int GetCount(out uint cProps);
+        [PreserveSig] int GetAt(uint iProp, out PROPERTYKEY pkey);
+        [PreserveSig] int GetValue(ref PROPERTYKEY key, out PROPVARIANT pv);
+        [PreserveSig] int SetValue(ref PROPERTYKEY key, ref PROPVARIANT pv);
+        [PreserveSig] int Commit();
+    }
+
     [StructLayout(LayoutKind.Sequential)]
     private struct RECT { public int Left, Top, Right, Bottom; }
 
@@ -132,6 +172,124 @@ public static class WindowPreviewService
     }
 
     /// <summary>
+    /// Returns the previewable windows for an app entry, resolving packaged
+    /// (MSIX/UWP) apps correctly. Such apps are pinned as
+    /// <c>explorer.exe shell:AppsFolder\&lt;AUMID&gt;</c>, so matching by the
+    /// explorer.exe process would wrongly return File Explorer's windows. When
+    /// the entry is one of these launchers we match by the window's Application
+    /// User Model ID instead; otherwise we fall back to process-path matching.
+    /// </summary>
+    public static List<WindowPreview> GetWindowsForEntry(string path, string? arguments)
+    {
+        string? aumid = TryGetLauncherAumid(path, arguments);
+        return aumid != null ? GetWindowsByAumid(aumid) : GetWindows(path);
+    }
+
+    /// <summary>
+    /// If <paramref name="path"/>/<paramref name="arguments"/> describe a
+    /// packaged-app launcher (<c>explorer.exe shell:AppsFolder\&lt;AUMID&gt;</c>),
+    /// returns the AUMID; otherwise null.
+    /// </summary>
+    public static string? TryGetLauncherAumid(string path, string? arguments)
+    {
+        if (string.IsNullOrWhiteSpace(arguments))
+            return null;
+        try
+        {
+            if (!string.Equals(Path.GetFileName(path), "explorer.exe",
+                    StringComparison.OrdinalIgnoreCase))
+                return null;
+        }
+        catch
+        {
+            return null;
+        }
+
+        const string token = "shell:AppsFolder\\";
+        int i = arguments.IndexOf(token, StringComparison.OrdinalIgnoreCase);
+        if (i < 0)
+            return null;
+
+        string aumid = arguments.Substring(i + token.Length).Trim().Trim('"');
+        int ws = aumid.IndexOf(' ');
+        if (ws > 0)
+            aumid = aumid.Substring(0, ws);
+        return string.IsNullOrWhiteSpace(aumid) ? null : aumid;
+    }
+
+    /// <summary>
+    /// Returns the visible, alt-tab-style top-level windows whose Application
+    /// User Model ID matches <paramref name="aumid"/> (used for packaged apps
+    /// such as the new Teams / Outlook).
+    /// </summary>
+    public static List<WindowPreview> GetWindowsByAumid(string aumid)
+    {
+        var result = new List<WindowPreview>();
+        int ownPid = Environment.ProcessId;
+
+        EnumWindows((hWnd, _) =>
+        {
+            if (GetWindowThreadProcessId(hWnd, out uint pid) == 0 || pid == ownPid)
+                return true;
+            if (!IsAltTabWindow(hWnd))
+                return true;
+
+            string? winAumid = GetWindowAumid(hWnd);
+            if (winAumid == null ||
+                !string.Equals(winAumid, aumid, StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            string title = GetWindowTitle(hWnd);
+            if (string.IsNullOrWhiteSpace(title))
+                return true;
+
+            result.Add(new WindowPreview { Handle = hWnd, Title = title });
+            return true;
+        }, IntPtr.Zero);
+
+        return result;
+    }
+
+    /// <summary>Reads a window's Application User Model ID from its property
+    /// store, or null if it has none (most non-packaged windows).</summary>
+    private static string? GetWindowAumid(IntPtr hWnd)
+    {
+        try
+        {
+            var iid = IID_IPropertyStore;
+            if (SHGetPropertyStoreForWindow(hWnd, ref iid, out IPropertyStore? store) != 0
+                || store == null)
+                return null;
+            try
+            {
+                var key = PKEY_AppUserModel_ID;
+                if (store.GetValue(ref key, out PROPVARIANT pv) != 0)
+                    return null;
+                try
+                {
+                    if (PropVariantToStringAlloc(ref pv, out IntPtr str) != 0
+                        || str == IntPtr.Zero)
+                        return null;
+                    try { return Marshal.PtrToStringUni(str); }
+                    finally { Marshal.FreeCoTaskMem(str); }
+                }
+                finally
+                {
+                    PropVariantClear(ref pv);
+                }
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(store);
+            }
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
     /// Background "warm-up": for every running window of the given apps, refresh
     /// the cached thumbnail while the window is still visible. This way, once a
     /// window is minimized (and can no longer be captured), the hover preview can
@@ -139,14 +297,14 @@ public static class WindowPreviewService
     /// Minimized windows are skipped (CaptureThumbnail keeps their cached frame).
     /// Entries for windows that no longer exist are pruned.
     /// </summary>
-    public static void WarmCache(IEnumerable<string> exePaths, int maxWidth)
+    public static void WarmCache(IEnumerable<(string Path, string? Arguments)> apps, int maxWidth)
     {
         var live = new HashSet<IntPtr>();
-        foreach (var path in exePaths)
+        foreach (var (path, args) in apps)
         {
             if (string.IsNullOrWhiteSpace(path))
                 continue;
-            foreach (var w in GetWindows(path))
+            foreach (var w in GetWindowsForEntry(path, args))
             {
                 live.Add(w.Handle);
                 // Captures + caches when visible; returns the cached frame (no

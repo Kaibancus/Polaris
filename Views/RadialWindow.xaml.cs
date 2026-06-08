@@ -180,18 +180,18 @@ public partial class RadialWindow : Window
     private void WarmPreviewCache()
     {
         // Snapshot the app paths on the UI thread, then capture off-thread.
-        var paths = new List<string>(_config.Apps.Count);
+        var apps = new List<(string Path, string? Arguments)>(_config.Apps.Count);
         foreach (var a in _config.Apps)
             if (!string.IsNullOrWhiteSpace(a.Path))
-                paths.Add(a.Path);
-        if (paths.Count == 0)
+                apps.Add((a.Path, a.Arguments));
+        if (apps.Count == 0)
             return;
 
         System.Threading.Tasks.Task.Run(() =>
         {
             try
             {
-                WindowPreviewService.WarmCache(paths, RadialIcon.PreviewThumbWidth);
+                WindowPreviewService.WarmCache(apps, RadialIcon.PreviewThumbWidth);
             }
             catch
             {

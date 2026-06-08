@@ -165,14 +165,19 @@ public partial class RadialIcon : UserControl
     // can swap in the fresh image once it finishes.
     private readonly Dictionary<IntPtr, Border> _tileHosts = new();
 
-    /// <summary>True when the app entry points at Windows File Explorer
-    /// (explorer.exe), which we preview even with a single open window.</summary>
-    private static bool IsFileExplorer(string path)
+    /// <summary>True when the app entry points at the genuine Windows File
+    /// Explorer (explorer.exe with NO shell:AppsFolder launcher argument), which
+    /// we preview even with a single open window. Packaged apps such as the new
+    /// Teams / Outlook are also launched via explorer.exe but with a
+    /// shell:AppsFolder argument — those are NOT File Explorer.</summary>
+    private static bool IsFileExplorer(string path, string? arguments)
     {
         try
         {
-            return string.Equals(Path.GetFileName(path), "explorer.exe",
-                StringComparison.OrdinalIgnoreCase);
+            if (!string.Equals(Path.GetFileName(path), "explorer.exe",
+                    StringComparison.OrdinalIgnoreCase))
+                return false;
+            return WindowPreviewService.TryGetLauncherAumid(path, arguments) == null;
         }
         catch
         {
@@ -188,16 +193,17 @@ public partial class RadialIcon : UserControl
         string path = Entry.Path;
         if (string.IsNullOrWhiteSpace(path))
             return;
+        string args = Entry.Arguments;
 
         int token = ++_previewToken;
         Task.Run(() =>
         {
-            var windows = WindowPreviewService.GetWindows(path);
+            var windows = WindowPreviewService.GetWindowsForEntry(path, args);
             // Multi-window apps are worth a preview; for File Explorer a single
             // window is also worth previewing (the user often has just one
             // Explorer window — possibly with several tabs — and still expects a
             // hover peek), so allow a 1-window preview there.
-            int minWindows = IsFileExplorer(path) ? 1 : 2;
+            int minWindows = IsFileExplorer(path, args) ? 1 : 2;
             if (windows.Count < minWindows)
                 return;
 
