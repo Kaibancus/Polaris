@@ -293,10 +293,6 @@ public partial class RadialWindow
             IsHitTestVisible = false,
             Fill = brush,
             Data = new EllipseGeometry(new Point(_center.X + radius, _center.Y), rx, ry),
-            // This element revolves forever; bake its radial-gradient fill into a
-            // bitmap once so each frame is a cheap composited rotate instead of a
-            // per-frame gradient re-rasterise.
-            CacheMode = new BitmapCache(),
         };
         glow.RenderTransform = RingRevolveTransform(orbit, phaseDeg);
         (_ringLayer ?? PanelCanvas).Children.Add(glow);
@@ -344,9 +340,6 @@ public partial class RadialWindow
             Fill = new SolidColorBrush(WithAlpha(Color.FromRgb(0x14, 0x10, 0x08), alpha)),
             Data = geo,
             Effect = new System.Windows.Media.Effects.BlurEffect { Radius = 3.0 },
-            // Revolves forever; bake the blur into a bitmap once so the spin is a
-            // cheap composited rotate, not a per-frame re-blur.
-            CacheMode = new BitmapCache(),
         };
         spoke.RenderTransform = RingRevolveTransform(orbit, phaseDeg);
         (_ringLayer ?? PanelCanvas).Children.Add(spoke);
@@ -394,8 +387,6 @@ public partial class RadialWindow
             },
             Data = new EllipseGeometry(center, dia * 1.9, dia * 1.9),
             Effect = new System.Windows.Media.Effects.BlurEffect { Radius = 1.6 },
-            // Revolves forever; cache the blurred glow as a bitmap.
-            CacheMode = new BitmapCache(),
         };
         halo.RenderTransform = RingRevolveTransform(orbit, phaseDeg);
         (_ringLayer ?? PanelCanvas).Children.Add(halo);
