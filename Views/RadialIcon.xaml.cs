@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -164,12 +165,26 @@ public partial class RadialIcon : UserControl
     // can swap in the fresh image once it finishes.
     private readonly Dictionary<IntPtr, Border> _tileHosts = new();
 
+    /// <summary>True when the app entry points at Windows File Explorer
+    /// (explorer.exe), which we preview even with a single open window.</summary>
+    private static bool IsFileExplorer(string path)
+    {
+        try
+        {
+            return string.Equals(Path.GetFileName(path), "explorer.exe",
+                StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     private void OnOpenTimerTick(object? sender, EventArgs e)
     {
         _openTimer.Stop();
         if (!_pointerInside)
             return;
-
         string path = Entry.Path;
         if (string.IsNullOrWhiteSpace(path))
             return;
@@ -178,8 +193,12 @@ public partial class RadialIcon : UserControl
         Task.Run(() =>
         {
             var windows = WindowPreviewService.GetWindows(path);
-            // Only worth a preview for genuinely multi-window apps.
-            if (windows.Count < 2)
+            // Multi-window apps are worth a preview; for File Explorer a single
+            // window is also worth previewing (the user often has just one
+            // Explorer window — possibly with several tabs — and still expects a
+            // hover peek), so allow a 1-window preview there.
+            int minWindows = IsFileExplorer(path) ? 1 : 2;
+            if (windows.Count < minWindows)
                 return;
 
             // Seed each tile with any thumbnail we already cached from a previous
