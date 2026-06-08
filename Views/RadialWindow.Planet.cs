@@ -31,14 +31,12 @@ public partial class RadialWindow
             RenderTransformOrigin = new Point(0.5, 0.5),
         };
 
-        // Soft drop shadow under the planet for depth.
-        root.Effect = new System.Windows.Media.Effects.DropShadowEffect
-        {
-            Color = Colors.Black,
-            BlurRadius = 12,
-            ShadowDepth = 0,
-            Opacity = 0.5,
-        };
+        // Soft drop shadow under the planet for depth. Rendered as a STATIC
+        // sibling ellipse behind the planet (added near the bloom halo below)
+        // instead of an Effect on `root`: because the disc inside `root` spins
+        // every frame, a DropShadowEffect on `root` would re-blur the whole
+        // planet square on every frame -- the main cause of the frame-rate drop
+        // after the Saturn enlarge. A static shadow's blur is rasterised once.
 
         Color amber = Color.FromRgb(0xE2, 0xBE, 0x82);
         Color amberDark = Color.FromRgb(0x7A, 0x5C, 0x36);
@@ -82,6 +80,12 @@ public partial class RadialWindow
             RenderTransformOrigin = new Point(0.5, 0.5),
             RenderTransform = discRotate,
             Effect = discBlur,             // motion blur, scaled to spin speed
+            // The band/streak/hexagon geometry never changes -- only the disc's
+            // rotation animates. Caching it as a GPU bitmap means the perpetual
+            // spin is a cheap composited rotate instead of a per-frame vector
+            // re-tessellation of dozens of shapes (which got ~1.6x heavier when
+            // the Saturn theme was enlarged).
+            CacheMode = new BitmapCache(),
         };
 
         // --- Gas-giant banding ------------------------------------------------
@@ -474,6 +478,22 @@ public partial class RadialWindow
         Canvas.SetLeft(bloom, _center.X - halo / 2);
         Canvas.SetTop(bloom, _center.Y - halo / 2);
         PanelCanvas.Children.Add(bloom);
+
+        // Static drop shadow (replaces the per-frame DropShadowEffect that used
+        // to sit on `root`). A soft black disc the size of the planet, blurred
+        // once and composited behind it for depth.
+        var planetShadow = new Ellipse
+        {
+            Width = size,
+            Height = size,
+            IsHitTestVisible = false,
+            Fill = new SolidColorBrush(Color.FromArgb(128, 0, 0, 0)),
+            Effect = new System.Windows.Media.Effects.BlurEffect { Radius = 12 },
+        };
+        Panel.SetZIndex(planetShadow, 1999); // drawn above the bloom, under root
+        Canvas.SetLeft(planetShadow, _center.X - size / 2);
+        Canvas.SetTop(planetShadow, _center.Y - size / 2);
+        PanelCanvas.Children.Add(planetShadow);
 
         Panel.SetZIndex(root, 2000); // keep Saturn above the ring bands
         Canvas.SetLeft(root, _center.X - size / 2);
