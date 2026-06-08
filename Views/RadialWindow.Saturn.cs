@@ -339,12 +339,29 @@ public partial class RadialWindow
         var geo = new PathGeometry();
         geo.Figures.Add(fig);
 
+        // Soft angular edges are baked into a tangential gradient brush (dark in
+        // the middle, fading to transparent at the two angular flanks) instead of
+        // a per-frame BlurEffect. Because this Path revolves on the animated orbit
+        // layer, a BlurEffect would force WPF to re-rasterise the blur kernel every
+        // frame; a gradient fill is rasterised once, so the soft look is preserved
+        // with no per-frame cost.
+        Color spokeCol = Color.FromRgb(0x14, 0x10, 0x08);
+        var spokeBrush = new LinearGradientBrush
+        {
+            StartPoint = new Point(0.5, 0),   // one angular flank (tangential)
+            EndPoint = new Point(0.5, 1),     // the other angular flank
+            GradientStops =
+            {
+                new GradientStop(WithAlpha(spokeCol, 0.0), 0.0),
+                new GradientStop(WithAlpha(spokeCol, alpha), 0.5),
+                new GradientStop(WithAlpha(spokeCol, 0.0), 1.0),
+            },
+        };
         var spoke = new System.Windows.Shapes.Path
         {
             IsHitTestVisible = false,
-            Fill = new SolidColorBrush(WithAlpha(Color.FromRgb(0x14, 0x10, 0x08), alpha)),
+            Fill = spokeBrush,
             Data = geo,
-            Effect = new System.Windows.Media.Effects.BlurEffect { Radius = 3.0 },
         };
         spoke.RenderTransform = RingRevolveTransform(orbit, phaseDeg);
         (_ringLayer ?? PanelCanvas).Children.Add(spoke);
