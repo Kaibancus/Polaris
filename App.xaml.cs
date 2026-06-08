@@ -35,13 +35,18 @@ public partial class App : Application
         AppDomain.CurrentDomain.UnhandledException += OnDomainUnhandledException;
         System.Threading.Tasks.TaskScheduler.UnobservedTaskException += OnUnobservedTaskException;
 
-        // Render WPF animations at a high steady frame rate. The default
-        // metadata caps interpolation sampling; bumping DesiredFrameRate
-        // globally makes short transitions (hover scale, neighbour spread)
-        // feel smooth instead of "slow-motion".
+        // Render WPF animations at the display's native refresh rate. The
+        // default metadata under-samples short transitions (they look "slow
+        // motion"), but forcing a fixed 120 over-samples on a 60 Hz panel —
+        // the render thread advances every animation twice per displayed frame,
+        // wasting half its budget (the same thread the Saturn spin and hover
+        // scale compete for). Matching the actual refresh rate keeps motion
+        // smooth on high-refresh panels while removing the wasted work on 60 Hz,
+        // which is visually lossless.
+        int refreshHz = (int)Math.Clamp(GetPrimaryRefreshRate(), 60, 240);
         System.Windows.Media.Animation.Timeline.DesiredFrameRateProperty.OverrideMetadata(
             typeof(System.Windows.Media.Animation.Timeline),
-            new FrameworkPropertyMetadata(120));
+            new FrameworkPropertyMetadata(refreshHz));
 
         // Single-instance guard: if another Polaris is already running,
         // notify the user and exit immediately.
@@ -166,6 +171,34 @@ public partial class App : Application
 
     private void OnHotkeyPressed() => _panel?.ShowPanel();
     private void OnHotkeyReleased() => _panel?.HideIfNotPinned();
+
+    /// <summary>Primary monitor's vertical refresh rate in Hz (falls back to 60
+    /// if the device-context query is unavailable).</summary>
+    private static int GetPrimaryRefreshRate()
+    {
+        const int VREFRESH = 116;
+        IntPtr hdc = GetDC(IntPtr.Zero);
+        if (hdc == IntPtr.Zero)
+            return 60;
+        try
+        {
+            int hz = GetDeviceCaps(hdc, VREFRESH);
+            return hz > 1 ? hz : 60;   // 0/1 mean "default/unknown"
+        }
+        finally
+        {
+            ReleaseDC(IntPtr.Zero, hdc);
+        }
+    }
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetDC(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+
+    [DllImport("gdi32.dll")]
+    private static extern int GetDeviceCaps(IntPtr hdc, int nIndex);
 
     private void OpenSettings()
     {
