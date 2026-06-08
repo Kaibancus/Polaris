@@ -156,13 +156,10 @@ public partial class RadialWindow
         AddShimmer(rB, _innerOrbit, paleB, phaseDeg: 0, intensity: 1.0, arcSpan: 0.30);
         // (2) Spokes anchored across the B ring, revolving with the inner orbit.
         AddSpoke(rBin, rBout, _innerOrbit, phaseDeg: 24, widthDeg: 7.0, alpha: 0.30);
-        AddSpoke(rBin, rBout, _innerOrbit, phaseDeg: 132, widthDeg: 5.0, alpha: 0.22);
         AddSpoke(rBin, rBout, _innerOrbit, phaseDeg: 256, widthDeg: 6.0, alpha: 0.26);
         // (3) Density clumps that ride the bright B ring.
         AddRingBlob(rB, _innerOrbit, phaseDeg: 60, rx: rB * 0.16, ry: rB * 0.05,
                     color: Lighten(paleB, 0.30), alpha: 0.22);
-        AddRingBlob(rB, _innerOrbit, phaseDeg: 300, rx: rB * 0.12, ry: rB * 0.045,
-                    color: Lighten(paleB, 0.22), alpha: 0.18);
 
         if (hasOuter)
         {
@@ -170,9 +167,7 @@ public partial class RadialWindow
             double rAin = MapR(RAin), rAout = MapR(RAout);
             // Outer A-ring shimmer (slower revolution => visible differential rate).
             AddShimmer(rAmid, _outerOrbit, paleB, phaseDeg: 0, intensity: 0.8, arcSpan: 0.26);
-            AddShimmer(rAmid, _outerOrbit, paleB, phaseDeg: 190, intensity: 0.40, arcSpan: 0.18);
             AddSpoke(rAin, rAout, _outerOrbit, phaseDeg: 80, widthDeg: 6.0, alpha: 0.20);
-            AddSpoke(rAin, rAout, _outerOrbit, phaseDeg: 210, widthDeg: 5.0, alpha: 0.16);
             AddRingBlob(rAmid, _outerOrbit, phaseDeg: 150, rx: rAmid * 0.13, ry: rAmid * 0.04,
                         color: Lighten(tanA, 0.30), alpha: 0.16);
 
