@@ -64,11 +64,21 @@ public static class RunningAppTracker
             new(StringComparer.OrdinalIgnoreCase);
         public HashSet<string> NamesWithoutPath { get; } =
             new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>Full executable paths of processes that are running but do
+        /// NOT currently own a visible main window (e.g. apps minimized to the
+        /// system tray, which hide their window). Matched by exact path only.</summary>
+        public HashSet<string> PathsNoWindow { get; } =
+            new(StringComparer.OrdinalIgnoreCase);
     }
 
     /// <summary>
     /// Computes, on the calling (ideally background) thread, a snapshot of the
-    /// processes that currently own a visible main window. Recording full
+    /// running processes. Processes that own a visible main window are recorded
+    /// in <see cref="RunningSnapshot.Paths"/> (or <see cref="RunningSnapshot.NamesWithoutPath"/>
+    /// when their path can't be read). Processes without a visible main window
+    /// but with a readable path are recorded in <see cref="RunningSnapshot.PathsNoWindow"/>,
+    /// so apps minimized to the system tray are still detected. Recording full
     /// executable paths (rather than base-names only) prevents two different
     /// programs that share a base name from being mistaken for one another.
     /// </summary>
@@ -89,8 +99,7 @@ public static class RunningAppTracker
         {
             try
             {
-                if (p.MainWindowHandle == IntPtr.Zero)
-                    continue;
+                bool hasWindow = p.MainWindowHandle != IntPtr.Zero;
 
                 string? modulePath = null;
                 try
@@ -102,10 +111,20 @@ public static class RunningAppTracker
                     // Access denied / 32-vs-64 — fall back to a name match.
                 }
 
-                if (!string.IsNullOrEmpty(modulePath))
-                    snapshot.Paths.Add(Path.GetFullPath(modulePath));
-                else
-                    snapshot.NamesWithoutPath.Add(p.ProcessName);
+                if (hasWindow)
+                {
+                    if (!string.IsNullOrEmpty(modulePath))
+                        snapshot.Paths.Add(Path.GetFullPath(modulePath));
+                    else
+                        snapshot.NamesWithoutPath.Add(p.ProcessName);
+                }
+                else if (!string.IsNullOrEmpty(modulePath))
+                {
+                    // No visible window (possibly tray-minimized). Only trust an
+                    // exact path match here; name-only matching for windowless
+                    // processes would over-report background helpers.
+                    snapshot.PathsNoWindow.Add(Path.GetFullPath(modulePath));
+                }
             }
             catch
             {
@@ -136,6 +155,10 @@ public static class RunningAppTracker
             catch { full = exePath; }
 
             if (snapshot.Paths.Contains(full))
+                return true;
+
+            // Tray-minimized (windowless) processes: exact path match only.
+            if (snapshot.PathsNoWindow.Contains(full))
                 return true;
 
             if (snapshot.NamesWithoutPath.Count == 0)

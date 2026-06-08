@@ -35,19 +35,25 @@ public partial class RadialWindow : Window
     // each time the overlay is sized. 1.0 on a 1080p (DIP) display.
     private double _uiScale = 1.0;
 
-    // Ring radii scaled by the current resolution factor.
-    private double InnerRadius => BaseInnerRadius * _uiScale;
-    private double RingStep => BaseRingStep * _uiScale;
+    // Extra per-theme scale applied on top of _uiScale. The Saturn theme is
+    // drawn larger overall than the grid themes; 1.0 for everything else.
+    private const double SaturnEnlarge = 1.28;
+    private double _themeScale = 1.0;
 
-    // User-chosen icon diameter scaled by the resolution factor, so icons (and
-    // the grid/ring geometry derived from them) grow on larger displays.
-    private double EffectiveIconSize => _config.Settings.IconSize * _uiScale;
+    // Ring radii scaled by the current resolution + theme factors.
+    private double InnerRadius => BaseInnerRadius * _uiScale * _themeScale;
+    private double RingStep => BaseRingStep * _uiScale * _themeScale;
+
+    // User-chosen icon diameter scaled by the resolution (and theme) factors, so
+    // icons (and the grid/ring geometry derived from them) grow on larger
+    // displays and with the Saturn enlargement.
+    private double EffectiveIconSize => _config.Settings.IconSize * _uiScale * _themeScale;
 
     // Saturn's centre planet uses a fixed base diameter (independent of the
     // user's icon-size setting) so adjusting icon size never resizes the planet;
-    // it still scales with screen resolution like everything else.
+    // it still scales with screen resolution and the Saturn enlargement.
     private const double PlanetIconBase = 56.0;
-    private double PlanetDiameter => PlanetIconBase * _uiScale * 2.5;
+    private double PlanetDiameter => PlanetIconBase * _uiScale * _themeScale * 2.5;
 
     // Outer-ring icons are drawn slightly larger than inner-ring icons.
     private const double OuterIconScale = 1.18;
@@ -208,8 +214,11 @@ public partial class RadialWindow : Window
         // does not look tiny on large monitors.
         _uiScale = Math.Clamp(sh / ReferenceScreenHeight, 1.0, 2.0);
 
-        double icon = EffectiveIconSize;
         bool saturn = ThemeRegistry.Get(_config.Settings.Theme).IsSaturn;
+        // The Saturn theme is rendered larger overall than the grid themes.
+        _themeScale = saturn ? SaturnEnlarge : 1.0;
+
+        double icon = EffectiveIconSize;
 
         double halfW, halfH;
         if (saturn)
@@ -524,7 +533,12 @@ public partial class RadialWindow : Window
     public void RefreshFromConfig()
     {
         if (IsLoaded)
+        {
+            // Recompute the window size / scale factors so a live theme or
+            // icon-size change is reflected immediately, then redraw.
+            SizeToActiveContent();
             Rebuild();
+        }
     }
 
     private void RefreshRunningStates()
