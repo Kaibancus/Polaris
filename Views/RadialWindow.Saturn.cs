@@ -196,7 +196,7 @@ public partial class RadialWindow
     /// a few twinkling stars, so the planet reads as floating in space.</summary>
     private void DrawStarfield(double r)
     {
-        const int count = 84;
+        const int count = 64;
         for (int i = 0; i < count; i++)
         {
             double ang = Hash01(i * 2.17) * Math.PI * 2;
@@ -492,7 +492,7 @@ public partial class RadialWindow
         // Sparse bright/dark speckle scattered through the zone to break up the
         // perfect concentric stroke pattern (icy-particle grain). Positions are
         // deterministic so the look is stable across rebuilds.
-        int speckles = (int)Math.Clamp((rOuter - rInner) * 0.7, 0, 46);
+        int speckles = (int)Math.Clamp((rOuter - rInner) * 0.52, 0, 34);
         for (int i = 0; i < speckles; i++)
         {
             double rr = rInner + (rOuter - rInner) * Hash01(rInner * 7.1 + i * 2.3);
