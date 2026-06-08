@@ -338,6 +338,8 @@ public static class WindowPreviewService
                 return true;
 
             string? aumid = GetWindowAumid(hWnd);
+            if (string.IsNullOrWhiteSpace(aumid))
+                aumid = null;
             // Distinct by packaged identity when present, else by exe path, so a
             // multi-window app shows a single tile.
             string key = aumid ?? path;
