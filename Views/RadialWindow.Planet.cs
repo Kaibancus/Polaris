@@ -72,19 +72,20 @@ public partial class RadialWindow
         // therefore appear as concentric circles, and the whole disc spins
         // about its centre. Hosted in a rotating Canvas clipped to the globe.
         var discRotate = new RotateTransform(0);
-        var discBlur = new System.Windows.Media.Effects.BlurEffect { Radius = 0, KernelType = System.Windows.Media.Effects.KernelType.Gaussian };
         var disc = new Canvas
         {
             Width = size,
             Height = size,
             RenderTransformOrigin = new Point(0.5, 0.5),
             RenderTransform = discRotate,
-            Effect = discBlur,             // motion blur, scaled to spin speed
             // The band/streak/hexagon geometry never changes -- only the disc's
             // rotation animates. Caching it as a GPU bitmap means the perpetual
             // spin is a cheap composited rotate instead of a per-frame vector
             // re-tessellation of dozens of shapes (which got ~1.6x heavier when
-            // the Saturn theme was enlarged).
+            // the Saturn theme was enlarged). NOTE: do NOT attach/detach an
+            // Effect (e.g. motion blur) on this cached disc -- toggling an
+            // Effect on a BitmapCache'd visual forces a re-rasterise that
+            // flashes the disc (was visible on hover acceleration).
             CacheMode = new BitmapCache(),
         };
 
@@ -466,28 +467,6 @@ public partial class RadialWindow
                 };
                 discRotate.Angle = cur + dist;            // hold final angle when ramp stops
                 discRotate.BeginAnimation(RotateTransform.AngleProperty, ramp);
-            }
-
-            // Faster spin -> stronger motion blur. Below a small threshold the
-            // blur is dropped entirely (Effect = null) so the perpetually
-            // spinning disc isn't re-rasterised through the blur pipeline every
-            // frame -- that constant per-frame cost is what made the panel feel
-            // progressively "slow-motion" the longer it stayed open.
-            double targetBlur = Math.Clamp(8.0 / secondsPerTurn, 0.0, 2.2);
-            if (targetBlur < 0.4)
-            {
-                discBlur.BeginAnimation(System.Windows.Media.Effects.BlurEffect.RadiusProperty, null);
-                discBlur.Radius = 0;
-                disc.Effect = null;
-            }
-            else
-            {
-                disc.Effect = discBlur;
-                var blurAnim = new DoubleAnimation(targetBlur, TimeSpan.FromMilliseconds(380))
-                {
-                    EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
-                };
-                discBlur.BeginAnimation(System.Windows.Media.Effects.BlurEffect.RadiusProperty, blurAnim);
             }
         }
 
