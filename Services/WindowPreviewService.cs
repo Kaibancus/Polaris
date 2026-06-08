@@ -19,6 +19,16 @@ public sealed class WindowPreview
     public BitmapSource? Thumbnail { get; set; }
 }
 
+/// <summary>A distinct application that currently owns a taskbar (alt-tab)
+/// window, identified by its executable path and (for packaged apps) its
+/// Application User Model ID, plus a representative window to activate.</summary>
+public sealed class TaskbarApp
+{
+    public string Path { get; init; } = "";
+    public string? Aumid { get; init; }
+    public IntPtr Window { get; init; }
+}
+
 /// <summary>
 /// Enumerates the visible top-level windows owned by the process(es) behind an
 /// app entry, captures a still thumbnail of each (so multi-window apps such as
@@ -73,6 +83,18 @@ public static class WindowPreviewService
 
     [DllImport("user32.dll")]
     private static extern IntPtr MonitorFromWindow(IntPtr hWnd, uint dwFlags);
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, uint dwProcessId);
+
+    [DllImport("kernel32.dll")]
+    private static extern bool CloseHandle(IntPtr hObject);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    private static extern bool QueryFullProcessImageNameW(IntPtr hProcess, uint dwFlags,
+        StringBuilder lpExeName, ref uint lpdwSize);
+
+    private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
 
     [DllImport("shcore.dll")]
     private static extern int GetDpiForMonitor(IntPtr hmonitor, int dpiType, out uint dpiX, out uint dpiY);
@@ -286,6 +308,68 @@ public static class WindowPreviewService
         catch
         {
             return null;
+        }
+    }
+
+    /// <summary>
+    /// Enumerates the distinct applications that currently own a taskbar
+    /// (alt-tab) window — one entry per executable / packaged app — so the panel
+    /// can surface running programs that are not pinned into Polaris. Excludes
+    /// our own process. Each entry carries a representative window for activation.
+    /// </summary>
+    public static List<TaskbarApp> GetTaskbarApps()
+    {
+        var result = new List<TaskbarApp>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        int ownPid = Environment.ProcessId;
+
+        EnumWindows((hWnd, _) =>
+        {
+            if (!IsAltTabWindow(hWnd))
+                return true;
+            if (GetWindowThreadProcessId(hWnd, out uint pid) == 0 || pid == ownPid)
+                return true;
+            string title = GetWindowTitle(hWnd);
+            if (string.IsNullOrWhiteSpace(title))
+                return true;
+
+            string? path = GetProcessPath(pid);
+            if (string.IsNullOrWhiteSpace(path))
+                return true;
+
+            string? aumid = GetWindowAumid(hWnd);
+            // Distinct by packaged identity when present, else by exe path, so a
+            // multi-window app shows a single tile.
+            string key = aumid ?? path;
+            if (!seen.Add(key))
+                return true;
+
+            result.Add(new TaskbarApp { Path = path, Aumid = aumid, Window = hWnd });
+            return true;
+        }, IntPtr.Zero);
+
+        return result;
+    }
+
+    /// <summary>Full executable path of a process id, or null if inaccessible.</summary>
+    private static string? GetProcessPath(uint pid)
+    {
+        IntPtr h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+        if (h == IntPtr.Zero)
+            return null;
+        try
+        {
+            var sb = new StringBuilder(1024);
+            uint size = (uint)sb.Capacity;
+            return QueryFullProcessImageNameW(h, 0, sb, ref size) ? sb.ToString() : null;
+        }
+        catch
+        {
+            return null;
+        }
+        finally
+        {
+            CloseHandle(h);
         }
     }
 

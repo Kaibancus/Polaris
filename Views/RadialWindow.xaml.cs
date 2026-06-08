@@ -164,7 +164,7 @@ public partial class RadialWindow : Window
         {
             Interval = TimeSpan.FromSeconds(1.5),
         };
-        _runningTimer.Tick += (_, _) => RefreshRunningStates();
+        _runningTimer.Tick += (_, _) => { RefreshRunningStates(); RefreshTaskbarApps(); };
 
         // Warm the thumbnail cache in the background (even while the panel is
         // hidden) so we always hold a recent frame to show if a window gets
@@ -526,6 +526,7 @@ public partial class RadialWindow : Window
         }
 
         RefreshRunningStates();
+        RefreshTaskbarApps();
     }
 
     /// <summary>Refreshes the panel from the current config (e.g. after the
