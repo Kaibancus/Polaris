@@ -18,12 +18,9 @@ Polaris 是一款常驻系统托盘的应用程序坞。您可以把应用程序
 
 
 
-https://github.com/user-attachments/assets/f18cdadc-0f6f-4f12-b3ef-ae256569738d
+![演示一](docs/demo1.gif)
 
-
-
-
-https://github.com/user-attachments/assets/a95feb83-b4c0-4629-9ed8-02748d11faf4
+![演示二](docs/demo2.gif)
 
 
 
