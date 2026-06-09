@@ -61,6 +61,11 @@ public partial class RadialWindow
         // Build the exclusion sets (configured apps) on the UI thread.
         var excludePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var excludeAumids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // Fallback: match by executable file name too. Many apps launch from a
+        // different full path than their pinned shortcut target (versioned
+        // install folders like app-1.2.3\app.exe, or launcher stubs), so an
+        // exact full-path compare misses and the app reappears in the dock.
+        var excludeFileNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var a in _config.Apps)
         {
             if (string.IsNullOrWhiteSpace(a.Path))
@@ -74,6 +79,13 @@ public partial class RadialWindow
             {
                 try { excludePaths.Add(System.IO.Path.GetFullPath(a.Path)); }
                 catch { excludePaths.Add(a.Path); }
+                try
+                {
+                    string fn = System.IO.Path.GetFileName(a.Path);
+                    if (!string.IsNullOrWhiteSpace(fn))
+                        excludeFileNames.Add(fn);
+                }
+                catch { /* ignore malformed paths */ }
             }
         }
 
@@ -95,6 +107,13 @@ public partial class RadialWindow
                     continue;
                 if (ta.Aumid != null && excludeAumids.Contains(ta.Aumid))
                     continue;
+                try
+                {
+                    string fn = System.IO.Path.GetFileName(ta.Path);
+                    if (!string.IsNullOrWhiteSpace(fn) && excludeFileNames.Contains(fn))
+                        continue;
+                }
+                catch { /* ignore malformed paths */ }
                 filtered.Add(ta);
             }
 
@@ -203,13 +222,14 @@ public partial class RadialWindow
         double panelH = gridH + icon + padY * 2;
         double panelBottom = _center.Y + panelH / 2.0;
 
-        // The row sits in a glass strip beneath the (lifted) dock. Centre the
-        // tiles vertically within that strip: the strip starts at the dock's
-        // lifted bottom edge and is tall enough for one tile plus equal padding
-        // above and below.
-        double stripTop = panelBottom - GlassDockLift;
-        double rowVPad = icon * 0.28;
-        double rowY = stripTop + rowVPad + tile / 2.0;
+        // The taskbar row lives in the strip the dock slab already reserved at
+        // its bottom (see GlassTaskbarStripHeight / DrawGlassPanel). dock and
+        // strip are ONE continuous glass panel split only by an engraved seam,
+        // so the row draws no slab of its own — it just centres its tiles in the
+        // reserved strip below the dock's bottom edge.
+        double dockBottom = panelBottom - GlassDockLift;
+        double rowVPad = tile * 0.42;
+        double rowY = dockBottom + rowVPad + tile / 2.0;
 
         int m = apps.Count;
 
@@ -244,21 +264,6 @@ public partial class RadialWindow
 
         double rowW = (m - 1) * cellW;
         double x0 = _center.X - rowW / 2.0;
-
-        // Glass backdrop behind the row, matching the main dock panel. Width is
-        // identical to the dock; the top rises to the dock's (lifted) bottom edge
-        // so dock and row read as one continuous glass surface. The row icons
-        // stay anchored to the window centre, so the dock's upward lift opens a
-        // clearance gap above them — a magnified tile no longer reaches the dock.
-        double padX = icon * 1.15;
-        double dockW = (LiquidGlassTheme.Columns - 1) * cellW + icon + padX * 2;
-        double slabW = dockW;
-        double slabLeft = _center.X - slabW / 2.0;
-        double slabTop = stripTop;
-        double slabBottom = rowY + tile / 2.0 + rowVPad;
-        double slabH = slabBottom - slabTop;
-        double opacity = 1.0 - Math.Clamp(_config.Settings.PanelTransparency, 0.0, 1.0);
-        DrawGlassSlab(slabLeft, slabTop, slabW, slabH, 24, opacity, _taskbarIcons);
 
         for (int k = 0; k < m; k++)
         {
@@ -432,14 +437,14 @@ public partial class RadialWindow
         {
             RepeatBehavior = RepeatBehavior.Forever,
         };
-        Timeline.SetDesiredFrameRate(sweepAnim, App.AnimationFrameRate);
+        Timeline.SetDesiredFrameRate(sweepAnim, App.AmbientFrameRate);
         sweepTransform.BeginAnimation(RotateTransform.AngleProperty, sweepAnim);
         var glowAnim = new DoubleAnimation(0.35, 0.8, new Duration(TimeSpan.FromSeconds(2.2)))
         {
             AutoReverse = true,
             RepeatBehavior = RepeatBehavior.Forever,
         };
-        Timeline.SetDesiredFrameRate(glowAnim, App.AnimationFrameRate);
+        Timeline.SetDesiredFrameRate(glowAnim, App.AmbientFrameRate);
         glow.BeginAnimation(OpacityProperty, glowAnim);
 
         IntPtr win = app.Window;

@@ -278,10 +278,90 @@ public partial class SettingsWindow : Window
         }
     }
 
-    private void OnCheckUpdate(object sender, RoutedEventArgs e)
+    private async void OnCheckUpdate(object sender, RoutedEventArgs e)
     {
-        // TODO: wire up real update-check logic.
-        MessageBox.Show(this, "当前已是最新版本。", "检查更新",
-            MessageBoxButton.OK, MessageBoxImage.Information);
+        CheckUpdateButton.IsEnabled = false;
+        string originalText = CheckUpdateButton.Content?.ToString() ?? "检查更新";
+        CheckUpdateButton.Content = "检查中…";
+        try
+        {
+            UpdateService.ReleaseInfo? latest;
+            try
+            {
+                latest = await UpdateService.GetLatestReleaseAsync();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, "检查更新失败：" + ex.Message, "检查更新",
+                    MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            if (latest == null)
+            {
+                MessageBox.Show(this, "无法获取更新信息，请稍后重试。", "检查更新",
+                    MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            if (!UpdateService.IsNewer(latest))
+            {
+                MessageBox.Show(this,
+                    $"当前已是最新版本（v{UpdateService.CurrentVersion.ToString(2)}）。",
+                    "检查更新", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            var choice = MessageBox.Show(this,
+                $"发现新版本：{latest.TagName}\n当前版本：v{UpdateService.CurrentVersion.ToString(2)}\n\n是否现在下载并更新？",
+                "检查更新", MessageBoxButton.YesNo, MessageBoxImage.Question);
+            if (choice != MessageBoxResult.Yes)
+                return;
+
+            if (string.IsNullOrEmpty(latest.ZipAssetUrl))
+            {
+                // No downloadable asset — open the release page so the user can
+                // grab it manually.
+                if (!string.IsNullOrEmpty(latest.HtmlUrl))
+                {
+                    System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = latest.HtmlUrl,
+                        UseShellExecute = true,
+                    });
+                }
+                return;
+            }
+
+            CheckUpdateButton.Content = "下载中…";
+            bool ok;
+            try
+            {
+                ok = await UpdateService.DownloadAndApplyAsync(latest);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, "下载或安装更新失败：" + ex.Message, "检查更新",
+                    MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            if (!ok)
+            {
+                MessageBox.Show(this, "更新失败，请前往发布页手动下载。", "检查更新",
+                    MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            MessageBox.Show(this,
+                "更新已就绪，应用将关闭并自动重启为新版本。",
+                "检查更新", MessageBoxButton.OK, MessageBoxImage.Information);
+            Application.Current.Shutdown();
+        }
+        finally
+        {
+            CheckUpdateButton.Content = originalText;
+            CheckUpdateButton.IsEnabled = true;
+        }
     }
 }

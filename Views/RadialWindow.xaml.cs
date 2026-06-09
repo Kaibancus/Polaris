@@ -73,6 +73,20 @@ public partial class RadialWindow : Window
     /// between the dock and the row.</summary>
     private Point GlassDockCenter => new(_center.X, _center.Y - GlassDockLift);
 
+    /// <summary>Height of the running-taskbar strip carved out of the bottom of
+    /// the single continuous glass panel: one magnified tile plus equal padding
+    /// above and below. Reserved on the dock slab even before the (async)
+    /// taskbar enumeration so dock and taskbar are one uninterrupted glass.</summary>
+    private double GlassTaskbarStripHeight
+    {
+        get
+        {
+            double tile = EffectiveIconSize * GlassIconScale;
+            double rowVPad = tile * 0.42;
+            return tile + rowVPad * 2;
+        }
+    }
+
     // Saturn's self-rotation period (seconds per turn) used for the centre
     // planet's idle spin and as the reference for the ring revolution speeds.
     private const double PlanetSpinSeconds = 60.0;
@@ -289,6 +303,15 @@ public partial class RadialWindow : Window
         double w = Math.Min((halfW + margin) * 2.0, sw);
         double h = Math.Min((halfH + margin) * 2.0, sh);
 
+        // The liquid-glass theme frosts the WHOLE desktop on summon, so its
+        // overlay must span the full screen (the blurred wallpaper fills it and
+        // the panel floats centred). Other themes keep the tight, cheaper box.
+        if (ThemeRegistry.Get(_config.Settings.Theme).ShowGlassPanel)
+        {
+            w = sw;
+            h = sh;
+        }
+
         Width = w;
         Height = h;
         Left = (sw - w) / 2.0;
@@ -373,6 +396,17 @@ public partial class RadialWindow : Window
         SizeToActiveContent();
         _suppressRebuild = false;
         Rebuild();                      // pick up any config changes
+        // Force the layered surface fully transparent BEFORE grabbing the
+        // backdrop, so a stale opaque frame from the previous summon can never
+        // bleed into the capture.
+        BeginAnimation(OpacityProperty, null);
+        Opacity = 0;
+        // Frost the desktop behind the liquid-glass panel: capture the desktop
+        // now (overlay is Opacity 0 / excluded from the grab) and show it
+        // blurred behind the glass. Must run after Rebuild (which clears the
+        // canvas).
+        if (_theme.ShowGlassPanel)
+            ShowDesktopBlur();
         AnimateRingsExpand();           // grow the rings out from the centre
         Topmost = true;
         Activate();
@@ -380,8 +414,6 @@ public partial class RadialWindow : Window
         UpdateGlassClock();
         _clockTimer.Start();
 
-        BeginAnimation(OpacityProperty, null);
-        Opacity = 0;
         var fade = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(150));
         BeginAnimation(OpacityProperty, fade);
     }
@@ -432,6 +464,10 @@ public partial class RadialWindow : Window
         // Dismiss any open window-preview popups so they don't linger on screen.
         foreach (var ic in _iconElements)
             ic.ClosePreview();
+
+        // Drop the captured desktop-blur backdrop so a stale frame is never
+        // reused on the next summon (a fresh capture is taken each time).
+        HideDesktopBlur();
 
         // Fade out instead of hiding; at Opacity 0 the window is click-through.
         // Capture the current (animated) opacity BEFORE replacing the animation
@@ -508,6 +544,8 @@ public partial class RadialWindow : Window
         // Clock labels lived in the cleared canvas too.
         _glassClockTime = null;
         _glassClockDate = null;
+        // The desktop-blur backdrop image was in the cleared canvas as well.
+        _desktopBlur = null;
 
         // --- Layout (theme-driven) -------------------------------------------
         if (_theme.IsSaturn)
@@ -660,7 +698,7 @@ public partial class RadialWindow : Window
             bmp = IconExtractor.GetIcon(entry.EffectiveIconSource);
             _iconCache[entry.EffectiveIconSource] = bmp;
         }
-        var icon = new RadialIcon(entry, bmp, iconSize, AccentColor, LabelBrush);
+        var icon = new RadialIcon(entry, bmp, iconSize, AccentColor, LabelBrush, _theme.ShowGlassPanel);
         icon.PreviewMouseLeftButtonDown += Icon_PreviewMouseLeftButtonDown;
         icon.HoverStarted += OnIconHoverStarted;
         icon.HoverEnded += OnIconHoverEnded;

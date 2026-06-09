@@ -111,7 +111,7 @@ public sealed class LiquidGlassTheme : PanelTheme
     public override bool ShowGlassPanel => true;
     public override int MaxIcons => Capacity;
     public override Brush WindowBackground => Brushes.Transparent;
-    public override double DefaultTransparency => 0.20;
+    public override double DefaultTransparency => 0.05;
     // 40% of the settings icon-size slider range [40, 96]: 40 + 0.40 * 56 = 62.4.
     public override double DefaultIconSize => 62.4;
 

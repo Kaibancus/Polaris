@@ -11,7 +11,29 @@
     </UserControl.RenderTransform>
 
     <Grid>
-        <Border Width="{Binding IconSize, RelativeSource={RelativeSource AncestorType=UserControl}}"
+        <!-- Soft blue hover glow (Saturn theme). A blurred tinted plate that
+             blooms gently BEHIND the icon on hover, so the icon's background
+             tile reads as glowing while the icon image itself stays crisp. Its
+             colour/alpha is set in code-behind from the accent colour (kept
+             faint). Hidden for the liquid-glass theme, which uses the
+             water-droplet lens above. Drawn first => sits behind everything. -->
+        <Border x:Name="BlueGlow"
+                Width="{Binding IconSize, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                Height="{Binding IconSize, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                CornerRadius="13"
+                Opacity="0"
+                IsHitTestVisible="False"
+                Visibility="Collapsed">
+            <Border.Effect>
+                <BlurEffect Radius="16"/>
+            </Border.Effect>
+            <Border.CacheMode>
+                <BitmapCache/>
+            </Border.CacheMode>
+        </Border>
+
+        <Border x:Name="IconPlate"
+                Width="{Binding IconSize, RelativeSource={RelativeSource AncestorType=UserControl}}"
                 Height="{Binding IconSize, RelativeSource={RelativeSource AncestorType=UserControl}}"
                 CornerRadius="12"
                 Background="#08FFFFFF"
@@ -21,6 +43,18 @@
                    RenderOptions.EdgeMode="Aliased"
                    Source="{Binding IconImage, RelativeSource={RelativeSource AncestorType=UserControl}}"/>
         </Border>
+
+        <!-- Crystal sheen overlay (liquid-glass theme only). A diagonal glossy
+             highlight sweeping across the top-left plus a faint specular dot,
+             giving the otherwise near-invisible plate a "晶莹剔透" crystal feel.
+             Sits above the icon image but below the hover lens. Made visible and
+             populated in code-behind only for the droplet (glass) theme. -->
+        <Border x:Name="PlateSheen"
+                Width="{Binding IconSize, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                Height="{Binding IconSize, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                CornerRadius="12"
+                IsHitTestVisible="False"
+                Visibility="Collapsed"/>
 
         <!-- Water-droplet lens shown on hover. Sits ON TOP of the icon and reads
              as a bead of water magnifying it (the parent 1.7x zoom does the

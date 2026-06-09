@@ -26,6 +26,13 @@ public partial class App : Application
     /// transitions tick at this rate so motion stays smooth and low-latency.</summary>
     public static int AnimationFrameRate { get; private set; } = 120;
 
+    /// <summary>Tick rate for always-on loop animations in the liquid-glass
+    /// theme. That theme runs as a fullscreen per-pixel-alpha layered window, so
+    /// every animation tick re-composites the whole screen — an expensive upload.
+    /// Capping the slow background loops (running-app sweep/glow) low frees the
+    /// composition budget for the interactive hover/zoom to stay fluid.</summary>
+    public static int GlassLoopFrameRate { get; private set; } = 30;
+
     private AppConfig _config = new();
     private KeyboardHook? _hook;
     private KeyboardHook? _pinnedHook;
@@ -64,6 +71,7 @@ public partial class App : Application
             new FrameworkPropertyMetadata(refreshHz));
         AmbientFrameRate = hz;   // un-oversampled present rate for slow loops
         AnimationFrameRate = refreshHz;  // oversampled tick rate for smooth motion
+        GlassLoopFrameRate = Math.Min(30, hz);  // throttled loops for the fullscreen glass overlay
 
         // Single-instance guard: if another Polaris is already running,
         // notify the user and exit immediately.

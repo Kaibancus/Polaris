@@ -52,6 +52,9 @@ publish.xml
 
 # Release artifacts
 Polaris-v*.zip
+Polaris-*-fd.zip
+Polaris-*.zip
+_blur_debug.png
 
 # Test results
 [Tt]est[Rr]esult*/
