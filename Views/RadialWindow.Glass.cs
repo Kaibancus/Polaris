@@ -70,10 +70,16 @@ public partial class RadialWindow
 
         double padX = icon * 1.15;
         double padY = icon * 1.15;
+        // Extra band reserved at the very top of the slab for the clock / gear.
+        // The icon grid stays centred on GlassDockCenter; only the slab grows
+        // upward, so the date-time sits well clear of the first icon row even
+        // when a top-row icon zooms up on hover.
+        double topInset = icon * 0.55;
         double w = gridW + icon + padX * 2;
         double h = gridH + icon + padY * 2;
         double left = _center.X - w / 2.0;
-        double top = GlassDockCenter.Y - h / 2.0;
+        double gridTop = GlassDockCenter.Y - h / 2.0;   // panel top around the icon grid
+        double top = gridTop - topInset;                // actual slab top (includes clock band)
 
         double opacity = 1.0 - Math.Clamp(_config.Settings.PanelTransparency, 0.0, 1.0);
         const double radius = 28;
@@ -83,8 +89,8 @@ public partial class RadialWindow
         // uninterrupted piece of glass. A thin etched seam line is engraved
         // across the junction (see DrawGlassSeam) to visually divide the two
         // sections without breaking the glass.
-        double dockBottom = top + h;
-        double totalH = h + GlassTaskbarStripHeight;
+        double dockBottom = gridTop + h;
+        double totalH = h + topInset + GlassTaskbarStripHeight;
         DrawGlassSlab(left, top, w, totalH, radius, opacity);
         DrawGlassSeam(left, dockBottom, w, opacity);
 
@@ -126,7 +132,7 @@ public partial class RadialWindow
         // year-month-day and time all on one line.
         var clockTime = new TextBlock
         {
-            FontSize = Math.Max(15, icon * 0.3),
+            FontSize = Math.Max(17, icon * 0.34),
             FontWeight = FontWeights.SemiBold,
             TextWrapping = TextWrapping.NoWrap,
             Foreground = new SolidColorBrush(Color.FromArgb(0xF2, 0xFF, 0xFF, 0xFF)),
