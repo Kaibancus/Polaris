@@ -23,7 +23,10 @@ https://github.com/user-attachments/assets/f18cdadc-0f6f-4f12-b3ef-ae256569738d
 
 
 
-https://github.com/user-attachments/assets/f27e35c1-91f8-4f12-a7c0-fd7eaa45e28a
+https://github.com/user-attachments/assets/a95feb83-b4c0-4629-9ed8-02748d11faf4
+
+
+
 
 
 ## 环境要求
