@@ -656,8 +656,19 @@ public partial class RadialWindow : Window
         };
         System.Windows.Media.Animation.Timeline.SetDesiredFrameRate(slide, App.AnimationFrameRate);
         System.Windows.Media.Animation.Timeline.SetDesiredFrameRate(stretch, App.AnimationFrameRate);
+        // The squash/stretch scales the whole panel; without a cache WPF would
+        // re-rasterise every blurred glass-chrome layer each frame (heavy ->
+        // dropped frames). Cache the entire panel to one GPU texture for the
+        // duration so the scale just stretches that texture, then drop the cache
+        // when the motion settles so live content (clock, hover) renders crisply.
+        var riseCache = new System.Windows.Media.BitmapCache { SnapsToDevicePixels = false };
+        PanelCanvas.CacheMode = riseCache;
         Polaris.Services.FpsProfiler.Push("GlassRise");
-        slide.Completed += (_, _) => Polaris.Services.FpsProfiler.Pop("GlassRise");
+        slide.Completed += (_, _) =>
+        {
+            PanelCanvas.CacheMode = null;
+            Polaris.Services.FpsProfiler.Pop("GlassRise");
+        };
         tt.BeginAnimation(TranslateTransform.YProperty, slide);
         sc.BeginAnimation(ScaleTransform.ScaleYProperty, stretch);
     }
@@ -1190,6 +1201,10 @@ public partial class RadialWindow : Window
             // the cursor exactly.
             _pressedIcon.BeginAnimation(Canvas.LeftProperty, null);
             _pressedIcon.BeginAnimation(Canvas.TopProperty, null);
+            // The floating hover label was shown while hovering this icon; hide it
+            // so the name doesn't linger in place once the icon starts moving.
+            if (_theme.ShowGlassPanel)
+                HideGlassHoverLabel();
             // For the glass grid, lift the dragged icon out of the clipped scroll
             // layer into the top-level canvas so it can be dragged anywhere
             // (including up into the delete zone) without being clipped, and so

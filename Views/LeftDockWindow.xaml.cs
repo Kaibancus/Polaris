@@ -80,6 +80,9 @@ public partial class LeftDockWindow : Window
 
     // Cached layout geometry (window-local), recomputed each Rebuild.
     private double _slabLeft, _slabTop, _slabW, _slabH, _colCenterX;
+    // Visible glass/dark body bounds (narrower than the full _slabW hit area),
+    // used for both the slab draw and the running-strip seam.
+    private double _bodyLeft, _bodyW;
     private int _pinnedVisible;
     private double _pinnedAreaTop;   // y of the first pinned slot's cell top
     private double _runAreaTop;      // y where the running strip begins
@@ -485,11 +488,21 @@ public partial class LeftDockWindow : Window
             double darkBleed = GIcon * 0.4;
             double darkLeft = _slabLeft - darkBleed;
             double darkW = (_colCenterX - darkLeft) + GIcon / 2.0 + darkPad;
+            _bodyLeft = darkLeft;
+            _bodyW = darkW;
             GlassChrome.DrawSlab(PanelCanvas, darkLeft, _slabTop, darkW, _slabH, trayRadius, opacity, track: null, frosted: false, dark: true);
         }
         else
         {
-            GlassChrome.DrawSlab(PanelCanvas, _slabLeft, _slabTop, _slabW, _slabH, trayRadius, opacity, track: null, frosted: false, dark: false);
+            // Hug the icon column with only a modest right margin instead of the
+            // full hover-reserve width, so the liquid-glass panel doesn't leave a
+            // large empty block to the right of the icons.
+            double glassPad = GIcon * 0.30;
+            double glassLeft = _slabLeft;
+            double glassW = (_colCenterX - glassLeft) + GIcon / 2.0 + glassPad;
+            _bodyLeft = glassLeft;
+            _bodyW = glassW;
+            GlassChrome.DrawSlab(PanelCanvas, glassLeft, _slabTop, glassW, _slabH, trayRadius, opacity, track: null, frosted: false, dark: false);
         }
         if (_hasRunningArea)
             DrawSeam(_seamY, opacity);
@@ -554,8 +567,8 @@ public partial class LeftDockWindow : Window
 
     private void DrawSeam(double seamY, double opacity)
     {
-        double x1 = _slabLeft + 10 * _uiScale;
-        double x2 = _slabLeft + _slabW - 10 * _uiScale;
+        double x1 = _bodyLeft + 10 * _uiScale;
+        double x2 = _bodyLeft + _bodyW - 10 * _uiScale;
 
         bool isSaturn = ThemeRegistry.Get(_config.Settings.Theme).IsSaturn;
 
