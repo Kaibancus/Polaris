@@ -339,13 +339,20 @@ public partial class LeftDockWindow : Window
         double icon = EffectiveIconSize;
         double sh = Height > 0 ? Height : SystemParameters.PrimaryScreenHeight;
 
-        double leftGap = 5 * _uiScale;
+        double leftGap = 1 * _uiScale;
         // Slab is only as wide as the icon at its hover-enlarged size (plus a
         // hair of breathing room), so the glass background is a snug column.
         double padX = GIcon * (HoverScale - 1.0) / 2.0 + icon * 0.12;
         _slabW = GIcon + padX * 2.0;
         _slabLeft = leftGap;
-        _colCenterX = _slabLeft + _slabW / 2.0;
+        // Bias the resting icon column toward the left of the slab so the icons
+        // hug the screen edge. The hover wave pops icons to the RIGHT, so the
+        // left half of the slab's hover-reserve is unused at rest — shifting the
+        // column left there gives the pop-out more room without clipping. The
+        // Saturn (dark smoked-glass) dock keeps its icons centred per design.
+        bool isSaturn = ThemeRegistry.Get(_config.Settings.Theme).IsSaturn;
+        double leftBias = isSaturn ? 0 : GIcon * (HoverScale - 1.0) * 0.30;
+        _colCenterX = _slabLeft + _slabW / 2.0 - leftBias;
 
         double topPad = icon * 0.7;
         double botPad = icon * 0.7;
@@ -536,25 +543,37 @@ public partial class LeftDockWindow : Window
         double x1 = _slabLeft + 10 * _uiScale;
         double x2 = _slabLeft + _slabW - 10 * _uiScale;
 
-        // A subtle, thin glass-seam divider: a faint cool glow, a soft thin
-        // groove, and a barely-there glassy highlight — a quiet hairline split
-        // between the dock and the running strip rather than a bold groove.
+        bool isSaturn = ThemeRegistry.Get(_config.Settings.Theme).IsSaturn;
+
+        // The Saturn (dark smoked-glass) dock uses a subtle, thin hairline so it
+        // doesn't fight the dark material; the liquid-glass dock keeps its
+        // original bold seam (a soft cool glow, a strong dark groove and a bright
+        // glassy highlight) for a deep, obvious split.
+        double glowThk   = isSaturn ? 5.0  : 10.0;
+        byte   glowA     = isSaturn ? (byte)0x3A : (byte)0x99;
+        int    glowBlur  = isSaturn ? 5    : 6;
+        double grooveThk = isSaturn ? 1.4  : 5.0;
+        byte   grooveA   = isSaturn ? (byte)0x88 : (byte)0xF2;
+        double shineThk  = isSaturn ? 1.0  : 2.2;
+        byte   shineA    = isSaturn ? (byte)0x55 : (byte)0xFF;
+        double shineOff  = isSaturn ? 1.6  : 2.6;
+
         var glow = new System.Windows.Shapes.Line
         {
             X1 = x1, X2 = x2, Y1 = seamY, Y2 = seamY,
-            StrokeThickness = 5.0,
-            Stroke = new SolidColorBrush(Color.FromArgb(0x3A, 0xBF, 0xE0, 0xFF)),
+            StrokeThickness = glowThk,
+            Stroke = new SolidColorBrush(Color.FromArgb(glowA, 0xBF, 0xE0, 0xFF)),
             Opacity = opacity,
             IsHitTestVisible = false,
             StrokeStartLineCap = PenLineCap.Round,
             StrokeEndLineCap = PenLineCap.Round,
-            Effect = new System.Windows.Media.Effects.BlurEffect { Radius = 5 },
+            Effect = new System.Windows.Media.Effects.BlurEffect { Radius = glowBlur },
         };
         var groove = new System.Windows.Shapes.Line
         {
             X1 = x1, X2 = x2, Y1 = seamY, Y2 = seamY,
-            StrokeThickness = 1.4,
-            Stroke = new SolidColorBrush(Color.FromArgb(0x88, 0x02, 0x05, 0x0D)),
+            StrokeThickness = grooveThk,
+            Stroke = new SolidColorBrush(Color.FromArgb(grooveA, 0x02, 0x05, 0x0D)),
             Opacity = opacity,
             IsHitTestVisible = false,
             StrokeStartLineCap = PenLineCap.Round,
@@ -562,9 +581,9 @@ public partial class LeftDockWindow : Window
         };
         var shine = new System.Windows.Shapes.Line
         {
-            X1 = x1, X2 = x2, Y1 = seamY + 1.6, Y2 = seamY + 1.6,
-            StrokeThickness = 1.0,
-            Stroke = new SolidColorBrush(Color.FromArgb(0x55, 0xEA, 0xF4, 0xFF)),
+            X1 = x1, X2 = x2, Y1 = seamY + shineOff, Y2 = seamY + shineOff,
+            StrokeThickness = shineThk,
+            Stroke = new SolidColorBrush(Color.FromArgb(shineA, 0xEA, 0xF4, 0xFF)),
             Opacity = opacity,
             IsHitTestVisible = false,
             StrokeStartLineCap = PenLineCap.Round,
