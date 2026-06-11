@@ -20,7 +20,6 @@ public partial class RadialWindow
     // Icons for taskbar apps are cached separately from the configured-app cache
     // (PruneIconCache would otherwise evict them every Rebuild).
     private readonly Dictionary<string, BitmapSource?> _taskbarIconCache = new();
-    private int _taskbarToken;
 
     // Per-tile arc layout so a hovered tile can push its neighbours aside
     // (dock-style magnification).
@@ -52,86 +51,10 @@ public partial class RadialWindow
     /// </summary>
     private void RefreshTaskbarApps()
     {
-        // The glass theme no longer shows a running-app taskbar row at the bottom
-        // of the dock; only the Saturn theme draws a running-app arc.
-        if (!_theme.IsSaturn || !_shown)
-        {
-            ClearTaskbarIcons();
-            return;
-        }
-
-        // Build the exclusion sets (configured apps) on the UI thread.
-        var excludePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var excludeAumids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        // Fallback: match by executable file name too. Many apps launch from a
-        // different full path than their pinned shortcut target (versioned
-        // install folders like app-1.2.3\app.exe, or launcher stubs), so an
-        // exact full-path compare misses and the app reappears in the dock.
-        var excludeFileNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        // Exclude apps pinned in EITHER dock so the main taskbar strip and the
-        // left dock's running strip share one logic (identical "running but not
-        // pinned anywhere" set).
-        var pinnedAll = new List<Polaris.Models.AppEntry>(_config.Apps);
-        pinnedAll.AddRange(_config.LeftDockApps);
-        foreach (var a in pinnedAll)
-        {
-            if (string.IsNullOrWhiteSpace(a.Path))
-                continue;
-            string? aumid = WindowPreviewService.TryGetLauncherAumid(a.Path, a.Arguments);
-            if (aumid != null)
-            {
-                excludeAumids.Add(aumid);
-            }
-            else
-            {
-                try { excludePaths.Add(System.IO.Path.GetFullPath(a.Path)); }
-                catch { excludePaths.Add(a.Path); }
-                try
-                {
-                    string fn = System.IO.Path.GetFileName(a.Path);
-                    if (!string.IsNullOrWhiteSpace(fn))
-                        excludeFileNames.Add(fn);
-                }
-                catch { /* ignore malformed paths */ }
-            }
-        }
-
-        int token = ++_taskbarToken;
-        System.Threading.Tasks.Task.Run(() =>
-        {
-            List<TaskbarApp> apps;
-            try { apps = WindowPreviewService.GetTaskbarApps(); }
-            catch { return; }
-
-            var filtered = new List<TaskbarApp>();
-            foreach (var ta in apps)
-            {
-                string full;
-                try { full = System.IO.Path.GetFullPath(ta.Path); }
-                catch { full = ta.Path; }
-
-                if (excludePaths.Contains(full))
-                    continue;
-                if (ta.Aumid != null && excludeAumids.Contains(ta.Aumid))
-                    continue;
-                try
-                {
-                    string fn = System.IO.Path.GetFileName(ta.Path);
-                    if (!string.IsNullOrWhiteSpace(fn) && excludeFileNames.Contains(fn))
-                        continue;
-                }
-                catch { /* ignore malformed paths */ }
-                filtered.Add(ta);
-            }
-
-            Dispatcher.BeginInvoke(() =>
-            {
-                if (token != _taskbarToken || !_shown)
-                    return;
-                if (_theme.IsSaturn)
-                    DrawTaskbarArc(filtered);
-            });
-        });
+        // The bottom running-app arc has been removed: running apps for every
+        // theme (Saturn included) are now surfaced in the left side dock's
+        // running strip instead, so this method only ever clears any stale tiles.
+        ClearTaskbarIcons();
     }
 
     private void ClearTaskbarIcons()

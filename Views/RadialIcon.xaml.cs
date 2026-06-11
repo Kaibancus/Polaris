@@ -102,12 +102,20 @@ public partial class RadialIcon : UserControl
         else
         {
             HoverGlow.Visibility = Visibility.Collapsed;
-            // Faint blue bloom from the accent colour (alpha kept low so it reads
-            // as a gentle halo rather than a hard wash). Drawn behind the icon so
-            // only the background plate glows — the icon image stays crisp.
+            // Faint bloom from the accent colour (alpha kept low so it reads as a
+            // gentle halo rather than a hard wash). Drawn behind the icon so only
+            // the background plate glows — the icon image stays crisp. When the
+            // supplied glow colour is already translucent (alpha < 0xFF) its own
+            // alpha is honoured, so themes can request a softer bloom.
             BlueGlow.Visibility = Visibility.Visible;
+            byte glowAlpha = glowColor.A < 0xFF ? glowColor.A : (byte)0x5A;
             BlueGlow.Background = new SolidColorBrush(
-                Color.FromArgb(0x5A, glowColor.R, glowColor.G, glowColor.B));
+                Color.FromArgb(glowAlpha, glowColor.R, glowColor.G, glowColor.B));
+
+            // Saturn tray: reduce the icon plate to an almost-fully-transparent
+            // sliver (alpha ≈ 1%) so the icons appear to rest directly on the
+            // black disc with virtually no visible tray.
+            IconPlate.Background = new SolidColorBrush(Color.FromArgb(0x03, 0xFF, 0xFF, 0xFF));
         }
 
         // Left dock: no tray. Strip the glass plate (background / rim / shadow /

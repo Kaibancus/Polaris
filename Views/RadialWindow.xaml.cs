@@ -971,7 +971,11 @@ public partial class RadialWindow : Window
             bmp = IconExtractor.GetIcon(entry.EffectiveIconSource);
             _iconCache[entry.EffectiveIconSource] = bmp;
         }
-        var icon = new RadialIcon(entry, bmp, iconSize, AccentColor, LabelBrush, _theme.ShowGlassPanel);
+        // Saturn icons bloom with a very faint, high-transparency black halo
+        // (so it reads as a soft shadow on the dark disc) instead of the accent
+        // blue used by the glass theme.
+        Color glow = _theme.IsSaturn ? Color.FromArgb(0x30, 0x00, 0x00, 0x00) : AccentColor;
+        var icon = new RadialIcon(entry, bmp, iconSize, glow, LabelBrush, _theme.ShowGlassPanel);
         icon.PreviewMouseLeftButtonDown += Icon_PreviewMouseLeftButtonDown;
         icon.HoverStarted += OnIconHoverStarted;
         icon.HoverEnded += OnIconHoverEnded;
@@ -1357,25 +1361,25 @@ public partial class RadialWindow : Window
     }
 
     /// <summary>
-    /// Number of icons on the inner ring for <paramref name="n"/> total icons,
-    /// derived from the persisted <c>Ring0Count</c> (0 = auto) and clamped to the
-    /// per-ring caps (inner ≤ 12, outer ≤ 24).
+    /// Number of icons on the inner ring for <paramref name="n"/> total icons.
+    /// The Saturn inner ring is the resident-app region (the first apps, which
+    /// are also mirrored into the left side dock), filled first and capped at
+    /// <see cref="Ring0Cap"/> (12). The inner ring only grows beyond that cap
+    /// when the outer ring would otherwise overflow its own cap.
     /// </summary>
     private int EffectiveRing0Count(int n)
     {
         if (n <= 0)
             return 0;
 
-        int r0 = _config.Settings.Ring0Count;
-        if (r0 <= 0 || r0 > n)
-            r0 = Math.Min(Ring0Cap, n); // auto: fill the inner ring first
+        // Fill the inner ring first, up to its cap.
+        int r0 = Math.Min(Ring0Cap, n);
 
-        r0 = Math.Clamp(r0, 1, Math.Min(Ring0Cap, n));
-
-        // If the outer ring would overflow its cap, push more onto the inner ring.
+        // If the outer ring would overflow its cap, push the surplus inward.
         if (n - r0 > Ring1Cap)
-            r0 = Math.Min(Ring0Cap, n);
-        return r0;
+            r0 = Math.Min(n, n - Ring1Cap);
+
+        return Math.Clamp(r0, 1, n);
     }
 
     /// <summary>Builds the slot centres for a layout of <paramref name="n"/> icons

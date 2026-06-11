@@ -466,7 +466,10 @@ public partial class LeftDockWindow : Window
         // (main-icon * 0.42); EffectiveIconSize / LeftDockScale recovers the
         // main dock's icon size from this scaled-down tray.
         double trayRadius = EffectiveIconSize / LeftDockScale * 0.42;
-        GlassChrome.DrawSlab(PanelCanvas, _slabLeft, _slabTop, _slabW, _slabH, trayRadius, opacity, track: null, frosted: false);
+        // The Saturn theme uses a black smoked-glass side dock; every other
+        // theme keeps the clear "liquid glass" body.
+        bool darkSlab = ThemeRegistry.Get(_config.Settings.Theme).IsSaturn;
+        GlassChrome.DrawSlab(PanelCanvas, _slabLeft, _slabTop, _slabW, _slabH, trayRadius, opacity, track: null, frosted: false, dark: darkSlab);
         if (_hasRunningArea)
             DrawSeam(_seamY, opacity);
 
@@ -964,7 +967,9 @@ public partial class LeftDockWindow : Window
 
     // Influence radius of the wave, in icon-cell units. Icons within this many
     // cells of the cursor are magnified; the falloff is a smooth raised cosine.
-    private const double WaveSupport = 2.6;
+    // A smaller support makes the wave sharper/peakier (neighbours fall off to
+    // rest faster), so the bulge is concentrated under the pointer.
+    private const double WaveSupport = 2.3;
 
     /// <summary>Continuous magnification for an icon, as a smooth function of its
     /// distance (in cells) from the cursor — peaks at <see cref="HoverScale"/>

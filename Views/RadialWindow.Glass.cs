@@ -255,11 +255,24 @@ public partial class RadialWindow
         // year-month-day and time all on one line.
         var clockTime = new TextBlock
         {
-            FontFamily = new FontFamily("Segoe UI Light, Microsoft YaHei UI Light, Segoe UI"),
+            FontFamily = new FontFamily("Segoe UI Semibold, Microsoft YaHei UI, Segoe UI"),
             FontSize = Math.Max(18, icon * 0.36),
-            FontWeight = FontWeights.Light,
+            FontWeight = FontWeights.SemiBold,
             TextWrapping = TextWrapping.NoWrap,
-            Foreground = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF)),
+            // Frosted-glass glyphs: a soft, milky translucent fill (semi-opaque
+            // white easing to a cooler, slightly more transparent tint) rather
+            // than a flat opaque white, so the text reads like ground glass.
+            Foreground = new LinearGradientBrush
+            {
+                StartPoint = new Point(0, 0),
+                EndPoint = new Point(0, 1),
+                GradientStops =
+                {
+                    new GradientStop(Color.FromArgb(0xF0, 0xFF, 0xFF, 0xFF), 0.0),
+                    new GradientStop(Color.FromArgb(0xD2, 0xF2, 0xF6, 0xFF), 0.5),
+                    new GradientStop(Color.FromArgb(0xBE, 0xD8, 0xE2, 0xF2), 1.0),
+                },
+            },
             // A dark blurred halo (no offset) wraps the light glyphs so they stay
             // legible even when the glass is highly transparent over a white
             // desktop.
