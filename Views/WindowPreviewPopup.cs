@@ -232,7 +232,37 @@ internal sealed class WindowPreviewPopup
                 FontSize = 12,
             };
         }
-        inner.Children.Add(thumbHost);
+
+        // A close ("×") button in the thumbnail's top-right corner, shown only
+        // while the tile is hovered, that closes the underlying window.
+        var closeBtn = new Border
+        {
+            Width = 22,
+            Height = 22,
+            Margin = new Thickness(0, 4, 4, 0),
+            CornerRadius = new CornerRadius(6),
+            HorizontalAlignment = HorizontalAlignment.Right,
+            VerticalAlignment = VerticalAlignment.Top,
+            Background = new SolidColorBrush(Color.FromArgb(0xCC, 0xC0, 0x3A, 0x2E)),
+            BorderBrush = new SolidColorBrush(Color.FromArgb(0xE6, 0xFF, 0xFF, 0xFF)),
+            BorderThickness = new Thickness(1),
+            Cursor = Cursors.Hand,
+            Visibility = Visibility.Collapsed,
+            Child = new TextBlock
+            {
+                Text = "✕",
+                FontSize = 12,
+                FontWeight = FontWeights.Bold,
+                Foreground = Brushes.White,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+            },
+        };
+
+        var thumbArea = new Grid();
+        thumbArea.Children.Add(thumbHost);
+        thumbArea.Children.Add(closeBtn);
+        inner.Children.Add(thumbArea);
 
         inner.Children.Add(new TextBlock
         {
@@ -255,14 +285,38 @@ internal sealed class WindowPreviewPopup
         };
         IntPtr handle = w.Handle;
         tile.MouseEnter += (_, _) =>
+        {
             tile.Background = new SolidColorBrush(Color.FromArgb(0x33, 0xFF, 0xFF, 0xFF));
-        tile.MouseLeave += (_, _) => tile.Background = Brushes.Transparent;
+            closeBtn.Visibility = Visibility.Visible;
+        };
+        tile.MouseLeave += (_, _) =>
+        {
+            tile.Background = Brushes.Transparent;
+            closeBtn.Visibility = Visibility.Collapsed;
+        };
         tile.MouseLeftButtonUp += (_, e) =>
         {
             e.Handled = true;
             WindowPreviewService.Activate(handle);
             Close();
             _onActivated?.Invoke();
+        };
+        closeBtn.MouseEnter += (_, _) =>
+            closeBtn.Background = new SolidColorBrush(Color.FromArgb(0xFF, 0xE0, 0x4A, 0x3C));
+        closeBtn.MouseLeave += (_, _) =>
+            closeBtn.Background = new SolidColorBrush(Color.FromArgb(0xCC, 0xC0, 0x3A, 0x2E));
+        closeBtn.MouseLeftButtonUp += (_, e) =>
+        {
+            e.Handled = true;   // don't fall through to the tile's activate handler
+            WindowPreviewService.CloseWindow(handle);
+            _tileHosts.Remove(handle);
+            // Remove this tile from the strip; close the whole popup once empty.
+            if (tile.Parent is Panel parent)
+            {
+                parent.Children.Remove(tile);
+                if (parent.Children.Count == 0)
+                    Close();
+            }
         };
         return tile;
     }

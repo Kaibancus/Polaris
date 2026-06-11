@@ -175,6 +175,31 @@ public static class RunningAppTracker
     }
 
     /// <summary>
+    /// True when <paramref name="path"/> is a shell-namespace pin (This PC,
+    /// Recycle Bin… — a "::{CLSID}" or "shell:" target, not a real exe) and a
+    /// File-Explorer window matching its display <paramref name="name"/> is
+    /// currently open. Such items all run inside the shared explorer.exe and so
+    /// can only be told apart by their window title.
+    /// </summary>
+    public static bool IsShellItemRunning(string name, string path, IReadOnlyList<string> explorerTitles)
+    {
+        if (explorerTitles == null || explorerTitles.Count == 0)
+            return false;
+        if (string.IsNullOrWhiteSpace(name) || string.IsNullOrWhiteSpace(path))
+            return false;
+        bool isShell = path.StartsWith("::", StringComparison.Ordinal)
+            || path.StartsWith("shell:", StringComparison.OrdinalIgnoreCase);
+        if (!isShell)
+            return false;
+        foreach (var t in explorerTitles)
+        {
+            if (!string.IsNullOrEmpty(t) && t.Contains(name, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>
     /// Brings the running instance of <paramref name="exePath"/> to the
     /// foreground (restoring it if minimized). Returns true on success.
     /// </summary>
@@ -206,6 +231,60 @@ public static class RunningAppTracker
         }
         SetForegroundWindow(h);
         return true;
+    }
+
+    /// <summary>
+    /// Watches a freshly-launched process and, if its main window first appears
+    /// minimized, restores it to a normal window and brings it forward.
+    ///
+    /// Polaris runs as a background tray process, so apps it launches can
+    /// inherit a minimized show state (via STARTUPINFO/SW_SHOWDEFAULT) and open
+    /// minimized to the taskbar instead of as a normal window. This nudges such
+    /// windows back to normal. Windows that open normally are left untouched.
+    /// </summary>
+    public static void EnsureRestoredWhenReady(Process? proc)
+    {
+        if (proc == null)
+            return;
+
+        System.Threading.Tasks.Task.Run(async () =>
+        {
+            try
+            {
+                // Poll for up to ~4s for the app's main window to appear.
+                for (int i = 0; i < 40; i++)
+                {
+                    await System.Threading.Tasks.Task.Delay(100).ConfigureAwait(false);
+
+                    try
+                    {
+                        proc.Refresh();
+                        if (proc.HasExited)
+                            return;
+                    }
+                    catch
+                    {
+                        return;
+                    }
+
+                    IntPtr h = proc.MainWindowHandle;
+                    if (h == IntPtr.Zero)
+                        continue;
+
+                    // The window exists. Only intervene if it came up minimized.
+                    if (IsIconic(h))
+                    {
+                        ShowWindow(h, SW_RESTORE);
+                        SetForegroundWindow(h);
+                    }
+                    return;
+                }
+            }
+            catch
+            {
+                // Best-effort only — never let a launch fail because of this.
+            }
+        });
     }
 
     /// <summary>

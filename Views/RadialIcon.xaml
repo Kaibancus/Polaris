@@ -7,7 +7,10 @@
              RenderTransformOrigin="0.5,0.5"
              Cursor="Hand">
     <UserControl.RenderTransform>
-        <ScaleTransform x:Name="Scale" ScaleX="1" ScaleY="1"/>
+        <TransformGroup>
+            <ScaleTransform x:Name="Scale" ScaleX="1" ScaleY="1"/>
+            <TranslateTransform x:Name="MagnifyTranslate" X="0" Y="0"/>
+        </TransformGroup>
     </UserControl.RenderTransform>
 
     <Grid>
@@ -172,6 +175,33 @@
                 </LinearGradientBrush>
             </Border.BorderBrush>
         </Border>
+
+        <!-- Running dot (left dock only): a small breathing green dot hugging the
+             icon's LEFT edge. Hosted on a zero-size Canvas so it never affects
+             layout / centering; sized and positioned in code-behind. A soft
+             blurred halo sits behind a crisp core, both pulsing in opacity. -->
+        <Canvas IsHitTestVisible="False">
+            <Ellipse x:Name="RunDotGlow"
+                     Fill="#5CFF7A"
+                     Opacity="0"
+                     Visibility="Collapsed">
+                <Ellipse.Effect>
+                    <BlurEffect Radius="6"/>
+                </Ellipse.Effect>
+            </Ellipse>
+            <Ellipse x:Name="RunDot"
+                     Opacity="0"
+                     Visibility="Collapsed">
+                <Ellipse.Fill>
+                    <RadialGradientBrush GradientOrigin="0.4,0.35" Center="0.4,0.35"
+                                         RadiusX="0.65" RadiusY="0.65">
+                        <GradientStop Color="#FFB6FFC4" Offset="0.0"/>
+                        <GradientStop Color="#FF4CE06B" Offset="0.55"/>
+                        <GradientStop Color="#FF22B24C" Offset="1.0"/>
+                    </RadialGradientBrush>
+                </Ellipse.Fill>
+            </Ellipse>
+        </Canvas>
 
         <!-- Name label. Hosted on a zero-size Canvas so it never affects the
              icon's measured size / centering. Positioned + sized in code-behind.

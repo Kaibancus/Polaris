@@ -85,27 +85,32 @@ public sealed class SaturnRingTheme : PanelTheme
 }
 
 /// <summary>The "液态玻璃" theme: a translucent rounded-rectangle frosted-glass
-/// panel with the icons laid out in a 6-column grid. The grid defaults to 3
-/// rows (6×3) and grows one row at a time (6×4, 6×5) as the icons overflow.
-/// Supports free drag-reorder with the neighbour "push aside"
-/// animation. The glass panel's translucency is driven by the user's
-/// panel-opacity setting.</summary>
+/// panel with the icons laid out in a 7-column grid. The grid shows 4 rows
+/// (7×4) at a time; once the icons overflow that, the surplus rows scroll into
+/// view (vertical scrollbar / two-finger trackpad). Supports free drag-reorder
+/// with the neighbour "push aside" animation. The glass panel's translucency is
+/// driven by the user's panel-opacity setting.</summary>
 public sealed class LiquidGlassTheme : PanelTheme
 {
-    public const int Columns = 6;
-    public const int DefaultRows = 3;
-    public const int MaxRows = 5;
+    public const int Columns = 7;
 
-    /// <summary>Maximum icons this theme can display (a full 6×5 grid).</summary>
+    /// <summary>Number of rows shown at once before the grid begins to scroll.</summary>
+    public const int VisibleRows = 4;
+
+    /// <summary>Maximum number of rows the grid can grow to (scrolling reveals
+    /// the rows beyond <see cref="VisibleRows"/>).</summary>
+    public const int MaxRows = 12;
+
+    /// <summary>Maximum icons this theme can display (a full 7×12 grid).</summary>
     public const int Capacity = Columns * MaxRows;
 
-    /// <summary>Number of grid rows to display for <paramref name="count"/> icons:
-    /// the default 6×3 grid, growing one row at a time (6×4, 6×5) as the icons
-    /// overflow, capped at <see cref="MaxRows"/>.</summary>
+    /// <summary>Number of grid rows needed to hold <paramref name="count"/> icons,
+    /// at least <see cref="VisibleRows"/> (so the dock keeps its 4-row footprint
+    /// even when sparsely filled) and capped at <see cref="MaxRows"/>.</summary>
     public static int RowsFor(int count)
     {
         int rows = (count + Columns - 1) / Columns;
-        return Math.Clamp(rows, DefaultRows, MaxRows);
+        return Math.Clamp(rows, VisibleRows, MaxRows);
     }
 
     public override string Id => "liquidglass";
@@ -114,7 +119,8 @@ public sealed class LiquidGlassTheme : PanelTheme
     public override bool ShowGlassPanel => true;
     public override int MaxIcons => Capacity;
     public override Brush WindowBackground => Brushes.Transparent;
-    public override double DefaultTransparency => 0.05;
+    // Liquid-glass dock defaults to 90% transparency (very see-through glass).
+    public override double DefaultTransparency => 0.90;
     // 50% of the settings icon-size slider range [40, 96]: 40 + 0.50 * 56 = 68.
     public override double DefaultIconSize => 68.0;
 
@@ -126,13 +132,19 @@ public sealed class LiquidGlassTheme : PanelTheme
         double cellW = icon * 2.15;
         double cellH = icon * 2.35;   // extra height leaves room for the label
 
-        int rows = RowsFor(count);
+        // Lay every icon out on its true row (the grid can be taller than the
+        // visible window; the host scrolls the surplus rows into view). The grid
+        // is TOP-aligned: row 0 sits at the panel's first visible row and lower
+        // rows extend downward, so scrolling reveals them.
+        int rows = Math.Max(1, (count + Columns - 1) / Columns);
         double gridW = (Columns - 1) * cellW;
-        double gridH = (rows - 1) * cellH;
         double x0 = center.X - gridW / 2.0;
-        double y0 = center.Y - gridH / 2.0;
+        // center.Y is the centre of the first VISIBLE row block (VisibleRows tall);
+        // row 0 starts at the top of that block.
+        double visibleH = (VisibleRows - 1) * cellH;
+        double y0 = center.Y - visibleH / 2.0;
 
-        // Hard cap at the 6×5 grid; extra icons are never placed (the host
+        // Hard cap at the full grid; extra icons are never placed (the host
         // refuses to add beyond Capacity, so this is just a safety clamp).
         int max = Math.Min(count, Capacity);
         for (int i = 0; i < max; i++)
@@ -142,6 +154,7 @@ public sealed class LiquidGlassTheme : PanelTheme
             list.Add(new Point(x0 + col * cellW, y0 + row * cellH));
         }
 
+        double gridH = (rows - 1) * cellH;
         outerReach = Math.Max(gridW, gridH) / 2.0 + icon;
         return list;
     }

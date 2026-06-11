@@ -26,8 +26,25 @@ public sealed class AppEntry
     public string IconSource { get; set; } = string.Empty;
 
     [JsonIgnore]
-    public string EffectiveIconSource =>
-        string.IsNullOrWhiteSpace(IconSource) ? Path : IconSource;
+    public string EffectiveIconSource
+    {
+        get
+        {
+            // Packaged (UWP / AppX) apps are launched via explorer.exe with a
+            // "shell:AppsFolder\<AUMID>" argument. Their icon must come from the
+            // shell namespace (version-independent), not a hard-coded
+            // "...\WindowsApps\<pkg>_<version>_x64__...\app.exe" path that breaks
+            // on every app update and lives under an ACL-restricted folder.
+            if (!string.IsNullOrWhiteSpace(Arguments))
+            {
+                int i = Arguments.IndexOf("shell:AppsFolder\\",
+                    System.StringComparison.OrdinalIgnoreCase);
+                if (i >= 0)
+                    return Arguments.Substring(i).Trim().Trim('"');
+            }
+            return string.IsNullOrWhiteSpace(IconSource) ? Path : IconSource;
+        }
+    }
 
     /// <summary>
     /// True when <see cref="Path"/> is a shell-namespace token (This PC,

@@ -53,6 +53,7 @@ public static class ConfigStore
 
             cfg.Settings ??= new AppSettings();
             cfg.Apps ??= new();
+            cfg.LeftDockApps ??= new();
             config = cfg;
             return true;
         }

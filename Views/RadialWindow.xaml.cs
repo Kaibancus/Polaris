@@ -62,19 +62,165 @@ public partial class RadialWindow : Window
     // fill the roomy grid cells more comfortably.
     private const double GlassIconScale = 1.32;
 
-    // The glass dock (panel + grid icons) is lifted up by this amount so the
-    // running-taskbar row below it has room: a magnified row tile grows upward
-    // but no longer reaches the dock's bottom edge.
-    private double GlassDockLift => EffectiveIconSize * 0.7;
+    // The glass dock now extends all the way to the bottom screen edge (its
+    // frosted slab covers down past the system taskbar), so there is no gap.
+    private double GlassDockBottomMargin => 0.0;
+
+    /// <summary>Height (DIP) of the system taskbar when it is docked at the
+    /// bottom of the primary screen; 0 when the taskbar is on another edge or
+    /// auto-hidden. Used to keep the dock's bottom icon row clear of it.</summary>
+    private double SystemTaskbarHeight
+    {
+        get
+        {
+            double sh = SystemParameters.PrimaryScreenHeight;
+            double h = sh - SystemParameters.WorkArea.Bottom;
+            return h > 1.0 ? h : 0.0;
+        }
+    }
+
+    /// <summary>Glass reserved at the bottom of the slab: enough to clear the
+    /// system taskbar plus a little breathing room, so the lowest icon row sits
+    /// above the taskbar even though the frosted glass itself reaches the
+    /// screen's bottom edge.</summary>
+    private double GlassBottomReserve =>
+        SystemTaskbarHeight + EffectiveIconSize * 0.65;
+
+    // Current vertical scroll of the grid (device-independent px). 0 = first
+    // row aligned to the top of the visible grid block; positive scrolls the
+    // upper rows up out of view to reveal lower rows. Clamped to GlassScrollMax.
+    private double _glassScroll;
+
+    // The glass grid icons live inside a dedicated scroll layer so the entire
+    // grid can be scrolled by translating ONE transform (GPU-composited, no
+    // per-icon layout) instead of repositioning every icon each frame. The
+    // clip layer (parent) is fixed to the viewport; the scroll layer (child,
+    // holding the icons) carries the vertical TranslateTransform.
+    private Canvas? _glassScrollLayer;
+    private TranslateTransform? _glassScrollTransform;
+
+    /// <summary>Height (px) of one grid cell — the column pitch's vertical twin,
+    /// also the per-row scroll step.</summary>
+    private double GlassCellH => EffectiveIconSize * 2.35;
+
+    /// <summary>Height of the glass dock <b>body</b> (the panel that frames the
+    /// icon grid), fixed to the <see cref="LiquidGlassTheme.VisibleRows"/> visible
+    /// rows so the slab keeps a constant footprint no matter how many rows the
+    /// grid actually has (surplus rows scroll inside it).</summary>
+    private double GlassDockBodyHeight
+    {
+        get
+        {
+            double icon = EffectiveIconSize;
+            double padY = icon * 1.15;
+            double gridHVis = (LiquidGlassTheme.VisibleRows - 1) * GlassCellH;
+            return gridHVis + icon + padY * 2;
+        }
+    }
+
+    /// <summary>Total glass dock height: body + the top clock band + the bottom
+    /// reserve that keeps the lowest icon row above the system taskbar (the
+    /// frosted slab itself reaches the screen bottom).</summary>
+    private double GlassDockTotalHeight =>
+        GlassDockBodyHeight + EffectiveIconSize * 0.55 + GlassBottomReserve;
+
+    /// <summary>Y of the centre of the visible grid block, computed so the whole
+    /// dock (clock band + 4-row body + taskbar strip) sits flush against the
+    /// bottom screen edge. This is the layout centre passed to ComputeSlots and
+    /// used by DrawGlassPanel / the taskbar row.</summary>
+    private double GlassDockCenterY
+    {
+        get
+        {
+            double sh = Height > 0 ? Height : ActualHeight;
+            double topInset = EffectiveIconSize * 0.55;
+            // Slab bottom flush to the screen (minus margin); work back to the
+            // body top, then to the visible-grid-block centre.
+            double slabBottom = sh - GlassDockBottomMargin;
+            double slabTop = slabBottom - GlassDockTotalHeight;
+            double bodyTop = slabTop + topInset;
+            return bodyTop + GlassDockBodyHeight / 2.0;
+        }
+    }
 
     /// <summary>Centre used to lay out the glass dock (panel + grid icons),
-    /// shifted up from the window centre by <see cref="GlassDockLift"/>. The
-    /// taskbar row keeps using <see cref="_center"/> so the lift opens a gap
-    /// between the dock and the row.</summary>
-    private Point GlassDockCenter => new(_center.X, _center.Y - GlassDockLift);
+    /// docked to the bottom of the screen.</summary>
+    private Point GlassDockCenter => new(_center.X, GlassDockCenterY);
 
-    /// <summary>Height of the running-taskbar strip carved out of the bottom of
-    /// the single continuous glass panel: one magnified tile plus equal padding
+    /// <summary>Horizontal nudge applied to the glass icon grid (and its clip).
+    /// The grid is centred on the dock centre (0) so the icons, the resident
+    /// region box and the main dock slab all share one vertical axis; the
+    /// right-side scrollbar is offset far enough that hover-zoomed icons still
+    /// clear it.</summary>
+    private double GlassGridShiftX => 0.0;
+
+    /// <summary>Centre for the glass icon GRID specifically — the dock centre
+    /// nudged left by <see cref="GlassGridShiftX"/>.</summary>
+    private Point GlassGridCenter => new(_center.X - GlassGridShiftX, GlassDockCenterY);
+
+    /// <summary>Total number of grid rows the current app set occupies.</summary>
+    private int GlassTotalRows =>
+        Math.Max(1, (_config.Apps.Count + LiquidGlassTheme.Columns - 1) / LiquidGlassTheme.Columns);
+
+    /// <summary>Maximum scroll offset (px): the height of the rows that overflow
+    /// the visible block. 0 when everything fits in the visible rows.</summary>
+    private double GlassScrollMax =>
+        Math.Max(0, (GlassTotalRows - LiquidGlassTheme.VisibleRows)) * GlassCellH;
+
+    /// <summary>True when the grid has more rows than fit in the visible block,
+    /// so the scrollbar / wheel scrolling becomes active.</summary>
+    private bool GlassScrollable => GlassScrollMax > 0.5;
+
+    /// <summary>The on-screen rectangle the icon grid is clipped to (so rows
+    /// scrolled out of the visible block are hidden behind the glass).</summary>
+    private Rect GlassGridViewport
+    {
+        get
+        {
+            double icon = EffectiveIconSize;
+            double cellW = icon * 2.15;
+            double gridW = (LiquidGlassTheme.Columns - 1) * cellW;
+            // Vertical slack must stay below the row pitch (icon*2.35) so that
+            // rows scrolled out of the visible block remain hidden above/below.
+            double vMargin = icon * 1.4;
+            // Horizontal slack is generous: it only widens the clip sideways (no
+            // rows to hide there), and it must clear the resident-region border,
+            // which extends out to ~gridW/2 + 1.23*icon from the dock centre.
+            double hMargin = icon * 1.9;
+            double cx = _center.X - GlassGridShiftX;   // grid is nudged left
+            double left = cx - gridW / 2.0 - hMargin;
+            double w = gridW + hMargin * 2.0;
+            double visibleH = (LiquidGlassTheme.VisibleRows - 1) * GlassCellH;
+            double top = GlassDockCenterY - visibleH / 2.0 - vMargin;
+            double h = visibleH + vMargin * 2.0;
+            return new Rect(left, top, w, h);
+        }
+    }
+
+    /// <summary>The on-screen rectangle of the whole glass dock slab (in
+    /// PanelCanvas coordinates), matching the geometry drawn by
+    /// <c>DrawGlassPanel</c>. Used so an icon dragged outside the slab counts as
+    /// a delete.</summary>
+    private Rect GlassSlabRect
+    {
+        get
+        {
+            double icon = EffectiveIconSize;
+            double cellW = icon * 2.15;
+            double gridW = (LiquidGlassTheme.Columns - 1) * cellW;
+            double padX = icon * 1.15;
+            double topInset = icon * 0.55;
+            double w = gridW + icon + padX * 2;
+            double h = GlassDockBodyHeight;
+            double left = _center.X - w / 2.0;
+            double gridTop = GlassDockCenter.Y - h / 2.0;
+            double top = gridTop - topInset;
+            double totalH = h + topInset + GlassBottomReserve;
+            return new Rect(left, top, w, totalH);
+        }
+    }
+
+    /// <summary>Height of the running-taskbar strip carved out of the bottom of    /// the single continuous glass panel: one magnified tile plus equal padding
     /// above and below. Reserved on the dock slab even before the (async)
     /// taskbar enumeration so dock and taskbar are one uninterrupted glass.</summary>
     private double GlassTaskbarStripHeight
@@ -173,6 +319,9 @@ public partial class RadialWindow : Window
     // Icon the pointer is currently hovering (for the "spread apart" effect).
     private RadialIcon? _hoverIcon;
 
+    // True while the Saturn continuous-orbit profiling scene is pushed.
+    private bool _profilingSaturn;
+
     /// <summary>
     /// When true the panel stays open (opened from the tray) so the user can
     /// drag desktop shortcuts onto it. Key-release will not hide it.
@@ -180,6 +329,22 @@ public partial class RadialWindow : Window
     public bool IsPinned { get; private set; }
 
     public event Action? RequestOpenSettings;
+
+    /// <summary>Set by the host: when a glass icon is dragged and dropped onto
+    /// the left-edge dock, this is invoked with the screen-space drop point and
+    /// the entry. Returns true when the entry was pinned to the left dock (the
+    /// main-dock entry is then left in place).</summary>
+    public Func<Point, AppEntry, bool>? DropToLeftDock;
+
+    /// <summary>Raised after the main dock mutates its app list (add / delete /
+    /// reorder), so the host can re-mirror the resident region into the left
+    /// dock.</summary>
+    public Action? AppsChanged;
+
+    /// <summary>Raised while a glass icon is being dragged (true on drag start,
+    /// false when it ends), so the host can keep the left dock visible as a drop
+    /// target for the whole gesture.</summary>
+    public Action<bool>? GlassDragActiveChanged;
 
     public RadialWindow(AppConfig config, Action persist)
     {
@@ -267,8 +432,10 @@ public partial class RadialWindow : Window
         _uiScale = Math.Clamp(sh / ReferenceScreenHeight, 1.0, 2.0);
 
         bool saturn = ThemeRegistry.Get(_config.Settings.Theme).IsSaturn;
-        // The Saturn theme is rendered larger overall than the grid themes.
-        _themeScale = saturn ? SaturnEnlarge : 1.0;
+        // Saturn renders larger overall; the liquid-glass dock renders at 0.9 so
+        // the whole dock (panel, taskbar strip and icons all derive from
+        // EffectiveIconSize) is 10% more compact.
+        _themeScale = saturn ? SaturnEnlarge : 0.9;
 
         double icon = EffectiveIconSize;
 
@@ -303,19 +470,32 @@ public partial class RadialWindow : Window
         double w = Math.Min((halfW + margin) * 2.0, sw);
         double h = Math.Min((halfH + margin) * 2.0, sh);
 
-        // The liquid-glass theme frosts the WHOLE desktop on summon, so its
-        // overlay must span the full screen (the blurred wallpaper fills it and
-        // the panel floats centred). Other themes keep the tight, cheaper box.
-        if (ThemeRegistry.Get(_config.Settings.Theme).ShowGlassPanel)
+        // Anchor flag: the glass dock is bottom-docked, everything else centred.
+        bool glass = ThemeRegistry.Get(_config.Settings.Theme).ShowGlassPanel;
+
+        // The liquid-glass dock is bottom-docked and can scroll. Rather than
+        // spanning the WHOLE screen (a fullscreen per-pixel-alpha layered window
+        // is software-composited and re-uploaded every frame — the dominant
+        // cost that capped every glass animation well under 60 FPS), size the
+        // overlay to JUST the dock content plus headroom for the slab shadow,
+        // the hover-zoom of the top icon row, and the rise-up summon slide.
+        if (glass)
         {
-            w = sw;
-            h = sh;
+            double cellW = icon * 2.15;
+            double dockW = (LiquidGlassTheme.Columns - 1) * cellW + icon + icon * 1.15 * 2;
+            double shadowPad = 72.0 * _uiScale;        // slab drop shadow (blur 48 + depth)
+            double scrollPad = icon * 1.6;             // scrollbar parked right of the grid
+            double hoverHeadroom = icon * 2.4;         // 1.7x zoom + label above the top row
+            w = Math.Min(dockW + shadowPad * 2 + scrollPad, sw);
+            h = Math.Min(GlassDockTotalHeight + GlassDockBottomMargin + hoverHeadroom + shadowPad, sh);
         }
 
         Width = w;
         Height = h;
         Left = (sw - w) / 2.0;
-        Top = (sh - h) / 2.0;
+        // Glass: pin the window's bottom edge to the screen bottom so the dock
+        // (which lays out flush to Height - margin) docks to the real bottom.
+        Top = glass ? sh - h : (sh - h) / 2.0;
         UpdateCenter();
     }
 
@@ -369,7 +549,7 @@ public partial class RadialWindow : Window
         _realized = true;
         _suppressRebuild = true;
         SizeToActiveContent();
-        Opacity = 0;
+        RootGrid.Opacity = 0;
         Show();                         // one-time; the window then stays shown
         _suppressRebuild = false;
         Rebuild();
@@ -396,26 +576,52 @@ public partial class RadialWindow : Window
         SizeToActiveContent();
         _suppressRebuild = false;
         Rebuild();                      // pick up any config changes
-        // Force the layered surface fully transparent BEFORE grabbing the
-        // backdrop, so a stale opaque frame from the previous summon can never
-        // bleed into the capture.
-        BeginAnimation(OpacityProperty, null);
-        Opacity = 0;
-        // Frost the desktop behind the liquid-glass panel: capture the desktop
-        // now (overlay is Opacity 0 / excluded from the grab) and show it
-        // blurred behind the glass. Must run after Rebuild (which clears the
-        // canvas).
+        // Reset the content opacity to 0 before fading in so a stale frame from
+        // the previous summon can never flash.
+        RootGrid.BeginAnimation(OpacityProperty, null);
+        RootGrid.Opacity = 0;
+        // The liquid-glass dock no longer frosts the desktop behind it — the
+        // panel sits on the clear wallpaper. (Desktop-blur capture removed.)
         if (_theme.ShowGlassPanel)
-            ShowDesktopBlur();
-        AnimateRingsExpand();           // grow the rings out from the centre
+            AnimateGlassRise();         // slide the dock up from the screen bottom
+        else
+        {
+            PanelCanvas.RenderTransform = Transform.Identity;  // clear any glass rise
+            AnimateRingsExpand();       // grow the rings out from the centre
+            // The Saturn theme orbits + spins continuously while shown; mark it
+            // the base profiling scene until the panel hides.
+            Polaris.Services.FpsProfiler.Push("SaturnIdle");
+            _profilingSaturn = true;
+        }
         Topmost = true;
         Activate();
         _runningTimer.Start();
         UpdateGlassClock();
         _clockTimer.Start();
 
-        var fade = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(150));
-        BeginAnimation(OpacityProperty, fade);
+        var fade = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(110));
+        RootGrid.BeginAnimation(OpacityProperty, fade);
+    }
+
+    /// <summary>Liquid-glass summon: slide the whole dock up from below the
+    /// bottom screen edge into its docked position, with a soft ease-out.</summary>
+    private void AnimateGlassRise()
+    {
+        // Start fully below the dock's resting bottom so it rises into view.
+        double rise = GlassDockTotalHeight + GlassDockBottomMargin + EffectiveIconSize;
+        var tt = new TranslateTransform(0, rise);
+        PanelCanvas.RenderTransform = tt;
+        // Snappy, clean deceleration (Quintic eases out harder than Cubic) so the
+        // dock lands quickly without a soft drawn-out tail.
+        var ease = new QuinticEase { EasingMode = EasingMode.EaseOut };
+        var slide = new DoubleAnimation(rise, 0, TimeSpan.FromMilliseconds(220))
+        {
+            EasingFunction = ease,
+        };
+        System.Windows.Media.Animation.Timeline.SetDesiredFrameRate(slide, App.AnimationFrameRate);
+        Polaris.Services.FpsProfiler.Push("GlassRise");
+        slide.Completed += (_, _) => Polaris.Services.FpsProfiler.Pop("GlassRise");
+        tt.BeginAnimation(TranslateTransform.YProperty, slide);
     }
 
     /// <summary>Animates the two ring layers growing out from the planet, the
@@ -424,6 +630,18 @@ public partial class RadialWindow : Window
     {
         ExpandLayer(_innerOrbitLayer, 0.0);
         ExpandLayer(_outerOrbitLayer, 0.11);
+        // The expand burst runs ~110ms delay + 280ms grow; pop a bit after.
+        Polaris.Services.FpsProfiler.Push("RingsExpand");
+        var done = new System.Windows.Threading.DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(420),
+        };
+        done.Tick += (s, _) =>
+        {
+            ((System.Windows.Threading.DispatcherTimer)s!).Stop();
+            Polaris.Services.FpsProfiler.Pop("RingsExpand");
+        };
+        done.Start();
     }
 
     private void ExpandLayer(Canvas? layer, double delaySeconds)
@@ -461,20 +679,27 @@ public partial class RadialWindow : Window
         _runningTimer.Stop();
         _clockTimer.Stop();
 
+        // End the Saturn continuous-orbit profiling scene if it was active.
+        if (_profilingSaturn)
+        {
+            _profilingSaturn = false;
+            Polaris.Services.FpsProfiler.Pop("SaturnIdle");
+        }
+
+        // Reset the glass grid scroll so the next summon starts at the top row.
+        StopGlassScrollAnimation();
+        _glassScroll = 0;
+
         // Dismiss any open window-preview popups so they don't linger on screen.
         foreach (var ic in _iconElements)
             ic.ClosePreview();
 
-        // Drop the captured desktop-blur backdrop so a stale frame is never
-        // reused on the next summon (a fresh capture is taken each time).
-        HideDesktopBlur();
-
-        // Fade out instead of hiding; at Opacity 0 the window is click-through.
-        // Capture the current (animated) opacity BEFORE replacing the animation
-        // so we start the fade from what's on screen. Do NOT clear the animation
-        // first: clearing snaps Opacity back to its base value (0, set in
-        // ShowFaded), which would make the fade run 0->0 and the panel vanish.
-        double from = Opacity;
+        // Fade the content out, then collapse it so the fully-transparent
+        // layered window passes clicks straight through to the desktop (a
+        // layered window's transparent pixels are not hit-testable). Capture the
+        // current (animated) opacity BEFORE replacing the animation so we start
+        // the fade from what's on screen.
+        double from = RootGrid.Opacity;
         var fade = new DoubleAnimation(from, 0, TimeSpan.FromMilliseconds(170));
         fade.Completed += (_, _) =>
         {
@@ -482,7 +707,7 @@ public partial class RadialWindow : Window
             if (!_shown)
                 PanelCanvas.Visibility = Visibility.Collapsed;
         };
-        BeginAnimation(OpacityProperty, fade);
+        RootGrid.BeginAnimation(OpacityProperty, fade);
     }
 
     /// <summary>Hides the panel only if it is not pinned (used on key-release).</summary>
@@ -495,7 +720,11 @@ public partial class RadialWindow : Window
     protected override void OnSourceInitialized(EventArgs e)
     {
         base.OnSourceInitialized(e);
-        // Keep the always-shown overlay out of Alt+Tab and the taskbar.
+        // Keep the always-shown overlay out of Alt+Tab and the taskbar. The
+        // window uses AllowsTransparency=True (a layered window): its transparent
+        // pixels are automatically NOT hit-testable, so when the panel is hidden
+        // (fully transparent) clicks pass straight through to the desktop with no
+        // extra work.
         var hwnd = new System.Windows.Interop.WindowInteropHelper(this).Handle;
         int ex = GetWindowLong(hwnd, GWL_EXSTYLE);
         SetWindowLong(hwnd, GWL_EXSTYLE, ex | WS_EX_TOOLWINDOW);
@@ -536,6 +765,8 @@ public partial class RadialWindow : Window
         PanelCanvas.Children.Clear();
         _iconElements.Clear();
         _hoverIcon = null;
+        _glassHoverLabel = null;
+        _glassHoverLabelText = null;
         // PanelCanvas was just cleared, so the taskbar tiles are gone from the
         // tree; drop our tracking so RefreshTaskbarApps rebuilds them.
         _taskbarIcons.Clear();
@@ -544,8 +775,11 @@ public partial class RadialWindow : Window
         // Clock labels lived in the cleared canvas too.
         _glassClockTime = null;
         _glassClockDate = null;
-        // The desktop-blur backdrop image was in the cleared canvas as well.
-        _desktopBlur = null;
+        // The scrollbar control lived in the cleared canvas as well.
+        _glassScrollBar = null;
+        // The scroll layer + its transform were children of the cleared canvas.
+        _glassScrollLayer = null;
+        _glassScrollTransform = null;
 
         // --- Layout (theme-driven) -------------------------------------------
         if (_theme.IsSaturn)
@@ -559,8 +793,9 @@ public partial class RadialWindow : Window
             // panel grows on large displays. The theme only reads IconSize.
             var scaled = new AppSettings { IconSize = EffectiveIconSize };
             // Only the glass dock is lifted (it has a taskbar row beneath it);
-            // plain grid themes stay centred.
-            Point gridCenter = _theme.ShowGlassPanel ? GlassDockCenter : _center;
+            // plain grid themes stay centred. The glass grid is also nudged
+            // slightly left (GlassGridCenter) so it clears the right scrollbar.
+            Point gridCenter = _theme.ShowGlassPanel ? GlassGridCenter : _center;
             _slotPositions.AddRange(_theme.ComputeSlots(
                 _config.Apps.Count, gridCenter, scaled, out _outerRadius));
         }
@@ -600,18 +835,30 @@ public partial class RadialWindow : Window
             _outerOrbitLayer = null;
             if (_theme.ShowGlassPanel)
             {
-                // Re-add the frosted backdrop captured at summon time. Rebuild
-                // clears the canvas (e.g. after a drag-reorder), which would
-                // otherwise drop the blur and reveal the sharp desktop. Reuse the
-                // cached snapshot — a fresh capture here would grab the visible
-                // panel. No-op on the initial summon (ShowFaded captures right
-                // after this Rebuild).
-                RestoreDesktopBlur();
                 DrawGlassPanel();
             }
         }
 
         int r0 = _theme.IsSaturn ? EffectiveRing0Count(_config.Apps.Count) : int.MaxValue;
+        // Clamp the scroll offset to the current content height (the app count
+        // may have shrunk since the last scroll).
+        if (_theme.ShowGlassPanel)
+        {
+            _glassScroll = Math.Clamp(_glassScroll, 0, GlassScrollMax);
+            // Build the scroll container: a clip layer fixed to the viewport
+            // holding a scroll layer that carries the vertical translate. Icons
+            // go inside the scroll layer at their TRUE (un-scrolled) positions,
+            // so scrolling is a single transform update — smooth and cheap.
+            _glassScrollTransform = new TranslateTransform(0, -_glassScroll);
+            _glassScrollLayer = new Canvas { RenderTransform = _glassScrollTransform };
+            var clipLayer = new Canvas { Clip = new RectangleGeometry(GlassGridViewport) };
+            clipLayer.Children.Add(_glassScrollLayer);
+            PanelCanvas.Children.Add(clipLayer);
+            // Frame the resident region (top two rows) so it reads as a distinct
+            // "always-pinned" zone that mirrors the left dock. Drawn inside the
+            // scroll layer (behind the icons) so it scrolls with the grid.
+            DrawResidentRegionBorder(_glassScrollLayer);
+        }
         for (int i = 0; i < _config.Apps.Count && i < _slotPositions.Count; i++)
         {
             var entry = _config.Apps[i];
@@ -621,10 +868,23 @@ public partial class RadialWindow : Window
                     ? EffectiveIconSize * GlassIconScale
                     : EffectiveIconSize;
             var icon = CreateIcon(entry, size);
-            PlaceCentered(icon, _slotPositions[i]);
-            PanelCanvas.Children.Add(icon);
+            if (_theme.ShowGlassPanel)
+            {
+                // True position inside the scroll layer; the layer's transform
+                // applies the scroll and the clip layer hides off-screen rows.
+                PlaceCentered(icon, _slotPositions[i]);
+                _glassScrollLayer!.Children.Add(icon);
+            }
+            else
+            {
+                PlaceCentered(icon, _slotPositions[i]);
+                PanelCanvas.Children.Add(icon);
+            }
             _iconElements.Add(icon);
         }
+
+        if (_theme.ShowGlassPanel && GlassScrollable)
+            DrawGlassScrollBar();
 
         if (_theme.IsSaturn)
         {
@@ -661,13 +921,17 @@ public partial class RadialWindow : Window
         System.Threading.Tasks.Task.Run(() =>
         {
             var running = RunningAppTracker.SnapshotRunning();
+            List<string> explorerTitles;
+            try { explorerTitles = WindowPreviewService.GetExplorerWindowTitles(); }
+            catch { explorerTitles = new List<string>(); }
             Dispatcher.BeginInvoke(() =>
             {
                 foreach (var icon in icons)
                 {
                     try
                     {
-                        icon.IsRunning = RunningAppTracker.IsRunningInSnapshot(icon.Entry.Path, running);
+                        icon.IsRunning = RunningAppTracker.IsRunningInSnapshot(icon.Entry.Path, running)
+                            || RunningAppTracker.IsShellItemRunning(icon.Entry.Name, icon.Entry.Path, explorerTitles);
                     }
                     catch
                     {
@@ -707,7 +971,11 @@ public partial class RadialWindow : Window
             bmp = IconExtractor.GetIcon(entry.EffectiveIconSource);
             _iconCache[entry.EffectiveIconSource] = bmp;
         }
-        var icon = new RadialIcon(entry, bmp, iconSize, AccentColor, LabelBrush, _theme.ShowGlassPanel);
+        // Saturn icons bloom with a very faint, high-transparency black halo
+        // (so it reads as a soft shadow on the dark disc) instead of the accent
+        // blue used by the glass theme.
+        Color glow = _theme.IsSaturn ? Color.FromArgb(0x30, 0x00, 0x00, 0x00) : AccentColor;
+        var icon = new RadialIcon(entry, bmp, iconSize, glow, LabelBrush, _theme.ShowGlassPanel);
         icon.PreviewMouseLeftButtonDown += Icon_PreviewMouseLeftButtonDown;
         icon.HoverStarted += OnIconHoverStarted;
         icon.HoverEnded += OnIconHoverEnded;
@@ -789,6 +1057,14 @@ public partial class RadialWindow : Window
         if (entries.Count == 0)
             return;
 
+        // Insert the dropped app(s) at the grid slot nearest the pointer, so the
+        // icon lands where it was dropped (on the side of the cursor) rather than
+        // always at the end. Saturn has no free-grid layout, so it keeps appending.
+        Point drop = e.GetPosition(PanelCanvas);
+        int insertIdx = _theme.SupportsGridReorder
+            ? ComputeGridInsertIndex(GlassToContent(drop))
+            : _config.Apps.Count;
+
         bool added = false;
         bool rejected = false;
         int cap = _theme.MaxIcons;
@@ -799,7 +1075,9 @@ public partial class RadialWindow : Window
                 rejected = true;
                 continue;
             }
-            _config.Apps.Add(entry);
+            insertIdx = Math.Clamp(insertIdx, 0, _config.Apps.Count);
+            _config.Apps.Insert(insertIdx, entry);
+            insertIdx++;
             added = true;
         }
 
@@ -807,6 +1085,7 @@ public partial class RadialWindow : Window
         {
             _persist();
             Rebuild();
+            AppsChanged?.Invoke();
         }
         if (rejected)
         {
@@ -835,6 +1114,7 @@ public partial class RadialWindow : Window
     protected override void OnMouseMove(MouseEventArgs e)
     {
         base.OnMouseMove(e);
+
         if (_pressedIcon == null)
             return;
 
@@ -849,18 +1129,34 @@ public partial class RadialWindow : Window
             // the cursor exactly.
             _pressedIcon.BeginAnimation(Canvas.LeftProperty, null);
             _pressedIcon.BeginAnimation(Canvas.TopProperty, null);
+            // For the glass grid, lift the dragged icon out of the clipped scroll
+            // layer into the top-level canvas so it can be dragged anywhere
+            // (including up into the delete zone) without being clipped, and so
+            // its position is in plain PanelCanvas coordinates.
+            if (_theme.ShowGlassPanel && _glassScrollLayer != null &&
+                ReferenceEquals(_pressedIcon.Parent, _glassScrollLayer))
+            {
+                _glassScrollLayer.Children.Remove(_pressedIcon);
+                PanelCanvas.Children.Add(_pressedIcon);
+                Panel.SetZIndex(_pressedIcon, 1000);
+            }
+
+            // Keep the left dock summoned for the whole drag so it is a clear,
+            // forgiving drop target.
+            if (_theme.ShowGlassPanel)
+                GlassDragActiveChanged?.Invoke(true);
         }
 
         PlaceCentered(_pressedIcon, p);
 
-        double dist = (p - _center).Length;
-        _pressedIcon.Opacity = dist > DeleteRadius ? 0.4 : 1.0;
+        bool deleteZone = IsDeleteDrop(p);
+        _pressedIcon.Opacity = deleteZone ? 0.4 : 1.0;
 
         // Push other icons aside to reveal the slot the dragged icon is over.
-        // Skip while the icon is dragged out past the outer ring (delete zone).
+        // Skip while the icon is dragged out into the delete zone.
         // Only the Saturn ring layout supports live reorder; the grid test theme
         // keeps drag-to-launch and drag-out-to-delete but no live reflow.
-        if (_theme.IsSaturn && dist <= DeleteRadius)
+        if (_theme.IsSaturn && !deleteZone)
         {
             int src = _iconElements.IndexOf(_pressedIcon);
             var (ring, pos) = ComputeDragTarget(p, src);
@@ -871,12 +1167,13 @@ public partial class RadialWindow : Window
                 ReflowAround(ring, pos);
             }
         }
-        else if (_theme.SupportsGridReorder && dist <= DeleteRadius)
+        else if (_theme.SupportsGridReorder && !deleteZone)
         {
             // Free-grid reorder: find the slot the cursor is over and make room
-            // by shifting the other icons into the insertion arrangement.
+            // by shifting the other icons into the insertion arrangement. The
+            // grid may be scrolled, so compare against scroll-corrected slots.
             int src = _iconElements.IndexOf(_pressedIcon);
-            int tgt = ComputeGridTarget(p, src);
+            int tgt = ComputeGridTarget(GlassToContent(p), src);
             if (tgt != _dragTargetPos)
             {
                 _dragTargetPos = tgt;
@@ -890,6 +1187,18 @@ public partial class RadialWindow : Window
             _dragTargetPos = -1;
             RestoreSlots();
         }
+    }
+
+    /// <summary>Maps a canvas point to the grid's un-scrolled "content" space by
+    /// adding back the current scroll offset, so hit-tests against the static
+    /// <see cref="_slotPositions"/> are correct while the grid is scrolled.</summary>
+    private Point GlassToContent(Point p) =>
+        _theme.ShowGlassPanel ? new Point(p.X, p.Y + _glassScroll) : p;
+
+    protected override void OnMouseWheel(MouseWheelEventArgs e)
+    {
+        base.OnMouseWheel(e);
+        OnGlassMouseWheel(this, e);
     }
 
     // ---- Free grid reorder (liquid-glass theme) --------------------------
@@ -917,6 +1226,33 @@ public partial class RadialWindow : Window
             }
         }
         return Math.Clamp(best, 0, n - 1);
+    }
+
+    /// <summary>Returns the insertion index for a NEW icon dropped at content
+    /// point <paramref name="p"/>: the nearest occupied slot, shifted forward by
+    /// one when the cursor is to the right of that slot's centre, so the icon
+    /// lands on the side the pointer is actually over instead of always to the
+    /// left of the slot under the cursor.</summary>
+    private int ComputeGridInsertIndex(Point p)
+    {
+        int count = Math.Min(_slotPositions.Count, _config.Apps.Count);
+        if (count == 0)
+            return 0;
+
+        int best = 0;
+        double bestD = double.MaxValue;
+        for (int i = 0; i < count; i++)
+        {
+            double d = (p - _slotPositions[i]).LengthSquared;
+            if (d < bestD)
+            {
+                bestD = d;
+                best = i;
+            }
+        }
+
+        int idx = p.X > _slotPositions[best].X ? best + 1 : best;
+        return Math.Clamp(idx, 0, _config.Apps.Count);
     }
 
     /// <summary>
@@ -955,7 +1291,12 @@ public partial class RadialWindow : Window
                 continue;
             int slot = slotOfEntry[i];
             if (slot >= 0 && slot < _slotPositions.Count)
+            {
+                // Icons live in the scroll layer at true positions, so reflow to
+                // the plain slot centre — the layer transform + clip handle the
+                // scroll and viewport masking automatically.
                 AnimateTo(_iconElements[i], _slotPositions[slot]);
+            }
         }
     }
 
@@ -970,7 +1311,7 @@ public partial class RadialWindow : Window
             return;
         }
 
-        int tgt = targetPos >= 0 ? targetPos : ComputeGridTarget(dropPoint, src);
+        int tgt = targetPos >= 0 ? targetPos : ComputeGridTarget(GlassToContent(dropPoint), src);
         int[] slotOfEntry = GridArrangement(src, tgt);
         int n = _config.Apps.Count;
 
@@ -984,6 +1325,7 @@ public partial class RadialWindow : Window
 
         _persist();
         Rebuild();
+        AppsChanged?.Invoke();
     }
 
     /// <summary>
@@ -1019,25 +1361,32 @@ public partial class RadialWindow : Window
     }
 
     /// <summary>
-    /// Number of icons on the inner ring for <paramref name="n"/> total icons,
-    /// derived from the persisted <c>Ring0Count</c> (0 = auto) and clamped to the
-    /// per-ring caps (inner ≤ 12, outer ≤ 24).
+    /// Number of icons on the inner ring for <paramref name="n"/> total icons.
+    /// The Saturn inner ring is the resident-app region (the first apps, which
+    /// are also mirrored into the left side dock). Its size is user-customizable
+    /// up to <see cref="Ring0Cap"/> (12): the persisted
+    /// <see cref="AppSettings.Ring0Count"/> is honoured (0 = auto, fill first),
+    /// and the inner ring only grows beyond the user's choice when the outer
+    /// ring would otherwise overflow its own cap.
     /// </summary>
     private int EffectiveRing0Count(int n)
     {
         if (n <= 0)
             return 0;
 
-        int r0 = _config.Settings.Ring0Count;
-        if (r0 <= 0 || r0 > n)
-            r0 = Math.Min(Ring0Cap, n); // auto: fill the inner ring first
+        int userR0 = _config.Settings.Ring0Count;
+        int r0 = userR0 > 0
+            // User picked a resident-region size — respect it, capped at the
+            // ring limit and the available icon count (never forced to the cap).
+            ? Math.Min(userR0, Math.Min(Ring0Cap, n))
+            // Auto: fill the inner ring first, up to its cap.
+            : Math.Min(Ring0Cap, n);
 
-        r0 = Math.Clamp(r0, 1, Math.Min(Ring0Cap, n));
-
-        // If the outer ring would overflow its cap, push more onto the inner ring.
+        // If the outer ring would overflow its cap, push the surplus inward.
         if (n - r0 > Ring1Cap)
-            r0 = Math.Min(Ring0Cap, n);
-        return r0;
+            r0 = Math.Min(n, n - Ring1Cap);
+
+        return Math.Clamp(r0, 1, n);
     }
 
     /// <summary>Builds the slot centres for a layout of <paramref name="n"/> icons
@@ -1190,6 +1539,15 @@ public partial class RadialWindow : Window
 
         _hoverIcon = ic;
         Panel.SetZIndex(ic, 3000); // above Saturn (root=2000) so the label isn't hidden
+
+        // Glass grid: the icons live inside a clipped scroll layer, so a hovered
+        // icon's name label (which hangs below the icon) is cut by the viewport
+        // clip on the bottom row. Rather than reparent the icon (fragile — the
+        // re-host fires synthetic enter/leave that flicker), show a floating
+        // label in the unclipped PanelCanvas positioned under the hovered icon.
+        if (_theme.ShowGlassPanel)
+            ShowGlassHoverLabel(ic, idx);
+
         SpreadNeighbours(idx);
     }
 
@@ -1202,10 +1560,85 @@ public partial class RadialWindow : Window
         if (idx >= 0)
             Panel.SetZIndex(ic, 0);
 
+        if (_theme.ShowGlassPanel)
+            HideGlassHoverLabel();
+
         if (_hoverIcon == ic)
             _hoverIcon = null;
 
         RestoreSlots();
+    }
+
+    /// <summary>Floating name label shown under a hovered glass icon, hosted on
+    /// the unclipped PanelCanvas so the bottom row's label is not cut by the
+    /// scroll-viewport clip.</summary>
+    private Border? _glassHoverLabel;
+    private TextBlock? _glassHoverLabelText;
+
+    /// <summary>Must match <c>RadialIcon.HoverScale</c> — the hover zoom factor,
+    /// used to place the floating label below the zoomed icon and to size its
+    /// font to match the (formerly icon-scaled) built-in label.</summary>
+    private const double HoverScaleConst = 1.7;
+
+    private void ShowGlassHoverLabel(RadialIcon ic, int idx)
+    {
+        if (idx >= _slotPositions.Count)
+            return;
+
+        if (_glassHoverLabel == null)
+        {
+            _glassHoverLabelText = new TextBlock
+            {
+                Foreground = LabelBrush,
+                FontWeight = FontWeights.SemiBold,
+                TextAlignment = TextAlignment.Center,
+                TextTrimming = TextTrimming.CharacterEllipsis,
+                HorizontalAlignment = HorizontalAlignment.Center,
+            };
+            _glassHoverLabel = new Border
+            {
+                Background = new SolidColorBrush(Color.FromArgb(0x26, 0x1A, 0x1A, 0x1A)),
+                CornerRadius = new CornerRadius(7),
+                Padding = new Thickness(10, 4, 10, 4),
+                IsHitTestVisible = false,
+                Child = _glassHoverLabelText,
+                Opacity = 0,
+            };
+            Panel.SetZIndex(_glassHoverLabel, 4000);
+            PanelCanvas.Children.Add(_glassHoverLabel);
+        }
+
+        // Match the built-in label's apparent size: that label lived inside the
+        // icon's visual tree and was scaled up by the 1.7x hover zoom, so a fixed
+        // 11.5pt read as ~11.5*1.7. Replicate that here (the floating label is
+        // NOT scaled) so the font doesn't look shrunken.
+        _glassHoverLabelText!.FontSize = 11.5 * HoverScaleConst;
+        _glassHoverLabelText.Text = ic.Entry.Name;
+
+        // Position centred BELOW the hovered icon. The icon zooms to 1.7x about
+        // its centre, so its visible bottom is at center + IconSize/2*1.7. Place
+        // the label just past that. Slot is in content coords; subtract scroll.
+        Point slot = _slotPositions[idx];
+        double cx = slot.X;
+        double cy = slot.Y - _glassScroll;
+        double zoomedHalf = ic.IconSize / 2.0 * HoverScaleConst;
+        // Force a fresh measure so DesiredSize reflects the new text + font (a
+        // brand-new or reused badge may carry a stale size, which would offset
+        // the centring).
+        _glassHoverLabel.InvalidateMeasure();
+        _glassHoverLabel.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+        double lw = _glassHoverLabel.DesiredSize.Width;
+        Canvas.SetLeft(_glassHoverLabel, cx - lw / 2.0);
+        Canvas.SetTop(_glassHoverLabel, cy + zoomedHalf + 6);
+
+        _glassHoverLabel.BeginAnimation(OpacityProperty,
+            new DoubleAnimation(1, new Duration(TimeSpan.FromMilliseconds(110))));
+    }
+
+    private void HideGlassHoverLabel()
+    {
+        _glassHoverLabel?.BeginAnimation(OpacityProperty,
+            new DoubleAnimation(0, new Duration(TimeSpan.FromMilliseconds(110))));
     }
 
     /// <summary>
@@ -1294,6 +1727,7 @@ public partial class RadialWindow : Window
     protected override void OnMouseLeftButtonUp(MouseButtonEventArgs e)
     {
         base.OnMouseLeftButtonUp(e);
+
         if (_pressedIcon == null)
         {
             // Clicking empty space no longer closes the pinned panel — it stays
@@ -1319,8 +1753,24 @@ public partial class RadialWindow : Window
             return;
         }
 
-        double dist = (p - _center).Length;
-        if (dist > DeleteRadius)
+        // Glass theme: dropping a dragged icon onto the left-edge dock pins it
+        // there (the main-dock entry stays). Checked before delete/reorder so a
+        // drag toward the left edge adds rather than deletes.
+        if (_theme.ShowGlassPanel && DropToLeftDock != null)
+        {
+            Point screen = PointToScreen(p);
+            if (DropToLeftDock(screen, icon.Entry))
+            {
+                GlassDragActiveChanged?.Invoke(false);
+                Rebuild();   // snap the main-dock icon back into its slot
+                return;
+            }
+        }
+
+        if (_theme.ShowGlassPanel)
+            GlassDragActiveChanged?.Invoke(false);
+
+        if (IsDeleteDrop(p))
         {
             DeleteEntry(icon.Entry);
         }
@@ -1343,6 +1793,15 @@ public partial class RadialWindow : Window
     private double DeleteRadius => _theme.IsSaturn
         ? InnerRadius + RingStep + _config.Settings.IconSize * 1.25
         : _outerRadius + _config.Settings.IconSize * 0.8;
+
+    /// <summary>True when an icon dragged to PanelCanvas point <paramref name="p"/>
+    /// should be deleted on drop. For the glass dock this is simply "outside the
+    /// slab" so flicking the icon off the dock removes it; the ring themes use a
+    /// radial threshold.</summary>
+    private bool IsDeleteDrop(Point p) =>
+        _theme.ShowGlassPanel
+            ? !GlassSlabRect.Contains(p)
+            : (p - _center).Length > DeleteRadius;
 
     private void CommitArrangement(AppEntry entry, int ring, int pos, Point dropPoint)
     {
@@ -1373,6 +1832,7 @@ public partial class RadialWindow : Window
 
         _persist();
         Rebuild();
+        AppsChanged?.Invoke();
     }
 
     private void DeleteEntry(AppEntry entry)
@@ -1389,17 +1849,21 @@ public partial class RadialWindow : Window
 
         _persist();
         Rebuild();
+        AppsChanged?.Invoke();
     }
 
     private void CancelDrag()
     {
         if (_pressedIcon != null)
         {
+            bool wasDragging = _dragging;
             PanelCanvas.ReleaseMouseCapture();
             _pressedIcon = null;
             _dragging = false;
             _dragTargetRing = -1;
             _dragTargetPos = -1;
+            if (wasDragging && _theme.ShowGlassPanel)
+                GlassDragActiveChanged?.Invoke(false);
         }
     }
 
@@ -1451,7 +1915,8 @@ public partial class RadialWindow : Window
             };
             if (!string.IsNullOrWhiteSpace(entry.WorkingDirectory))
                 psi.WorkingDirectory = entry.WorkingDirectory;
-            Process.Start(psi);
+            var started = Process.Start(psi);
+            RunningAppTracker.EnsureRestoredWhenReady(started);
         }
         catch (Exception ex)
         {
@@ -1459,7 +1924,6 @@ public partial class RadialWindow : Window
                 MessageBoxButton.OK, MessageBoxImage.Warning);
         }
     }
-
     /// <summary>True when the entry is the genuine Windows File Explorer
     /// (explorer.exe with no shell:AppsFolder launcher argument). explorer.exe is
     /// also the desktop shell, so we never try to "activate its existing window"
