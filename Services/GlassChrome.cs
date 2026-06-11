@@ -60,9 +60,12 @@ internal static class GlassChrome
                 EndPoint = new Point(0, 1),
                 GradientStops =
                 {
-                    new GradientStop(Color.FromArgb(0x28, 0xFF, 0xFF, 0xFF), 0.0),
-                    new GradientStop(Color.FromArgb(0x1C, 0xEA, 0xF2, 0xFF), 0.5),
-                    new GradientStop(Color.FromArgb(0x2A, 0xCE, 0xDC, 0xF2), 1.0),
+                    // Wetter, glossier clear glass: bright crown melting into a
+                    // cool mid-body and a more saturated refractive base.
+                    new GradientStop(Color.FromArgb(0x3A, 0xFF, 0xFF, 0xFF), 0.0),
+                    new GradientStop(Color.FromArgb(0x20, 0xEA, 0xF2, 0xFF), 0.46),
+                    new GradientStop(Color.FromArgb(0x1A, 0xD6, 0xE6, 0xFF), 0.7),
+                    new GradientStop(Color.FromArgb(0x36, 0xC6, 0xD8, 0xF4), 1.0),
                 },
             };
         var glass = new Border
@@ -93,8 +96,10 @@ internal static class GlassChrome
             // Dark Saturn dock: feather the whole slab so its edges dissolve
             // gradually into the desktop rather than ending on a hard rim. The
             // mask follows the rounded-rectangle outline (not an ellipse) so the
-            // fade hugs the same shape as the border.
-            glass.OpacityMask = BuildRoundedFeatherMask(w, h, radius);
+            // fade hugs the same shape as the border. The right edge feathers
+            // less (0.6) than the left/top/bottom so the dock's inner edge reads
+            // a touch crisper than the screen-hugging left edge.
+            glass.OpacityMask = BuildRoundedFeatherMask(w, h, radius, rightFeatherScale: 0.6);
         }
         Canvas.SetLeft(glass, left);
         Canvas.SetTop(glass, top);
@@ -182,14 +187,15 @@ internal static class GlassChrome
                 CacheMode = new System.Windows.Media.BitmapCache(),
                 Background = new RadialGradientBrush
                 {
-                    GradientOrigin = new Point(0.5, 0.12),
+                    GradientOrigin = new Point(0.5, 0.10),
                     Center = new Point(0.5, 0.12),
                     RadiusX = 0.62,
                     RadiusY = 0.95,
                     GradientStops =
                     {
-                        new GradientStop(Color.FromArgb(0x22, 0xFF, 0xFF, 0xFF), 0.0),
-                        new GradientStop(Color.FromArgb(0x0A, 0xFF, 0xFF, 0xFF), 0.5),
+                        // Brighter, tighter wet sheen across the crown.
+                        new GradientStop(Color.FromArgb(0x46, 0xFF, 0xFF, 0xFF), 0.0),
+                        new GradientStop(Color.FromArgb(0x16, 0xFF, 0xFF, 0xFF), 0.5),
                         new GradientStop(Color.FromArgb(0x00, 0xFF, 0xFF, 0xFF), 1.0),
                     },
                 },
@@ -227,7 +233,7 @@ internal static class GlassChrome
                     GradientStops =
                     {
                         new GradientStop(Color.FromArgb(0x00, 0xFF, 0xFF, 0xFF), 0.0),
-                        new GradientStop(Color.FromArgb(0x1C, 0xFF, 0xFF, 0xFF), 0.5),
+                        new GradientStop(Color.FromArgb(0x30, 0xFF, 0xFF, 0xFF), 0.5),
                         new GradientStop(Color.FromArgb(0x00, 0xFF, 0xFF, 0xFF), 1.0),
                     },
                 },
@@ -287,8 +293,9 @@ internal static class GlassChrome
         {
             // Feather the rim with the same rounded-rectangle mask as the body so
             // the dark edge dissolves gradually following the border's shape
-            // instead of ringing the slab with a continuous hard line.
-            rim.OpacityMask = BuildRoundedFeatherMask(w, h, radius);
+            // instead of ringing the slab with a continuous hard line. Match the
+            // body's weaker right-edge feather.
+            rim.OpacityMask = BuildRoundedFeatherMask(w, h, radius, rightFeatherScale: 0.6);
         }
         Canvas.SetLeft(rim, left);
         Canvas.SetTop(rim, top);
@@ -316,9 +323,10 @@ internal static class GlassChrome
                     EndPoint = new Point(1, 1),
                     GradientStops =
                     {
-                        new GradientStop(Color.FromArgb(0x55, 0xFF, 0xFF, 0xFF), 0.0),
+                        // Stronger inner refraction, like a liquid lens at the rim.
+                        new GradientStop(Color.FromArgb(0x80, 0xFF, 0xFF, 0xFF), 0.0),
                         new GradientStop(Color.FromArgb(0x00, 0xFF, 0xFF, 0xFF), 0.5),
-                        new GradientStop(Color.FromArgb(0x2A, 0xDC, 0xEA, 0xFF), 1.0),
+                        new GradientStop(Color.FromArgb(0x48, 0xDC, 0xEA, 0xFF), 1.0),
                     },
                 },
             };
@@ -337,15 +345,16 @@ internal static class GlassChrome
     /// the fade is pixel-exact and perfectly symmetric on every edge (a live
     /// VisualBrush + BlurEffect would expand its render bounds and skew the
     /// top/bottom mapping).</summary>
-    private static Brush BuildRoundedFeatherMask(double w, double h, double radius)
+    private static Brush BuildRoundedFeatherMask(double w, double h, double radius, double rightFeatherScale = 1.0)
     {
         if (w <= 0 || h <= 0)
             return Brushes.White;
 
         double feather = Math.Max(10.0, Math.Min(w, h) * 0.16);
+        double rightInset = feather * Math.Clamp(rightFeatherScale, 0.0, 1.0);
         var host = new System.Windows.Shapes.Rectangle
         {
-            Width = Math.Max(0, w - feather * 2),
+            Width = Math.Max(0, w - feather - rightInset),
             Height = Math.Max(0, h - feather * 2),
             RadiusX = Math.Max(0, radius - feather * 0.5),
             RadiusY = Math.Max(0, radius - feather * 0.5),
@@ -356,8 +365,8 @@ internal static class GlassChrome
                 KernelType = System.Windows.Media.Effects.KernelType.Gaussian,
             },
         };
-        // Arrange the shape centred inside a w×h box so the inset is identical on
-        // all four sides, then rasterise that exact box.
+        // Inset the shape: left/top/bottom by the full feather; the right inset
+        // can be reduced (rightFeatherScale < 1) for a weaker, crisper right edge.
         var container = new Canvas { Width = w, Height = h };
         Canvas.SetLeft(host, feather);
         Canvas.SetTop(host, feather);

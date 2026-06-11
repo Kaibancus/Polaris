@@ -351,10 +351,8 @@ public partial class LeftDockWindow : Window
         // Bias the resting icon column toward the left of the slab so the icons
         // hug the screen edge. The hover wave pops icons to the RIGHT, so the
         // left half of the slab's hover-reserve is unused at rest — shifting the
-        // column left there gives the pop-out more room without clipping. The
-        // Saturn (dark smoked-glass) dock keeps its icons centred per design.
-        bool isSaturn = ThemeRegistry.Get(_config.Settings.Theme).IsSaturn;
-        double leftBias = isSaturn ? 0 : GIcon * (HoverScale - 1.0) * 0.30;
+        // column left there gives the pop-out more room without clipping.
+        double leftBias = GIcon * (HoverScale - 1.0) * 0.30;
         _colCenterX = _slabLeft + _slabW / 2.0 - leftBias;
 
         double topPad = icon * 0.7;
@@ -479,7 +477,20 @@ public partial class LeftDockWindow : Window
         // The Saturn theme uses a black smoked-glass side dock; every other
         // theme keeps the clear "liquid glass" body.
         bool darkSlab = ThemeRegistry.Get(_config.Settings.Theme).IsSaturn;
-        GlassChrome.DrawSlab(PanelCanvas, _slabLeft, _slabTop, _slabW, _slabH, trayRadius, opacity, track: null, frosted: false, dark: darkSlab);
+        if (darkSlab)
+        {
+            // Draw the black tray snug around the icon column, bleeding its left
+            // feather off-screen so the solid black sits flush against the edge.
+            double darkPad = GIcon * 0.55;
+            double darkBleed = GIcon * 0.4;
+            double darkLeft = _slabLeft - darkBleed;
+            double darkW = (_colCenterX - darkLeft) + GIcon / 2.0 + darkPad;
+            GlassChrome.DrawSlab(PanelCanvas, darkLeft, _slabTop, darkW, _slabH, trayRadius, opacity, track: null, frosted: false, dark: true);
+        }
+        else
+        {
+            GlassChrome.DrawSlab(PanelCanvas, _slabLeft, _slabTop, _slabW, _slabH, trayRadius, opacity, track: null, frosted: false, dark: false);
+        }
         if (_hasRunningArea)
             DrawSeam(_seamY, opacity);
 

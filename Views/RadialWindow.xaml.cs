@@ -619,7 +619,10 @@ public partial class RadialWindow : Window
         UpdateGlassClock();
         _clockTimer.Start();
 
-        var fade = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(110));
+        var fade = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(160))
+        {
+            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
+        };
         RootGrid.BeginAnimation(OpacityProperty, fade);
     }
 
@@ -629,19 +632,34 @@ public partial class RadialWindow : Window
     {
         // Start fully below the dock's resting bottom so it rises into view.
         double rise = GlassDockTotalHeight + GlassDockBottomMargin + EffectiveIconSize;
+        // Anchor at the bottom-centre so the squash/stretch grows out of the
+        // bottom edge — reads as a fluid blob settling rather than a rigid slide.
         var tt = new TranslateTransform(0, rise);
-        PanelCanvas.RenderTransform = tt;
-        // Snappy, clean deceleration (Quintic eases out harder than Cubic) so the
-        // dock lands quickly without a soft drawn-out tail.
-        var ease = new QuinticEase { EasingMode = EasingMode.EaseOut };
-        var slide = new DoubleAnimation(rise, 0, TimeSpan.FromMilliseconds(220))
+        var sc = new ScaleTransform(1.0, 0.94);   // vertically compressed, springs to full height
+        var grp = new TransformGroup();
+        grp.Children.Add(sc);
+        grp.Children.Add(tt);
+        PanelCanvas.RenderTransformOrigin = new Point(0.5, 1.0);
+        PanelCanvas.RenderTransform = grp;
+
+        // Gentle overshoot so the dock eases past its resting line and settles.
+        var slideEase = new BackEase { EasingMode = EasingMode.EaseOut, Amplitude = 0.18 };
+        var slide = new DoubleAnimation(rise, 0, TimeSpan.FromMilliseconds(300))
         {
-            EasingFunction = ease,
+            EasingFunction = slideEase,
+        };
+        // Vertical stretch springs slightly beyond full and relaxes back.
+        var stretchEase = new ElasticEase { EasingMode = EasingMode.EaseOut, Oscillations = 1, Springiness = 4 };
+        var stretch = new DoubleAnimation(0.94, 1.0, TimeSpan.FromMilliseconds(360))
+        {
+            EasingFunction = stretchEase,
         };
         System.Windows.Media.Animation.Timeline.SetDesiredFrameRate(slide, App.AnimationFrameRate);
+        System.Windows.Media.Animation.Timeline.SetDesiredFrameRate(stretch, App.AnimationFrameRate);
         Polaris.Services.FpsProfiler.Push("GlassRise");
         slide.Completed += (_, _) => Polaris.Services.FpsProfiler.Pop("GlassRise");
         tt.BeginAnimation(TranslateTransform.YProperty, slide);
+        sc.BeginAnimation(ScaleTransform.ScaleYProperty, stretch);
     }
 
     /// <summary>Animates the two ring layers growing out from the planet, the
