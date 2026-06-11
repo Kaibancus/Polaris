@@ -310,11 +310,19 @@ public partial class RadialWindow
         double y0 = center.Y - (LiquidGlassTheme.VisibleRows - 1) * cellH / 2.0;  // row 0 centre
 
         double glyph = icon * GlassIconScale;
-        double row1Y = y0 + cellH;   // second row centre (the region is two rows tall)
+
+        // The resident region is user-customizable within the two-row cap, so
+        // the frame wraps only the rows actually occupied by resident apps
+        // (1 or 2 rows) rather than always spanning both.
+        int resident = Math.Min(DockSync.ResidentCount(_config), _config.Apps.Count);
+        int residentRows = Math.Clamp(
+            (resident + LiquidGlassTheme.Columns - 1) / LiquidGlassTheme.Columns,
+            1, 2);
+        double lastRowY = y0 + (residentRows - 1) * cellH;   // last resident row centre
 
         double padY = icon * 0.56;
         double top = y0 - glyph / 2.0 - padY;
-        double bottom = row1Y + glyph / 2.0 + padY;
+        double bottom = lastRowY + glyph / 2.0 + padY;
 
         // Centre the box on the icon GRID (which is nudged left to clear the
         // scrollbar) with symmetric horizontal padding so the icons sit centred
@@ -328,7 +336,8 @@ public partial class RadialWindow
         double h = bottom - top;
         double radius = icon * 0.42;   // matches the left-dock tray corner radius
 
-        // Faint frosted fill so the zone lifts slightly off the slab.
+        // Frame fill at ~99% transparency (barely-there interior), but the edge
+        // is still drawn so the resident region reads as a framed zone.
         var fill = new System.Windows.Shapes.Rectangle
         {
             Width = w,
@@ -336,7 +345,7 @@ public partial class RadialWindow
             RadiusX = radius,
             RadiusY = radius,
             IsHitTestVisible = false,
-            Fill = new SolidColorBrush(Color.FromArgb(0x14, 0xFF, 0xFF, 0xFF)),
+            Fill = new SolidColorBrush(Color.FromArgb(0x03, 0xFF, 0xFF, 0xFF)),
         };
         // A soft outer glow + a bright cool rim read as etched glass. Kept
         // thinner than the main-dock slab border so it reads as a lighter inner
@@ -348,7 +357,7 @@ public partial class RadialWindow
             RadiusX = radius,
             RadiusY = radius,
             IsHitTestVisible = false,
-            Stroke = new SolidColorBrush(Color.FromArgb(0x59, 0xBF, 0xE0, 0xFF)),
+            Stroke = new SolidColorBrush(Color.FromArgb(0x30, 0xBF, 0xE0, 0xFF)),
             StrokeThickness = 2.0,
             Effect = new System.Windows.Media.Effects.BlurEffect { Radius = 4 },
         };
@@ -359,7 +368,7 @@ public partial class RadialWindow
             RadiusX = radius,
             RadiusY = radius,
             IsHitTestVisible = false,
-            Stroke = new SolidColorBrush(Color.FromArgb(0xB3, 0xEA, 0xF4, 0xFF)),
+            Stroke = new SolidColorBrush(Color.FromArgb(0x66, 0xEA, 0xF4, 0xFF)),
             StrokeThickness = 1.0,
         };
         foreach (var r in new[] { fill, glow, rim })

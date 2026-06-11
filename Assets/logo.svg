@@ -1,11 +1,61 @@
 <svg width="256" height="256" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg">
-  <!-- Polaris (北极星) app logo — monochrome sparkle / north star -->
-  <rect x="0" y="0" width="256" height="256" rx="56" ry="56" fill="#0d0d12"/>
+  <!-- Polaris (北极星) app logo — faceted, three-dimensional north star -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#16161f"/>
+      <stop offset="1" stop-color="#08080d"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.46" cy="0.44" r="0.55">
+      <stop offset="0"   stop-color="#cfe0ff" stop-opacity="0.55"/>
+      <stop offset="0.5" stop-color="#9ec0ff" stop-opacity="0.18"/>
+      <stop offset="1"   stop-color="#9ec0ff" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="core" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0"   stop-color="#ffffff" stop-opacity="0.95"/>
+      <stop offset="0.6" stop-color="#ffffff" stop-opacity="0.35"/>
+      <stop offset="1"   stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
 
-  <g fill="#ffffff">
-    <!-- Main four-point star with concave (sparkle) edges, slightly taller -->
-    <path d="M128 20 Q128 128 228 128 Q128 128 128 236 Q128 128 28 128 Q128 128 128 20 Z"/>
-    <!-- Small companion star, upper-right -->
-    <path d="M196 46 Q196 68 220 68 Q196 68 196 92 Q196 68 172 68 Q196 68 196 46 Z"/>
+  <rect x="0" y="0" width="256" height="256" rx="56" ry="56" fill="url(#bg)"/>
+  <!-- top inner sheen for panel depth -->
+  <rect x="6" y="6" width="244" height="120" rx="50" ry="50" fill="#ffffff" opacity="0.04"/>
+
+  <!-- soft halo behind the star -->
+  <ellipse cx="118" cy="116" rx="120" ry="120" fill="url(#glow)"/>
+
+  <!-- drop shadow of the star -->
+  <polygon points="128,30 145.6,118.4 238,134 145.6,149.6 128,238 110.4,149.6 18,134 110.4,118.4"
+           fill="#00010a" opacity="0.45"/>
+
+  <!-- faceted main star: each spike split into a lit and a shaded facet,
+       light coming from the upper-left -->
+  <g stroke="none">
+    <!-- up spike -->
+    <polygon points="128,128 112.4,112.4 128,24"  fill="#eef4ff"/>
+    <polygon points="128,128 128,24 143.6,112.4"  fill="#c3d6f2"/>
+    <!-- right spike -->
+    <polygon points="128,128 143.6,112.4 232,128" fill="#aecaee"/>
+    <polygon points="128,128 232,128 143.6,143.6" fill="#6f8fc4"/>
+    <!-- down spike -->
+    <polygon points="128,128 143.6,143.6 128,232" fill="#5f7eb4"/>
+    <polygon points="128,128 128,232 112.4,143.6" fill="#88a6d4"/>
+    <!-- left spike -->
+    <polygon points="128,128 112.4,143.6 24,128"  fill="#9fbbe2"/>
+    <polygon points="128,128 24,128 112.4,112.4"  fill="#dce9ff"/>
+  </g>
+  <!-- bright lit core -->
+  <circle cx="120" cy="120" r="44" fill="url(#core)"/>
+
+  <!-- small companion star, upper-right -->
+  <g stroke="none">
+    <polygon points="198,52 193.8,47.8 198,26"   fill="#ffffff"/>
+    <polygon points="198,52 198,26 202.2,47.8"   fill="#cfe0f7"/>
+    <polygon points="198,52 202.2,47.8 224,52"   fill="#bcd2f2"/>
+    <polygon points="198,52 224,52 202.2,56.2"   fill="#88a6d4"/>
+    <polygon points="198,52 202.2,56.2 198,78"   fill="#7d9ac9"/>
+    <polygon points="198,52 198,78 193.8,56.2"   fill="#9fbbe2"/>
+    <polygon points="198,52 193.8,56.2 172,52"   fill="#b6ccef"/>
+    <polygon points="198,52 172,52 193.8,47.8"   fill="#e8f1ff"/>
   </g>
 </svg>

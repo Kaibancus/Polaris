@@ -24,7 +24,7 @@ namespace Polaris.Views;
 public partial class LeftDockWindow : Window
 {
     private const double GlassIconScale = 1.32;   // match the main dock's grid icon size
-    private const double HoverScale = 2.0;
+    private const double HoverScale = 2.1;
     private const double DragThreshold = 6.0;
     private const int RunningMaxComplete = 4;     // at most 4 full running-app icons
     private const double LeftDockScale = 0.5;     // left dock is half the main dock's size
@@ -339,7 +339,7 @@ public partial class LeftDockWindow : Window
         double icon = EffectiveIconSize;
         double sh = Height > 0 ? Height : SystemParameters.PrimaryScreenHeight;
 
-        double leftGap = 10 * _uiScale;
+        double leftGap = 5 * _uiScale;
         // Slab is only as wide as the icon at its hover-enlarged size (plus a
         // hair of breathing room), so the glass background is a snug column.
         double padX = GIcon * (HoverScale - 1.0) / 2.0 + icon * 0.12;
@@ -536,25 +536,25 @@ public partial class LeftDockWindow : Window
         double x1 = _slabLeft + 10 * _uiScale;
         double x2 = _slabLeft + _slabW - 10 * _uiScale;
 
-        // A bold straight glass-seam divider: a soft cool glow, a strong dark
-        // groove, and a bright glassy highlight just beneath it — together they
-        // read as a deep, obvious split between the dock and the running strip.
+        // A subtle, thin glass-seam divider: a faint cool glow, a soft thin
+        // groove, and a barely-there glassy highlight — a quiet hairline split
+        // between the dock and the running strip rather than a bold groove.
         var glow = new System.Windows.Shapes.Line
         {
             X1 = x1, X2 = x2, Y1 = seamY, Y2 = seamY,
-            StrokeThickness = 10.0,
-            Stroke = new SolidColorBrush(Color.FromArgb(0x99, 0xBF, 0xE0, 0xFF)),
+            StrokeThickness = 5.0,
+            Stroke = new SolidColorBrush(Color.FromArgb(0x3A, 0xBF, 0xE0, 0xFF)),
             Opacity = opacity,
             IsHitTestVisible = false,
             StrokeStartLineCap = PenLineCap.Round,
             StrokeEndLineCap = PenLineCap.Round,
-            Effect = new System.Windows.Media.Effects.BlurEffect { Radius = 6 },
+            Effect = new System.Windows.Media.Effects.BlurEffect { Radius = 5 },
         };
         var groove = new System.Windows.Shapes.Line
         {
             X1 = x1, X2 = x2, Y1 = seamY, Y2 = seamY,
-            StrokeThickness = 5.0,
-            Stroke = new SolidColorBrush(Color.FromArgb(0xF2, 0x02, 0x05, 0x0D)),
+            StrokeThickness = 1.4,
+            Stroke = new SolidColorBrush(Color.FromArgb(0x88, 0x02, 0x05, 0x0D)),
             Opacity = opacity,
             IsHitTestVisible = false,
             StrokeStartLineCap = PenLineCap.Round,
@@ -562,9 +562,9 @@ public partial class LeftDockWindow : Window
         };
         var shine = new System.Windows.Shapes.Line
         {
-            X1 = x1, X2 = x2, Y1 = seamY + 2.6, Y2 = seamY + 2.6,
-            StrokeThickness = 2.2,
-            Stroke = new SolidColorBrush(Color.FromArgb(0xFF, 0xEA, 0xF4, 0xFF)),
+            X1 = x1, X2 = x2, Y1 = seamY + 1.6, Y2 = seamY + 1.6,
+            StrokeThickness = 1.0,
+            Stroke = new SolidColorBrush(Color.FromArgb(0x55, 0xEA, 0xF4, 0xFF)),
             Opacity = opacity,
             IsHitTestVisible = false,
             StrokeStartLineCap = PenLineCap.Round,
@@ -1389,7 +1389,7 @@ public partial class LeftDockWindow : Window
         if (entry == null || string.IsNullOrWhiteSpace(entry.Path))
             return;
         int idx = _config.Apps.FindIndex(e => DockSync.Matches(e, entry));
-        if (idx >= 0 && idx < DockSync.ResidentCount)
+        if (idx >= 0 && idx < DockSync.ResidentCount(_config))
             return;   // already resident — nothing to do.
 
         if (idx >= 0)
@@ -1469,7 +1469,7 @@ public partial class LeftDockWindow : Window
         var drop = e.GetPosition(PanelCanvas);
         double contentY = drop.Y + _pinnedScroll;
         int dropIdx = (int)Math.Round((contentY - _pinnedAreaTop - CellH / 2.0) / CellH);
-        dropIdx = Math.Clamp(dropIdx, 0, DockSync.ResidentCount);
+        dropIdx = Math.Clamp(dropIdx, 0, DockSync.ResidentCount(_config));
 
         bool changed = false;
         foreach (var entry in entries)
@@ -1484,7 +1484,7 @@ public partial class LeftDockWindow : Window
                 dropIdx++;
                 changed = true;
             }
-            else if (idx >= DockSync.ResidentCount)
+            else if (idx >= DockSync.ResidentCount(_config))
             {
                 var moved = _config.Apps[idx];
                 _config.Apps.RemoveAt(idx);
@@ -1540,7 +1540,8 @@ public partial class LeftDockWindow : Window
                     : entry.WorkingDirectory,
                 UseShellExecute = true,
             };
-            Process.Start(psi);
+            var started = Process.Start(psi);
+            RunningAppTracker.EnsureRestoredWhenReady(started);
         }
         catch (Exception ex)
         {

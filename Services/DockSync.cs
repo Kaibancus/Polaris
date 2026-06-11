@@ -12,8 +12,22 @@ namespace Polaris.Services;
 /// </summary>
 public static class DockSync
 {
-    /// <summary>Resident apps = the top two rows of the main glass grid.</summary>
-    public const int ResidentCount = LiquidGlassTheme.Columns * 2;
+    /// <summary>Hard cap on the resident region = the top two rows of the main
+    /// glass grid.</summary>
+    public const int MaxResidentCount = LiquidGlassTheme.Columns * 2;
+
+    /// <summary>Effective number of resident apps (the first apps, mirrored into
+    /// the left dock). User-customizable within <see cref="MaxResidentCount"/>
+    /// via <see cref="AppSettings.Ring0Count"/>: 0 = auto (fill both rows, the
+    /// historical default), otherwise the chosen count clamped to the cap —
+    /// never forced to the maximum.</summary>
+    public static int ResidentCount(AppConfig cfg)
+    {
+        int desired = cfg.Settings.Ring0Count;
+        return desired <= 0
+            ? MaxResidentCount
+            : Math.Clamp(desired, 1, MaxResidentCount);
+    }
 
     /// <summary>Two entries refer to the same app (same target + arguments).</summary>
     public static bool Matches(AppEntry a, AppEntry b) =>
@@ -21,11 +35,12 @@ public static class DockSync
         string.Equals(a.Arguments ?? "", b.Arguments ?? "", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Rebuilds <see cref="AppConfig.LeftDockApps"/> so it mirrors the
-    /// first <see cref="ResidentCount"/> entries of <see cref="AppConfig.Apps"/>.
+    /// first <see cref="ResidentCount(AppConfig)"/> entries of
+    /// <see cref="AppConfig.Apps"/>.
     /// Returns true when the left list actually changed.</summary>
     public static bool MirrorResidentToLeft(AppConfig cfg)
     {
-        int n = Math.Min(ResidentCount, cfg.Apps.Count);
+        int n = Math.Min(ResidentCount(cfg), cfg.Apps.Count);
         var resident = new List<AppEntry>(n);
         for (int i = 0; i < n; i++)
             resident.Add(cfg.Apps[i]);
@@ -52,8 +67,9 @@ public static class DockSync
     /// pushed down into the regular grid.</summary>
     public static void AppendResident(AppConfig cfg, AppEntry entry)
     {
-        int max = Math.Min(cfg.Apps.Count, ResidentCount);
-        int pos = max >= ResidentCount ? ResidentCount - 1 : max;
+        int resident = ResidentCount(cfg);
+        int max = Math.Min(cfg.Apps.Count, resident);
+        int pos = max >= resident ? resident - 1 : max;
         cfg.Apps.Insert(pos, entry);
     }
 
@@ -62,8 +78,9 @@ public static class DockSync
     /// icon lands where the pointer was. Clamped to the resident region.</summary>
     public static void InsertResident(AppConfig cfg, AppEntry entry, int index)
     {
-        int max = Math.Min(cfg.Apps.Count, ResidentCount);
-        int cap = max >= ResidentCount ? ResidentCount - 1 : max;
+        int resident = ResidentCount(cfg);
+        int max = Math.Min(cfg.Apps.Count, resident);
+        int cap = max >= resident ? resident - 1 : max;
         int pos = Math.Clamp(index, 0, cap);
         cfg.Apps.Insert(pos, entry);
     }

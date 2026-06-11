@@ -270,9 +270,12 @@ public partial class App : Application
             double y = pt.Y / scale;
 
             double sh = SystemParameters.PrimaryScreenHeight;
-            // Trigger band: a thin strip at the very left edge, vertically the
-            // centre 40% of the screen.
-            bool inTrigger = x <= 3.0 && y >= sh * 0.30 && y <= sh * 0.70;
+            // Trigger band: a strip at the left edge, vertically the centre 40%
+            // of the screen. The threshold is generous (and negative x — i.e. the
+            // cursor pushed a touch past the physical left edge, as happens with
+            // mouse over-travel or a monitor to the left — also counts) so the
+            // dock pops without having to land the pointer exactly on x = 0.
+            bool inTrigger = x <= 8.0 && y >= sh * 0.30 && y <= sh * 0.70;
 
             // Once shown by the edge, keep it shown while the cursor stays near
             // the dock. The right-hand margin is deliberately generous so the
@@ -282,8 +285,14 @@ public partial class App : Application
             if (_leftDock.DockVisible)
             {
                 Rect b = _leftDock.GetDockScreenBounds();
-                inDock = x >= b.Left - 4 && x <= b.Right + 150 &&
-                         y >= b.Top - 40 && y <= b.Bottom + 40;
+                // No left bound: the dock hugs the screen's left edge, so any
+                // cursor position from the edge up to the dock's right edge (plus
+                // margin) keeps it shown. Requiring x >= b.Left previously left a
+                // few-pixel dead zone between the trigger strip (x <= 3) and the
+                // slab, so moving the mouse rightwards into the dock could
+                // intermittently retract it.
+                inDock = x <= b.Right + 150 &&
+                         y >= b.Top - 60 && y <= b.Bottom + 60;
             }
 
             _leftDock.SetEdgeShown(inTrigger || inDock);

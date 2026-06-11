@@ -1363,17 +1363,24 @@ public partial class RadialWindow : Window
     /// <summary>
     /// Number of icons on the inner ring for <paramref name="n"/> total icons.
     /// The Saturn inner ring is the resident-app region (the first apps, which
-    /// are also mirrored into the left side dock), filled first and capped at
-    /// <see cref="Ring0Cap"/> (12). The inner ring only grows beyond that cap
-    /// when the outer ring would otherwise overflow its own cap.
+    /// are also mirrored into the left side dock). Its size is user-customizable
+    /// up to <see cref="Ring0Cap"/> (12): the persisted
+    /// <see cref="AppSettings.Ring0Count"/> is honoured (0 = auto, fill first),
+    /// and the inner ring only grows beyond the user's choice when the outer
+    /// ring would otherwise overflow its own cap.
     /// </summary>
     private int EffectiveRing0Count(int n)
     {
         if (n <= 0)
             return 0;
 
-        // Fill the inner ring first, up to its cap.
-        int r0 = Math.Min(Ring0Cap, n);
+        int userR0 = _config.Settings.Ring0Count;
+        int r0 = userR0 > 0
+            // User picked a resident-region size — respect it, capped at the
+            // ring limit and the available icon count (never forced to the cap).
+            ? Math.Min(userR0, Math.Min(Ring0Cap, n))
+            // Auto: fill the inner ring first, up to its cap.
+            : Math.Min(Ring0Cap, n);
 
         // If the outer ring would overflow its cap, push the surplus inward.
         if (n - r0 > Ring1Cap)
@@ -1908,7 +1915,8 @@ public partial class RadialWindow : Window
             };
             if (!string.IsNullOrWhiteSpace(entry.WorkingDirectory))
                 psi.WorkingDirectory = entry.WorkingDirectory;
-            Process.Start(psi);
+            var started = Process.Start(psi);
+            RunningAppTracker.EnsureRestoredWhenReady(started);
         }
         catch (Exception ex)
         {
@@ -1916,7 +1924,6 @@ public partial class RadialWindow : Window
                 MessageBoxButton.OK, MessageBoxImage.Warning);
         }
     }
-
     /// <summary>True when the entry is the genuine Windows File Explorer
     /// (explorer.exe with no shell:AppsFolder launcher argument). explorer.exe is
     /// also the desktop shell, so we never try to "activate its existing window"

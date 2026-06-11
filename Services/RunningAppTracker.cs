@@ -234,6 +234,60 @@ public static class RunningAppTracker
     }
 
     /// <summary>
+    /// Watches a freshly-launched process and, if its main window first appears
+    /// minimized, restores it to a normal window and brings it forward.
+    ///
+    /// Polaris runs as a background tray process, so apps it launches can
+    /// inherit a minimized show state (via STARTUPINFO/SW_SHOWDEFAULT) and open
+    /// minimized to the taskbar instead of as a normal window. This nudges such
+    /// windows back to normal. Windows that open normally are left untouched.
+    /// </summary>
+    public static void EnsureRestoredWhenReady(Process? proc)
+    {
+        if (proc == null)
+            return;
+
+        System.Threading.Tasks.Task.Run(async () =>
+        {
+            try
+            {
+                // Poll for up to ~4s for the app's main window to appear.
+                for (int i = 0; i < 40; i++)
+                {
+                    await System.Threading.Tasks.Task.Delay(100).ConfigureAwait(false);
+
+                    try
+                    {
+                        proc.Refresh();
+                        if (proc.HasExited)
+                            return;
+                    }
+                    catch
+                    {
+                        return;
+                    }
+
+                    IntPtr h = proc.MainWindowHandle;
+                    if (h == IntPtr.Zero)
+                        continue;
+
+                    // The window exists. Only intervene if it came up minimized.
+                    if (IsIconic(h))
+                    {
+                        ShowWindow(h, SW_RESTORE);
+                        SetForegroundWindow(h);
+                    }
+                    return;
+                }
+            }
+            catch
+            {
+                // Best-effort only — never let a launch fail because of this.
+            }
+        });
+    }
+
+    /// <summary>
     /// Finds a running process whose executable matches <paramref name="exePath"/>
     /// and that has a non-zero main window handle.
     /// </summary>
