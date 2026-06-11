@@ -106,6 +106,17 @@ public partial class App : Application
         // Keep registry startup state in sync with config on launch.
         StartupManager.SetEnabled(_config.Settings.RunAtStartup);
 
+        // One-time migration: the resident / inner-ring count used to be a single
+        // shared value. Seed the currently-active theme's per-theme count from
+        // the legacy shared value so it isn't lost; the other theme starts at
+        // auto. From now on each theme keeps its own count.
+        if (!_config.Settings.ResidentCountDecoupled)
+        {
+            ThemeRegistry.SaveAppearance(_config.Settings);
+            _config.Settings.ResidentCountDecoupled = true;
+            ConfigStore.Save(_config);
+        }
+
         // Seed the active transparency / icon size from the current theme's
         // remembered values (or its defaults), so each theme opens with its own
         // look. Persist so the per-theme entry is captured on first run.
@@ -135,6 +146,10 @@ public partial class App : Application
         };
         // Keep the left dock visible while a glass icon is being dragged.
         _panel.GlassDragActiveChanged = active => _leftDock?.SetDragActive(active);
+        // Retract the left dock together with the main dock (e.g. when launching
+        // an app from the main dock hides the panel). Clears every show reason —
+        // including the Ctrl+4 "pinned" reason — so a launch always retracts both.
+        _panel.PanelDismissed += () => _leftDock?.HideAll();
         StartEdgePoll();
 
         RebuildHook();
@@ -172,6 +187,10 @@ public partial class App : Application
             _persistTimer.Tick += (_, _) =>
             {
                 _persistTimer!.Stop();
+                // Capture the active appearance (transparency / icon size /
+                // resident count) into the current theme's per-theme record so
+                // drag-changed values survive a restart, then save.
+                ThemeRegistry.SaveAppearance(_config.Settings);
                 ConfigStore.Save(_config);
             };
         }
@@ -185,6 +204,7 @@ public partial class App : Application
         if (_persistTimer is { IsEnabled: true })
         {
             _persistTimer.Stop();
+            ThemeRegistry.SaveAppearance(_config.Settings);
             ConfigStore.Save(_config);
         }
     }

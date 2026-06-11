@@ -25,6 +25,21 @@ public static class RunningAppTracker
     [DllImport("user32.dll")]
     private static extern bool GetWindowPlacement(IntPtr hWnd, ref WINDOWPLACEMENT lpwndpl);
 
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+
+    [DllImport("kernel32.dll")]
+    private static extern uint GetCurrentThreadId();
+
+    [DllImport("user32.dll")]
+    private static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+
+    [DllImport("user32.dll")]
+    private static extern bool BringWindowToTop(IntPtr hWnd);
+
     [StructLayout(LayoutKind.Sequential)]
     private struct WINDOWPLACEMENT
     {
@@ -40,6 +55,8 @@ public static class RunningAppTracker
     private const int SW_SHOW = 5;
     private const int SW_MAXIMIZE = 3;
     private const int SW_SHOWNORMAL = 1;
+    private const int SW_SHOWMINIMIZED = 2;
+    private const int SW_SHOWMAXIMIZED = 3;
 
     private const int WPF_RESTORETOMAXIMIZED = 0x0002;
 
@@ -213,24 +230,107 @@ public static class RunningAppTracker
         if (h == IntPtr.Zero)
             return false;
 
-        if (IsIconic(h))
+        ActivateWindow(h);
+        return true;
+    }
+
+    /// <summary>
+    /// Brings the running instance of the app entry to the foreground. Packaged
+    /// apps (the new Teams / Outlook, Store apps…) are pinned as
+    /// <c>explorer.exe shell:AppsFolder\&lt;AUMID&gt;</c>; matching those by the
+    /// "explorer.exe" path would activate the desktop shell instead of the app,
+    /// so when the entry is such a launcher we locate the window by its
+    /// Application User Model ID. Returns true when a window was activated.
+    /// </summary>
+    public static bool ActivateExisting(string path, string? arguments)
+    {
+        string? aumid = WindowPreviewService.TryGetLauncherAumid(path, arguments);
+        if (aumid != null)
         {
-            // Un-minimize while preserving the prior state: if the window was
-            // maximized (full-screen) before minimizing, restore it maximized;
-            // otherwise restore it to its normal windowed size.
-            var pl = new WINDOWPLACEMENT { length = Marshal.SizeOf<WINDOWPLACEMENT>() };
-            bool wasMaximized = GetWindowPlacement(h, ref pl)
-                && (pl.flags & WPF_RESTORETOMAXIMIZED) != 0;
-            ShowWindow(h, wasMaximized ? SW_MAXIMIZE : SW_RESTORE);
+            var windows = WindowPreviewService.GetWindowsByAumid(aumid);
+            if (windows.Count == 0)
+                return false;
+            ActivateWindow(windows[0].Handle);
+            return true;
+        }
+
+        return ActivateExisting(path);
+    }
+
+    /// <summary>Restores (preserving the maximized state) and foregrounds the
+    /// window <paramref name="h"/>.</summary>
+    private static void ActivateWindow(IntPtr h)
+    {
+        if (h == IntPtr.Zero)
+            return;
+
+        // Read the window's placement so the maximized state is preserved across
+        // the activation. Relying solely on IsIconic + ShowWindow(SW_RESTORE)
+        // can drop a window out of its maximized state into a normal "windowed"
+        // size on some apps, which is exactly the "opens windowed" symptom.
+        var pl = new WINDOWPLACEMENT { length = Marshal.SizeOf<WINDOWPLACEMENT>() };
+        bool gotPlacement = GetWindowPlacement(h, ref pl);
+        bool iconic = IsIconic(h);
+
+        // The window is (or was, before minimizing) maximized when either it is
+        // currently shown maximized, or it is minimized with the
+        // "restore-to-maximized" flag set.
+        bool maximized = gotPlacement &&
+            (pl.showCmd == SW_SHOWMAXIMIZED ||
+             (iconic && (pl.flags & WPF_RESTORETOMAXIMIZED) != 0));
+
+        if (iconic)
+        {
+            // Explicitly re-maximize when that was the prior state; otherwise a
+            // plain restore to the normal windowed size.
+            ShowWindow(h, maximized ? SW_SHOWMAXIMIZED : SW_RESTORE);
+        }
+        else if (maximized)
+        {
+            // Already visible and maximized — keep it maximized (SW_SHOW would
+            // also preserve it, but SW_SHOWMAXIMIZED guards against any app that
+            // misreports its state).
+            ShowWindow(h, SW_SHOWMAXIMIZED);
         }
         else
         {
-            // Already visible — just bring it forward without changing whether
-            // it is maximized or windowed (SW_SHOW preserves the current state).
             ShowWindow(h, SW_SHOW);
         }
-        SetForegroundWindow(h);
-        return true;
+
+        ForceForeground(h);
+    }
+
+    /// <summary>Reliably brings <paramref name="h"/> to the foreground. A plain
+    /// <c>SetForegroundWindow</c> is frequently refused by Windows when the call
+    /// comes from a background process (the foreground-lock); attaching to the
+    /// current foreground thread's input queue lifts that restriction.</summary>
+    private static void ForceForeground(IntPtr h)
+    {
+        IntPtr fg = GetForegroundWindow();
+        if (fg == h)
+            return;
+
+        uint targetThread = GetWindowThreadProcessId(h, out _);
+        uint fgThread = fg != IntPtr.Zero ? GetWindowThreadProcessId(fg, out _) : 0;
+        uint thisThread = GetCurrentThreadId();
+
+        bool attachedFg = fgThread != 0 && fgThread != thisThread &&
+            AttachThreadInput(thisThread, fgThread, true);
+        bool attachedTarget = targetThread != 0 && targetThread != thisThread &&
+            targetThread != fgThread &&
+            AttachThreadInput(thisThread, targetThread, true);
+        try
+        {
+            BringWindowToTop(h);
+            SetForegroundWindow(h);
+        }
+        finally
+        {
+            if (attachedTarget)
+                AttachThreadInput(thisThread, targetThread, false);
+            if (attachedFg)
+                AttachThreadInput(thisThread, fgThread, false);
+        }
     }
 
     /// <summary>

@@ -36,6 +36,15 @@ public sealed class AppSettings
     /// </summary>
     public bool StartupDefaultApplied { get; set; } = false;
 
+    /// <summary>
+    /// One-time migration flag: false in configs written before the resident /
+    /// inner-ring count became per-theme. On first load with this false we seed
+    /// the active theme's <see cref="ThemeAppearance.Ring0Count"/> from the
+    /// legacy shared <see cref="Ring0Count"/>, then set this so each theme keeps
+    /// its own count from then on.
+    /// </summary>
+    public bool ResidentCountDecoupled { get; set; } = false;
+
     /// <summary>Diameter of a single icon in device-independent pixels.</summary>
     public double IconSize { get; set; } = 56;
 
@@ -45,7 +54,9 @@ public sealed class AppSettings
     /// <summary>
     /// Number of icons on the inner ring. 0 = auto (fill the inner ring up to
     /// 12, remaining icons go to the outer ring). Adjusted as the user drags
-    /// icons between the two rings.
+    /// icons between the two rings. This is the <i>active</i> value for the
+    /// current theme; each theme keeps its own remembered value in
+    /// <see cref="ThemeAppearances"/>.
     /// </summary>
     public int Ring0Count { get; set; } = 0;
 
@@ -68,4 +79,8 @@ public sealed class ThemeAppearance
 
     /// <summary>Icon diameter in device-independent pixels.</summary>
     public double IconSize { get; set; }
+
+    /// <summary>Resident / inner-ring count for this theme (0 = auto). Lets the
+    /// Saturn and liquid-glass themes keep independent resident-app counts.</summary>
+    public int Ring0Count { get; set; }
 }

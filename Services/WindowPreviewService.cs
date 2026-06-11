@@ -214,7 +214,61 @@ public static class WindowPreviewService
     public static List<WindowPreview> GetWindowsForEntry(string path, string? arguments)
     {
         string? aumid = TryGetLauncherAumid(path, arguments);
-        return aumid != null ? GetWindowsByAumid(aumid) : GetWindows(path);
+        if (aumid != null)
+            return GetWindowsByAumid(aumid);
+
+        // Protocol launchers (e.g. "explorer.exe ms-settings:") open a UWP app
+        // that is usually hosted by ApplicationFrameHost — its window has no
+        // readable AUMID and is not owned by explorer.exe. Matching by the
+        // explorer.exe process would wrongly surface File Explorer's windows, so
+        // we show no previews for these; clicking simply (re)launches the
+        // protocol, which activates the single-instance app.
+        if (IsProtocolLauncher(path, arguments))
+            return new List<WindowPreview>();
+
+        return GetWindows(path);
+    }
+
+    /// <summary>
+    /// True when the entry launches a URI protocol via Explorer (e.g.
+    /// <c>explorer.exe ms-settings:</c>) rather than a file or a
+    /// <c>shell:AppsFolder</c> packaged-app launcher. These open a separate host
+    /// process, so they must not be matched against explorer.exe's own windows.
+    /// </summary>
+    public static bool IsProtocolLauncher(string path, string? arguments)
+    {
+        if (string.IsNullOrWhiteSpace(arguments))
+            return false;
+        try
+        {
+            if (!string.Equals(Path.GetFileName(path), "explorer.exe",
+                    StringComparison.OrdinalIgnoreCase))
+                return false;
+        }
+        catch
+        {
+            return false;
+        }
+
+        string arg = arguments.Trim().Trim('"');
+        // A URI scheme: a letter followed by letters/digits/+/-/. then ':'. We
+        // exclude drive paths ("C:\") — those have a single-letter scheme
+        // followed by a path separator — and the shell: namespace (handled
+        // elsewhere / not a windowed protocol app).
+        int colon = arg.IndexOf(':');
+        if (colon <= 0)
+            return false;
+        string scheme = arg.Substring(0, colon);
+        if (scheme.Length == 1)
+            return false;   // drive letter like C:
+        if (scheme.StartsWith("shell", StringComparison.OrdinalIgnoreCase))
+            return false;
+        foreach (char c in scheme)
+        {
+            if (!(char.IsLetterOrDigit(c) || c == '+' || c == '-' || c == '.'))
+                return false;
+        }
+        return true;
     }
 
     /// <summary>
@@ -266,9 +320,13 @@ public static class WindowPreviewService
             if (!IsAltTabWindow(hWnd))
                 return true;
 
+            // Prefer the window's own AUMID; some packaged apps (the new Outlook)
+            // expose an empty / missing per-window AUMID, so fall back to the
+            // owning process's AUMID, which carries the same package family name.
             string? winAumid = GetWindowAumid(hWnd);
-            if (winAumid == null ||
-                !string.Equals(winAumid, aumid, StringComparison.OrdinalIgnoreCase))
+            if (string.IsNullOrEmpty(winAumid))
+                GetProcessInfo(pid, out winAumid);
+            if (!AumidMatches(winAumid, aumid))
                 return true;
 
             string title = GetWindowTitle(hWnd);
@@ -280,6 +338,33 @@ public static class WindowPreviewService
         }, IntPtr.Zero);
 
         return result;
+    }
+
+    /// <summary>True when a window's Application User Model ID
+    /// <paramref name="winAumid"/> identifies the same packaged app as the pinned
+    /// launcher's <paramref name="target"/> AUMID. Some packaged apps (e.g. the
+    /// new Outlook) report a window AUMID whose app-id portion differs from the
+    /// launcher's, so a match on the package family name (the part before the
+    /// <c>!</c>) is accepted in addition to an exact match.</summary>
+    private static bool AumidMatches(string? winAumid, string target)
+    {
+        if (string.IsNullOrEmpty(winAumid))
+            return false;
+        if (string.Equals(winAumid, target, StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        string winPfn = PackageFamilyOf(winAumid);
+        string targetPfn = PackageFamilyOf(target);
+        return winPfn.Length > 0 &&
+            string.Equals(winPfn, targetPfn, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Returns the package-family-name portion of an AUMID (everything
+    /// before the <c>!</c>), or the whole string when it has no <c>!</c>.</summary>
+    private static string PackageFamilyOf(string aumid)
+    {
+        int bang = aumid.IndexOf('!');
+        return bang > 0 ? aumid.Substring(0, bang) : aumid;
     }
 
     /// <summary>Reads a window's Application User Model ID from its property
@@ -349,6 +434,14 @@ public static class WindowPreviewService
 
             string? path = GetProcessInfo(pid, out string? procAumid);
             if (string.IsNullOrWhiteSpace(path))
+                return true;
+
+            // ApplicationFrameHost.exe merely hosts UWP windows (Settings, some
+            // Store apps); its window exposes no usable AUMID, so it would show
+            // up as a generic host tile that duplicates the real (often pinned)
+            // app. Skip it so the running strip never lists the host process.
+            if (string.Equals(Path.GetFileName(path), "ApplicationFrameHost.exe",
+                    StringComparison.OrdinalIgnoreCase))
                 return true;
 
             // Prefer the process's packaged identity (reliable for Win32-hosted

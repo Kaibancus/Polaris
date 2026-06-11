@@ -27,7 +27,10 @@ public partial class LeftDockWindow : Window
     private const double HoverScale = 2.1;
     private const double DragThreshold = 6.0;
     private const int RunningMaxComplete = 4;     // at most 4 full running-app icons
-    private const double LeftDockScale = 0.5;     // left dock is half the main dock's size
+    // Left dock icon scale relative to the main dock. The Saturn theme uses a
+    // smaller side dock (60%); every other theme uses 50%.
+    private double LeftDockScale =>
+        ThemeRegistry.Get(_config.Settings.Theme).IsSaturn ? 0.60 : 0.50;
 
     private readonly AppConfig _config;
     private readonly Action _persist;
@@ -1542,7 +1545,7 @@ public partial class LeftDockWindow : Window
         {
             try
             {
-                if (RunningAppTracker.ActivateExisting(entry.Path))
+                if (RunningAppTracker.ActivateExisting(entry.Path, entry.Arguments))
                     return;
             }
             catch { /* fall through */ }

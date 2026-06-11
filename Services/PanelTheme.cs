@@ -73,7 +73,8 @@ public sealed class SaturnRingTheme : PanelTheme
     public override bool IsSaturn => true;
     public override Brush WindowBackground => Brushes.Transparent;
     public override double DefaultTransparency => 0.10;
-    public override double DefaultIconSize => 56;
+    // 50% of the settings icon-size slider range [40, 96]: 40 + 0.50 * 56 = 68.
+    public override double DefaultIconSize => 68;
 
     public override IReadOnlyList<Point> ComputeSlots(
         int count, Point center, AppSettings settings, out double outerReach)
@@ -132,11 +133,15 @@ public sealed class LiquidGlassTheme : PanelTheme
         double cellW = icon * 2.15;
         double cellH = icon * 2.35;   // extra height leaves room for the label
 
-        // Lay every icon out on its true row (the grid can be taller than the
-        // visible window; the host scrolls the surplus rows into view). The grid
-        // is TOP-aligned: row 0 sits at the panel's first visible row and lower
-        // rows extend downward, so scrolling reveals them.
-        int rows = Math.Max(1, (count + Columns - 1) / Columns);
+        // The first <resident> apps are the pinned region mirrored into the left
+        // dock; the rest begin on a FRESH row beneath that block so the resident
+        // frame never captures a non-resident icon (which would then look pinned
+        // but be missing from the side dock). resident == 0/neg means "no special
+        // block" — lay everything out as one continuous grid.
+        int resident = settings.Ring0Count;
+        resident = resident <= 0 ? 0 : Math.Clamp(resident, 0, count);
+        int residentRows = resident > 0 ? (resident + Columns - 1) / Columns : 0;
+
         double gridW = (Columns - 1) * cellW;
         double x0 = center.X - gridW / 2.0;
         // center.Y is the centre of the first VISIBLE row block (VisibleRows tall);
@@ -147,14 +152,26 @@ public sealed class LiquidGlassTheme : PanelTheme
         // Hard cap at the full grid; extra icons are never placed (the host
         // refuses to add beyond Capacity, so this is just a safety clamp).
         int max = Math.Min(count, Capacity);
+        int totalRows = Math.Max(1, residentRows);
         for (int i = 0; i < max; i++)
         {
-            int row = i / Columns;
-            int col = i % Columns;
+            int row, col;
+            if (resident > 0 && i >= resident)
+            {
+                int j = i - resident;                 // index within the overflow block
+                row = residentRows + j / Columns;
+                col = j % Columns;
+            }
+            else
+            {
+                row = i / Columns;
+                col = i % Columns;
+            }
             list.Add(new Point(x0 + col * cellW, y0 + row * cellH));
+            totalRows = Math.Max(totalRows, row + 1);
         }
 
-        double gridH = (rows - 1) * cellH;
+        double gridH = (totalRows - 1) * cellH;
         outerReach = Math.Max(gridW, gridH) / 2.0 + icon;
         return list;
     }
@@ -188,11 +205,13 @@ public static class ThemeRegistry
         {
             s.PanelTransparency = a.Transparency;
             s.IconSize = a.IconSize;
+            s.Ring0Count = a.Ring0Count;
         }
         else
         {
             s.PanelTransparency = theme.DefaultTransparency;
             s.IconSize = theme.DefaultIconSize;
+            s.Ring0Count = 0;   // auto
         }
     }
 
@@ -204,6 +223,7 @@ public static class ThemeRegistry
         {
             Transparency = s.PanelTransparency,
             IconSize = s.IconSize,
+            Ring0Count = s.Ring0Count,
         };
     }
 }

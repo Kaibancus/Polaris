@@ -19,8 +19,15 @@ public static class DockSync
     /// <summary>Effective number of resident apps (the first apps, mirrored into
     /// the left dock). User-customizable within <see cref="MaxResidentCount"/>
     /// via <see cref="AppSettings.Ring0Count"/>: 0 = auto (fill both rows, the
-    /// historical default), otherwise the chosen count clamped to the cap —
-    /// never forced to the maximum.</summary>
+    /// historical default), otherwise the EXACT chosen count clamped to the cap.
+    ///
+    /// The count is honoured verbatim for every theme — the left dock mirrors
+    /// precisely this many apps, no more. The liquid-glass grid keeps the side
+    /// dock and the framed resident region consistent by starting the
+    /// non-resident apps on a fresh row beneath the resident block (see
+    /// <see cref="LiquidGlassTheme.ComputeSlots"/>), so no "orphan" icon ever
+    /// sits inside the resident frame without also appearing in the side
+    /// dock.</summary>
     public static int ResidentCount(AppConfig cfg)
     {
         int desired = cfg.Settings.Ring0Count;
@@ -65,23 +72,44 @@ public static class DockSync
     /// <summary>Inserts a new app into the resident region (so it appears in the
     /// left dock). When the region is already full the last resident app is
     /// pushed down into the regular grid.</summary>
+    /// <summary>Inserts a new app into the resident region (so it appears in the
+    /// left dock). When the region has not yet reached the hard cap
+    /// (<see cref="MaxResidentCount"/>) the resident count grows by one so the
+    /// app is genuinely <i>added</i>; only once the cap is reached does the last
+    /// resident get pushed down into the regular grid.</summary>
     public static void AppendResident(AppConfig cfg, AppEntry entry)
     {
-        int resident = ResidentCount(cfg);
-        int max = Math.Min(cfg.Apps.Count, resident);
-        int pos = max >= resident ? resident - 1 : max;
+        int resident = GrowResidentIfFull(cfg);
+        int pos = cfg.Apps.Count >= resident ? resident - 1 : cfg.Apps.Count;
         cfg.Apps.Insert(pos, entry);
     }
 
     /// <summary>Inserts a new app into the resident region at (or near) the
     /// requested <paramref name="index"/> within the top two rows, so a dropped
-    /// icon lands where the pointer was. Clamped to the resident region.</summary>
+    /// icon lands where the pointer was. Grows the resident count (up to the hard
+    /// cap) so dropping at the end genuinely adds the app rather than evicting
+    /// the current last resident.</summary>
     public static void InsertResident(AppConfig cfg, AppEntry entry, int index)
     {
-        int resident = ResidentCount(cfg);
-        int max = Math.Min(cfg.Apps.Count, resident);
-        int cap = max >= resident ? resident - 1 : max;
+        int resident = GrowResidentIfFull(cfg);
+        int cap = cfg.Apps.Count >= resident ? resident - 1 : cfg.Apps.Count;
         int pos = Math.Clamp(index, 0, cap);
         cfg.Apps.Insert(pos, entry);
+    }
+
+    /// <summary>When the resident region is full (as many apps as the current
+    /// resident count) but still below the hard cap, bumps
+    /// <see cref="AppSettings.Ring0Count"/> by one so the next insert adds a new
+    /// resident slot instead of evicting the last one. Returns the (possibly
+    /// grown) resident count.</summary>
+    private static int GrowResidentIfFull(AppConfig cfg)
+    {
+        int resident = ResidentCount(cfg);
+        if (cfg.Apps.Count >= resident && resident < MaxResidentCount)
+        {
+            cfg.Settings.Ring0Count = resident + 1;
+            resident = ResidentCount(cfg);
+        }
+        return resident;
     }
 }
