@@ -52,7 +52,9 @@ public partial class RadialWindow
     /// </summary>
     private void RefreshTaskbarApps()
     {
-        if (!(_theme.IsSaturn || _theme.ShowGlassPanel) || !_shown)
+        // The glass theme no longer shows a running-app taskbar row at the bottom
+        // of the dock; only the Saturn theme draws a running-app arc.
+        if (!_theme.IsSaturn || !_shown)
         {
             ClearTaskbarIcons();
             return;
@@ -66,7 +68,12 @@ public partial class RadialWindow
         // install folders like app-1.2.3\app.exe, or launcher stubs), so an
         // exact full-path compare misses and the app reappears in the dock.
         var excludeFileNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var a in _config.Apps)
+        // Exclude apps pinned in EITHER dock so the main taskbar strip and the
+        // left dock's running strip share one logic (identical "running but not
+        // pinned anywhere" set).
+        var pinnedAll = new List<Polaris.Models.AppEntry>(_config.Apps);
+        pinnedAll.AddRange(_config.LeftDockApps);
+        foreach (var a in pinnedAll)
         {
             if (string.IsNullOrWhiteSpace(a.Path))
                 continue;
@@ -123,8 +130,6 @@ public partial class RadialWindow
                     return;
                 if (_theme.IsSaturn)
                     DrawTaskbarArc(filtered);
-                else if (_theme.ShowGlassPanel)
-                    DrawTaskbarRow(filtered);
             });
         });
     }
@@ -214,20 +219,12 @@ public partial class RadialWindow
         double tile = icon * GlassIconScale;   // same footprint as a glass grid icon
         double cellW = icon * 2.15;            // same column pitch as the grid
 
-        // Glass panel extent (mirrors DrawGlassPanel) to find its bottom edge.
-        int rows = LiquidGlassTheme.RowsFor(_config.Apps.Count);
-        double cellH = icon * 2.35;
-        double gridH = (rows - 1) * cellH;
-        double padY = icon * 1.15;
-        double panelH = gridH + icon + padY * 2;
-        double panelBottom = _center.Y + panelH / 2.0;
-
-        // The taskbar row lives in the strip the dock slab already reserved at
-        // its bottom (see GlassTaskbarStripHeight / DrawGlassPanel). dock and
-        // strip are ONE continuous glass panel split only by an engraved seam,
-        // so the row draws no slab of its own — it just centres its tiles in the
-        // reserved strip below the dock's bottom edge.
-        double dockBottom = panelBottom - GlassDockLift;
+        // The dock body is a fixed 4-row block centred on GlassDockCenter; the
+        // taskbar strip is carved at its bottom (see GlassTaskbarStripHeight /
+        // DrawGlassPanel). dock and strip are ONE continuous glass panel split
+        // only by an engraved seam, so the row draws no slab of its own — it
+        // just centres its tiles in the reserved strip below the dock's bottom.
+        double dockBottom = GlassDockCenterY + GlassDockBodyHeight / 2.0;
         double rowVPad = tile * 0.42;
         double rowY = dockBottom + rowVPad + tile / 2.0;
 
@@ -428,8 +425,8 @@ public partial class RadialWindow
         }
 
         // Background plate. Saturn uses a dark 80%-transparent plate; the glass
-        // theme matches the added grid icons' background (#08FFFFFF, 12px radius,
-        // 8px padding) so the running tiles read as part of the same set.
+        // theme matches the pinned grid icons' liquid-glass background so the
+        // running tiles read as part of the same set.
         bool glass = _theme.ShowGlassPanel;
         var idleBg = glass
             ? new SolidColorBrush(Color.FromArgb(0x08, 0xFF, 0xFF, 0xFF))

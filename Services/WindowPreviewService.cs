@@ -69,6 +69,11 @@ public static class WindowPreviewService
     [DllImport("user32.dll")]
     private static extern bool SetForegroundWindow(IntPtr hWnd);
 
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern IntPtr SendMessageW(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+
+    private const uint WM_CLOSE = 0x0010;
+
     [DllImport("user32.dll")]
     private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 
@@ -330,6 +335,10 @@ public static class WindowPreviewService
 
         EnumWindows((hWnd, _) =>
         {
+            // Only genuine alt-tab windows: this excludes background/tray apps
+            // whose only top-level window is a WS_EX_TOOLWINDOW (e.g. PixPin,
+            // Snipaste) as well as the Windows shell surfaces. The running strip
+            // therefore lists only apps the user actually has a real window for.
             if (!IsAltTabWindow(hWnd))
                 return true;
             if (GetWindowThreadProcessId(hWnd, out uint pid) == 0 || pid == ownPid)
@@ -362,6 +371,34 @@ public static class WindowPreviewService
 
         return result;
     }
+
+    /// <summary>Titles of every File-Explorer (explorer.exe) alt-tab window that
+    /// is currently open. Used to light the running indicator on pinned
+    /// shell-namespace items (This PC, Recycle Bin…) whose "process" is the
+    /// shared explorer.exe and can only be told apart by their window title.</summary>
+    public static List<string> GetExplorerWindowTitles()
+    {
+        var titles = new List<string>();
+        int ownPid = Environment.ProcessId;
+        EnumWindows((hWnd, _) =>
+        {
+            if (!IsAltTabWindow(hWnd))
+                return true;
+            if (GetWindowThreadProcessId(hWnd, out uint pid) == 0 || pid == ownPid)
+                return true;
+            string title = GetWindowTitle(hWnd);
+            if (string.IsNullOrWhiteSpace(title))
+                return true;
+            string? path = GetProcessInfo(pid, out string? _aumid);
+            if (string.IsNullOrWhiteSpace(path))
+                return true;
+            if (string.Equals(Path.GetFileName(path), "explorer.exe", StringComparison.OrdinalIgnoreCase))
+                titles.Add(title);
+            return true;
+        }, IntPtr.Zero);
+        return titles;
+    }
+
 
     /// <summary>Full executable path and packaged AUMID (null when unpackaged)
     /// of a process id; path is null if the process is inaccessible.</summary>
@@ -549,6 +586,22 @@ public static class WindowPreviewService
             if (IsIconic(hWnd))
                 ShowWindow(hWnd, SW_RESTORE);
             SetForegroundWindow(hWnd);
+        }
+        catch
+        {
+            // Best effort.
+        }
+    }
+
+    /// <summary>Requests that the window close (posts WM_CLOSE, same as clicking
+    /// its title-bar X). The app may prompt to save; we don't force-kill.</summary>
+    public static void CloseWindow(IntPtr hWnd)
+    {
+        if (hWnd == IntPtr.Zero)
+            return;
+        try
+        {
+            SendMessageW(hWnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
         }
         catch
         {

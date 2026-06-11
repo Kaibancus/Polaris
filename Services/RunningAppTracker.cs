@@ -175,6 +175,31 @@ public static class RunningAppTracker
     }
 
     /// <summary>
+    /// True when <paramref name="path"/> is a shell-namespace pin (This PC,
+    /// Recycle Bin… — a "::{CLSID}" or "shell:" target, not a real exe) and a
+    /// File-Explorer window matching its display <paramref name="name"/> is
+    /// currently open. Such items all run inside the shared explorer.exe and so
+    /// can only be told apart by their window title.
+    /// </summary>
+    public static bool IsShellItemRunning(string name, string path, IReadOnlyList<string> explorerTitles)
+    {
+        if (explorerTitles == null || explorerTitles.Count == 0)
+            return false;
+        if (string.IsNullOrWhiteSpace(name) || string.IsNullOrWhiteSpace(path))
+            return false;
+        bool isShell = path.StartsWith("::", StringComparison.Ordinal)
+            || path.StartsWith("shell:", StringComparison.OrdinalIgnoreCase);
+        if (!isShell)
+            return false;
+        foreach (var t in explorerTitles)
+        {
+            if (!string.IsNullOrEmpty(t) && t.Contains(name, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>
     /// Brings the running instance of <paramref name="exePath"/> to the
     /// foreground (restoring it if minimized). Returns true on success.
     /// </summary>

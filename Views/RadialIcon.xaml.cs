@@ -32,7 +32,7 @@ public partial class RadialIcon : UserControl
     /// host panel can dismiss itself.</summary>
     public event Action? WindowActivated;
 
-    public RadialIcon(AppEntry entry, BitmapSource? icon, double iconSize, Color glowColor, Brush labelBrush, bool dropletHover)
+    public RadialIcon(AppEntry entry, BitmapSource? icon, double iconSize, Color glowColor, Brush labelBrush, bool dropletHover, bool leftDockStyle = false)
     {
         Entry = entry;
         IconImage = icon;
@@ -41,6 +41,7 @@ public partial class RadialIcon : UserControl
         LabelBrush = labelBrush;
         DisplayName = entry.Name;
         _dropletHover = dropletHover;
+        _leftDockStyle = leftDockStyle;
         InitializeComponent();
 
         // Pick the hover style per theme: the water-droplet lens is exclusive to
@@ -49,21 +50,11 @@ public partial class RadialIcon : UserControl
         if (_dropletHover)
         {
             BlueGlow.Visibility = Visibility.Collapsed;
-            // Liquid-glass icon plate: a near-invisible "crystal" chip — the body
-            // is almost fully transparent (far clearer than the dock backdrop)
-            // so the icon appears to float on a sliver of glass, lifted by a
-            // bright luminous rim, a diagonal sheen and a soft drop shadow.
-            IconPlate.Background = new LinearGradientBrush
-            {
-                StartPoint = new Point(0, 0),
-                EndPoint = new Point(0, 1),
-                GradientStops =
-                {
-                    new GradientStop(Color.FromArgb(0x07, 0xFF, 0xFF, 0xFF), 0.0),
-                    new GradientStop(Color.FromArgb(0x02, 0xFF, 0xFF, 0xFF), 0.5),
-                    new GradientStop(Color.FromArgb(0x01, 0xD8, 0xE6, 0xFF), 1.0),
-                },
-            };
+            // Liquid-glass icon plate: a faint "crystal" chip at 95% transparency
+            // (alpha ≈ 5% = 0x0D) so the icon floats on a barely-there sliver of
+            // glass, lifted by a bright luminous rim, a diagonal sheen and a soft
+            // drop shadow.
+            IconPlate.Background = new SolidColorBrush(Color.FromArgb(0x0D, 0xFF, 0xFF, 0xFF));
             IconPlate.BorderThickness = new Thickness(1.2);
             IconPlate.BorderBrush = new LinearGradientBrush
             {
@@ -84,6 +75,14 @@ public partial class RadialIcon : UserControl
                 Direction = 270,
                 Opacity = 0.42,
                 Color = Color.FromRgb(0x05, 0x0A, 0x14),
+            };
+            // Bake the plate (icon image + drop shadow) into a GPU bitmap cache
+            // rendered at 2x so the 1.7x hover zoom upscales a cached texture
+            // instead of re-rasterising the drop shadow on the CPU every frame.
+            // RenderAtScale 2.0 keeps the icon crisp at full zoom + DPI headroom.
+            IconPlate.CacheMode = new System.Windows.Media.BitmapCache(2.0)
+            {
+                SnapsToDevicePixels = true,
             };
             // Diagonal glossy sheen across the top-left — the crystal highlight.
             PlateSheen.Visibility = Visibility.Visible;
@@ -109,6 +108,33 @@ public partial class RadialIcon : UserControl
             BlueGlow.Visibility = Visibility.Visible;
             BlueGlow.Background = new SolidColorBrush(
                 Color.FromArgb(0x5A, glowColor.R, glowColor.G, glowColor.B));
+        }
+
+        // Left dock: no tray. Strip the glass plate (background / rim / shadow /
+        // sheen) so the icon floats free, and size + place the breathing green
+        // "running" dot at the icon's left edge.
+        if (_leftDockStyle)
+        {
+            IconPlate.Background = Brushes.Transparent;
+            IconPlate.BorderThickness = new Thickness(0);
+            IconPlate.BorderBrush = null;
+            IconPlate.Effect = null;
+            IconPlate.CacheMode = null;
+            PlateSheen.Visibility = Visibility.Collapsed;
+            // No water-droplet lens on hover either — that glassy overlay reads
+            // as a tray. The macOS-style magnify wave is the only hover feedback.
+            HoverGlow.Visibility = Visibility.Collapsed;
+
+            double dot = Math.Max(3.0, iconSize * 0.075);
+            double glow = dot * 2.3;
+            RunDot.Width = RunDot.Height = dot;
+            RunDotGlow.Width = RunDotGlow.Height = glow;
+            double cy = iconSize / 2.0;
+            double cx = dot * 0.05;   // hug the very left edge
+            Canvas.SetLeft(RunDot, cx - dot / 2.0);
+            Canvas.SetTop(RunDot, cy - dot / 2.0);
+            Canvas.SetLeft(RunDotGlow, cx - glow / 2.0);
+            Canvas.SetTop(RunDotGlow, cy - glow / 2.0);
         }
 
         // Centre the (zero-layout) name label below the icon.
@@ -138,7 +164,44 @@ public partial class RadialIcon : UserControl
     public string DisplayName { get; }
 
     private readonly bool _dropletHover;
+    private readonly bool _leftDockStyle;
     private bool _isRunning;
+
+    /// <summary>When true the icon does NOT scale itself on hover; instead the
+    /// host dock drives a coordinated magnification (a macOS-dock-style wave)
+    /// via <see cref="Magnify"/>. The hover glow / label / preview still fire.</summary>
+    public bool ExternalMagnify { get; set; }
+
+    private static readonly Duration MagnifyAnim = new(TimeSpan.FromMilliseconds(150));
+
+    /// <summary>Applies an external magnification: scales the icon about its
+    /// centre and offsets it horizontally (the macOS-dock "pop out" toward the
+    /// screen). Animated with an ease-out so neighbouring icons settle smoothly
+    /// as the pointer moves along the dock.</summary>
+    public void Magnify(double scale, double offsetX)
+    {
+        var ease = new CubicEase { EasingMode = EasingMode.EaseOut };
+        Scale.BeginAnimation(ScaleTransform.ScaleXProperty,
+            new DoubleAnimation(scale, MagnifyAnim) { EasingFunction = ease });
+        Scale.BeginAnimation(ScaleTransform.ScaleYProperty,
+            new DoubleAnimation(scale, MagnifyAnim) { EasingFunction = ease });
+        MagnifyTranslate.BeginAnimation(TranslateTransform.XProperty,
+            new DoubleAnimation(offsetX, MagnifyAnim) { EasingFunction = ease });
+    }
+
+    /// <summary>Sets the magnification DIRECTLY (no animation) for continuous,
+    /// cursor-tracked wave updates. Clears any running <see cref="Magnify"/>
+    /// animation first so the assigned values take effect immediately — the
+    /// smoothness comes from the host driving this every frame.</summary>
+    public void SetMagnify(double scale, double offsetX)
+    {
+        Scale.BeginAnimation(ScaleTransform.ScaleXProperty, null);
+        Scale.BeginAnimation(ScaleTransform.ScaleYProperty, null);
+        MagnifyTranslate.BeginAnimation(TranslateTransform.XProperty, null);
+        Scale.ScaleX = scale;
+        Scale.ScaleY = scale;
+        MagnifyTranslate.X = offsetX;
+    }
 
     /// <summary>
     /// When true the icon shows a flowing blue light around its square border,
@@ -158,6 +221,11 @@ public partial class RadialIcon : UserControl
 
     private void UpdateRunningVisual()
     {
+        if (_leftDockStyle)
+        {
+            UpdateRunningDot();
+            return;
+        }
         if (_isRunning)
         {
             int loopFps = App.AmbientFrameRate;
@@ -192,18 +260,64 @@ public partial class RadialIcon : UserControl
         }
     }
 
+    /// <summary>Left-dock running indicator: a small green dot at the icon's left
+    /// edge that gently breathes (opacity pulse), with a soft halo behind it.</summary>
+    private void UpdateRunningDot()
+    {
+        if (_isRunning)
+        {
+            int loopFps = App.AmbientFrameRate;
+            RunDot.Visibility = Visibility.Visible;
+            RunDotGlow.Visibility = Visibility.Visible;
+            var pulse = new DoubleAnimation(0.55, 1.0, new Duration(TimeSpan.FromSeconds(2.0)))
+            {
+                AutoReverse = true,
+                RepeatBehavior = RepeatBehavior.Forever,
+            };
+            Timeline.SetDesiredFrameRate(pulse, loopFps);
+            RunDot.BeginAnimation(OpacityProperty, pulse);
+            var glowPulse = new DoubleAnimation(0.25, 0.65, new Duration(TimeSpan.FromSeconds(2.0)))
+            {
+                AutoReverse = true,
+                RepeatBehavior = RepeatBehavior.Forever,
+            };
+            Timeline.SetDesiredFrameRate(glowPulse, loopFps);
+            RunDotGlow.BeginAnimation(OpacityProperty, glowPulse);
+        }
+        else
+        {
+            RunDot.BeginAnimation(OpacityProperty, null);
+            RunDotGlow.BeginAnimation(OpacityProperty, null);
+            RunDot.Visibility = Visibility.Collapsed;
+            RunDotGlow.Visibility = Visibility.Collapsed;
+        }
+    }
+
     private void OnEnter(object sender, MouseEventArgs e)
     {
-        Scale.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(HoverScale, Anim));
-        Scale.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(HoverScale, Anim));
+        FpsProfiler.Push("HoverZoom");
+        // When the host dock drives a coordinated wave, it owns the scale; the
+        // icon only lights its hover layer / label here.
+        if (!ExternalMagnify)
+        {
+            Scale.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(HoverScale, Anim));
+            Scale.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(HoverScale, Anim));
+        }
         // Fade in the per-theme hover layer (Opacity is composited; the lens /
         // glow blurs are rasterised once via BitmapCache, so no per-frame
-        // effect recompute).
-        if (_dropletHover)
-            HoverGlow.BeginAnimation(OpacityProperty, new DoubleAnimation(1.0, Anim));
-        else
-            BlueGlow.BeginAnimation(OpacityProperty, new DoubleAnimation(1.0, Anim));
-        LabelChrome.BeginAnimation(OpacityProperty, new DoubleAnimation(1, Anim));
+        // effect recompute). The left dock has no hover tray/lens at all.
+        if (!_leftDockStyle)
+        {
+            if (_dropletHover)
+                HoverGlow.BeginAnimation(OpacityProperty, new DoubleAnimation(1.0, Anim));
+            else
+                BlueGlow.BeginAnimation(OpacityProperty, new DoubleAnimation(1.0, Anim));
+        }
+        // Glass theme shows a floating label (hosted unclipped by the host) so
+        // the bottom row's name isn't cut by the scroll clip; suppress the
+        // built-in label there to avoid a duplicate.
+        if (!_dropletHover)
+            LabelChrome.BeginAnimation(OpacityProperty, new DoubleAnimation(1, Anim));
         HoverStarted?.Invoke(this);
 
         // Schedule the multi-window preview after a short hover dwell.
@@ -212,13 +326,21 @@ public partial class RadialIcon : UserControl
 
     private void OnLeave(object sender, MouseEventArgs e)
     {
-        Scale.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(1.0, Anim));
-        Scale.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(1.0, Anim));
-        if (_dropletHover)
-            HoverGlow.BeginAnimation(OpacityProperty, new DoubleAnimation(0, Anim));
-        else
-            BlueGlow.BeginAnimation(OpacityProperty, new DoubleAnimation(0, Anim));
-        LabelChrome.BeginAnimation(OpacityProperty, new DoubleAnimation(0, Anim));
+        FpsProfiler.Pop("HoverZoom");
+        if (!ExternalMagnify)
+        {
+            Scale.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(1.0, Anim));
+            Scale.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(1.0, Anim));
+        }
+        if (!_leftDockStyle)
+        {
+            if (_dropletHover)
+                HoverGlow.BeginAnimation(OpacityProperty, new DoubleAnimation(0, Anim));
+            else
+                BlueGlow.BeginAnimation(OpacityProperty, new DoubleAnimation(0, Anim));
+        }
+        if (!_dropletHover)
+            LabelChrome.BeginAnimation(OpacityProperty, new DoubleAnimation(0, Anim));
         HoverEnded?.Invoke(this);
 
         _preview.OnPointerLeave();
