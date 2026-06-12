@@ -374,14 +374,15 @@ public partial class App : Application
             };
 
             // Once shown by the edge, keep it shown while the cursor stays near
-            // the dock. The interior-side margin is deliberately generous so the
-            // dock only retracts once the pointer has moved well clear of it.
+            // the dock. A modest interior margin lets the dock retract soon after
+            // the pointer moves clear of the slab, without being so tight that it
+            // flickers right at the slab boundary.
             bool inDock = false;
             if (_leftDock.DockVisible)
             {
                 Rect b = _leftDock.GetDockScreenBounds();
-                const double Far = 150;      // interior reach beyond the slab
-                const double Slack = 60;     // slack along the edge
+                const double Far = 28;       // interior reach beyond the slab
+                const double Slack = 14;     // slack along the edge
                 inDock = side switch
                 {
                     DockSide.Right => x >= b.Left - Far && y >= b.Top - Slack && y <= b.Bottom + Slack,

@@ -1,6 +1,4 @@
 using System;
-using System.Collections.Generic;
-using System.Collections.ObjectModel;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Interop;
@@ -16,9 +14,7 @@ public partial class SettingsWindow : Window
     private readonly Action _persist;
     private bool _loaded;
 
-    public ObservableCollection<AppEntry> Apps { get; }
-
-    /// <summary>Raised whenever apps or settings change, so an open panel can refresh.</summary>
+    /// <summary>Raised whenever a setting changes, so an open panel can refresh.</summary>
     public event Action? Changed;
 
     /// <summary>Raised when the trigger key changes, so the hook can be reinstalled.</summary>
@@ -44,10 +40,8 @@ public partial class SettingsWindow : Window
     {
         _config = config;
         _persist = persist;
-        Apps = new ObservableCollection<AppEntry>(_config.Apps);
         InitializeComponent();
 
-        AppList.ItemsSource = Apps;
         LoadSettingsIntoUi();
         _loaded = true;
     }
@@ -128,14 +122,6 @@ public partial class SettingsWindow : Window
             HintText.Text = $"提示：长按 {item.Content} 在屏幕中心呼出圆盘";
     }
 
-    private void CommitApps()
-    {
-        _config.Apps.Clear();
-        _config.Apps.AddRange(Apps);
-        _persist();
-        Changed?.Invoke();
-    }
-
     private void CommitSettings()
     {
         var s = _config.Settings;
@@ -145,88 +131,6 @@ public partial class SettingsWindow : Window
         ThemeRegistry.SaveAppearance(s);
         _persist();
         Changed?.Invoke();
-    }
-
-    // ---- App list operations ---------------------------------------------
-
-    private void OnDragOver(object sender, DragEventArgs e)
-    {
-        e.Effects = (e.Data.GetDataPresent(DataFormats.FileDrop) || ShellNamespace.HasShellItems(e.Data))
-            ? DragDropEffects.Copy
-            : DragDropEffects.None;
-        e.Handled = true;
-    }
-
-    private void OnDropFiles(object sender, DragEventArgs e)
-    {
-        var entries = new List<AppEntry>();
-        if (e.Data.GetDataPresent(DataFormats.FileDrop))
-        {
-            foreach (var f in (string[])e.Data.GetData(DataFormats.FileDrop))
-            {
-                var entry = ShortcutResolver.CreateEntry(f);
-                if (entry != null && !string.IsNullOrWhiteSpace(entry.Path))
-                    entries.Add(entry);
-            }
-        }
-        if (ShellNamespace.HasShellItems(e.Data))
-            entries.AddRange(ShellNamespace.CreateEntries(e.Data));
-
-        int cap = ThemeRegistry.Get(_config.Settings.Theme).MaxIcons;
-        bool rejected = false;
-        foreach (var entry in entries)
-        {
-            if (Apps.Count >= cap)
-            {
-                rejected = true;
-                continue;
-            }
-            Apps.Add(entry);
-        }
-        CommitApps();
-        if (rejected)
-        {
-            MessageBox.Show(
-                $"当前主题最多只能放置 {cap} 个图标，部分图标未添加。",
-                "已达图标上限",
-                MessageBoxButton.OK,
-                MessageBoxImage.Information);
-        }
-    }
-
-    private void OnRemove(object sender, RoutedEventArgs e)
-    {
-        if (((Button)sender).Tag is AppEntry entry)
-        {
-            Apps.Remove(entry);
-            CommitApps();
-        }
-    }
-
-    private void OnMoveUp(object sender, RoutedEventArgs e)
-    {
-        if (((Button)sender).Tag is AppEntry entry)
-        {
-            int i = Apps.IndexOf(entry);
-            if (i > 0)
-            {
-                Apps.Move(i, i - 1);
-                CommitApps();
-            }
-        }
-    }
-
-    private void OnMoveDown(object sender, RoutedEventArgs e)
-    {
-        if (((Button)sender).Tag is AppEntry entry)
-        {
-            int i = Apps.IndexOf(entry);
-            if (i >= 0 && i < Apps.Count - 1)
-            {
-                Apps.Move(i, i + 1);
-                CommitApps();
-            }
-        }
     }
 
     // ---- Settings operations ---------------------------------------------
