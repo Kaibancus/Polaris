@@ -135,6 +135,9 @@ public partial class App : Application
         DockSync.MirrorResidentToLeft(_config);
         _leftDock = new LeftDockWindow(_config, Persist);
         _leftDock.MainDockChanged += () => _panel?.RefreshFromConfig();
+        // Clicking the Polaris tile in the left dock's running strip toggles the
+        // pinned docks (equivalent to Ctrl+4).
+        _leftDock.ToggleDocks = TogglePinnedDock;
         _leftDock.Realize();
         // Let the main dock hand an icon to the left dock when dragged onto it.
         _panel.DropToLeftDock = TryDropToLeftDock;
@@ -222,19 +225,7 @@ public partial class App : Application
 
         // Ctrl+4 toggles the pinned panel: open when hidden, close when shown.
         _pinnedHook = new KeyboardHook(VK_4, suppressKey: true, requireCtrl: true);
-        _pinnedHook.KeyPressed += () =>
-        {
-            if (_panel?.IsShown == true)
-            {
-                _panel.HidePanel();
-                _leftDock?.SetPinnedShown(false);
-            }
-            else
-            {
-                _panel?.ShowPinned();
-                _leftDock?.SetPinnedShown(true);   // summon the left dock together
-            }
-        };
+        _pinnedHook.KeyPressed += TogglePinnedDock;
         _pinnedHook.Start();
 
         _escHook = new KeyboardHook(VK_ESCAPE);
@@ -247,6 +238,23 @@ public partial class App : Application
             }
         };
         _escHook.Start();
+    }
+
+    /// <summary>Toggles the pinned (sticky) main + left dock: open both when
+    /// hidden, close both when shown. Shared by the Ctrl+4 hotkey and the tray
+    /// icon's left-click.</summary>
+    private void TogglePinnedDock()
+    {
+        if (_panel?.IsShown == true)
+        {
+            _panel.HidePanel();
+            _leftDock?.SetPinnedShown(false);
+        }
+        else
+        {
+            _panel?.ShowPinned();
+            _leftDock?.SetPinnedShown(true);   // summon the left dock together
+        }
     }
 
     private void OnHotkeyPressed()
@@ -290,12 +298,12 @@ public partial class App : Application
             double y = pt.Y / scale;
 
             double sh = SystemParameters.PrimaryScreenHeight;
-            // Trigger band: a strip at the left edge, vertically the centre 40%
+            // Trigger band: a strip at the left edge, vertically the centre 50%
             // of the screen. The threshold is generous (and negative x — i.e. the
             // cursor pushed a touch past the physical left edge, as happens with
             // mouse over-travel or a monitor to the left — also counts) so the
             // dock pops without having to land the pointer exactly on x = 0.
-            bool inTrigger = x <= 8.0 && y >= sh * 0.30 && y <= sh * 0.70;
+            bool inTrigger = x <= 17.0 && y >= sh * 0.25 && y <= sh * 0.75;
 
             // Once shown by the edge, keep it shown while the cursor stays near
             // the dock. The right-hand margin is deliberately generous so the
@@ -415,10 +423,16 @@ public partial class App : Application
         {
             Icon = LoadAppIcon(),
             Visible = true,
-            Text = "Polaris — 长按呼出键临时显示 / Ctrl+4 开关固定显示（Esc关闭）",
+            Text = "Polaris — 单击开关固定显示 / 长按呼出键临时显示 / Ctrl+4 开关（Esc关闭）",
             ContextMenuStrip = menu,
         };
-        _tray.DoubleClick += (_, _) => OpenSettings();
+        // Left-click toggles the pinned main + left dock (equivalent to Ctrl+4);
+        // right-click shows the context menu (with 设置 / 退出).
+        _tray.MouseClick += (_, e) =>
+        {
+            if (e.Button == Forms.MouseButtons.Left)
+                TogglePinnedDock();
+        };
     }
 
     private static Drawing.Icon LoadAppIcon()

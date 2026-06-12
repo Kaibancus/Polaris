@@ -62,9 +62,10 @@ public partial class RadialWindow : Window
     // fill the roomy grid cells more comfortably.
     private const double GlassIconScale = 1.32;
 
-    // The glass dock now extends all the way to the bottom screen edge (its
-    // frosted slab covers down past the system taskbar), so there is no gap.
-    private double GlassDockBottomMargin => 0.0;
+    // The glass dock's bottom edge sits ABOVE the system taskbar: the frosted
+    // slab ends at the top of the taskbar (plus a small gap) rather than
+    // covering down past it.
+    private double GlassDockBottomMargin => SystemTaskbarHeight + EffectiveIconSize * 0.12;
 
     /// <summary>Height (DIP) of the system taskbar when it is docked at the
     /// bottom of the primary screen; 0 when the taskbar is on another edge or
@@ -73,18 +74,52 @@ public partial class RadialWindow : Window
     {
         get
         {
+            // Prefer the work-area delta (accurate for a normally-docked bar).
             double sh = SystemParameters.PrimaryScreenHeight;
             double h = sh - SystemParameters.WorkArea.Bottom;
-            return h > 1.0 ? h : 0.0;
+            if (h > 1.0)
+                return h;
+
+            // The work area equals the full screen when the taskbar is
+            // auto-hidden, so query the taskbar window's real thickness instead.
+            try
+            {
+                IntPtr tray = FindWindow("Shell_TrayWnd", null);
+                if (tray != IntPtr.Zero && GetWindowRect(tray, out var r))
+                {
+                    double scale = TaskbarDpiScale();
+                    double thickPx = r.Bottom - r.Top;       // bottom/top bar thickness
+                    double widthPx = r.Right - r.Left;
+                    // Only treat it as a bottom bar (wide and thin). A side bar
+                    // would be tall and narrow — ignore it (no bottom reserve).
+                    if (thickPx > 0 && thickPx < widthPx)
+                    {
+                        double thickDip = thickPx / scale;
+                        if (thickDip > 8.0 && thickDip < sh * 0.5)
+                            return thickDip;
+                    }
+                }
+            }
+            catch { /* fall through */ }
+            return 0.0;
         }
     }
 
-    /// <summary>Glass reserved at the bottom of the slab: enough to clear the
-    /// system taskbar plus a little breathing room, so the lowest icon row sits
-    /// above the taskbar even though the frosted glass itself reaches the
-    /// screen's bottom edge.</summary>
+    /// <summary>Device-pixels-per-DIP for this window (1.0 until it has a
+    /// presentation source).</summary>
+    private double TaskbarDpiScale()
+    {
+        var src = PresentationSource.FromVisual(this);
+        double m = src?.CompositionTarget?.TransformToDevice.M22 ?? 0.0;
+        return m > 0.1 ? m : 1.0;
+    }
+
+    /// <summary>Glass reserved at the bottom of the slab: a little breathing room
+    /// below the lowest icon row. The slab's bottom edge already rests above the
+    /// system taskbar (see <see cref="GlassDockBottomMargin"/>), so the taskbar
+    /// height is no longer added here.</summary>
     private double GlassBottomReserve =>
-        SystemTaskbarHeight + EffectiveIconSize * 0.65;
+        EffectiveIconSize * 0.30;
 
     // Current vertical scroll of the grid (device-independent px). 0 = first
     // row aligned to the top of the visible grid block; positive scrolls the
@@ -330,6 +365,12 @@ public partial class RadialWindow : Window
     // ring (0 = inner, 1 = outer, -1 = none) and angular position within it.
     private int _dragTargetRing = -1;
     private int _dragTargetPos = -1;
+
+    // Prospective resident count used for the live glass reflow animation, so the
+    // neighbours animate to the SAME layout the drop will actually commit (e.g.
+    // dragging a resident icon out shrinks the resident block during the drag).
+    // -2 = not tracking a glass drag.
+    private int _dragProspectiveResident = -2;
 
     // Icon the pointer is currently hovering (for the "spread apart" effect).
     private RadialIcon? _hoverIcon;
@@ -792,6 +833,15 @@ public partial class RadialWindow : Window
     [System.Runtime.InteropServices.DllImport("user32.dll")]
     private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
 
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    private struct TaskbarRect { public int Left, Top, Right, Bottom; }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    private static extern IntPtr FindWindow(string? lpClassName, string? lpWindowName);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern bool GetWindowRect(IntPtr hWnd, out TaskbarRect lpRect);
+
     protected override void OnKeyDown(KeyEventArgs e)
     {
         base.OnKeyDown(e);
@@ -1117,11 +1167,32 @@ public partial class RadialWindow : Window
 
         // Insert the dropped app(s) at the grid slot nearest the pointer, so the
         // icon lands where it was dropped (on the side of the cursor) rather than
-        // always at the end. Saturn has no free-grid layout, so it keeps appending.
+        // always at the end.
         Point drop = e.GetPosition(PanelCanvas);
         int insertIdx = _theme.SupportsGridReorder
             ? ComputeGridInsertIndex(GlassToContent(drop))
             : _config.Apps.Count;
+
+        // Saturn: place the dropped icon on the ring the cursor is over. A drop on
+        // the inner ring inserts into the resident region (the first Ring0Count
+        // apps) and grows that count, so an icon can be added straight to the
+        // inner ring while it still has room (rather than always appending to the
+        // outer ring).
+        bool intoInnerRing = false;
+        if (_theme.IsSaturn)
+        {
+            int r0 = EffectiveRing0Count(_config.Apps.Count);
+            var (ring, pos) = ComputeDragTarget(drop, -1);
+            if (ring == 0)
+            {
+                intoInnerRing = true;
+                insertIdx = Math.Clamp(pos, 0, r0);
+            }
+            else
+            {
+                insertIdx = Math.Clamp(r0 + pos, r0, _config.Apps.Count);
+            }
+        }
 
         // A glass drop inside the framed resident rows should add the icon as a
         // resident, growing the resident count (up to the cap) per icon added.
@@ -1150,6 +1221,11 @@ public partial class RadialWindow : Window
             insertIdx++;
             if (intoResident && DockSync.ResidentCount(_config) < DockSync.MaxResidentCount)
                 _config.Settings.Ring0Count = DockSync.ResidentCount(_config) + 1;
+            else if (intoInnerRing && _config.Settings.Ring0Count > 0)
+                // Grow the explicit inner-ring count to include the icon just
+                // inserted into it. In auto mode (Ring0Count == 0) the inner ring
+                // already fills first, so the icon lands there without a bump.
+                _config.Settings.Ring0Count = Math.Min(Ring0Cap, _config.Settings.Ring0Count + 1);
             added = true;
         }
 
@@ -1179,6 +1255,7 @@ public partial class RadialWindow : Window
         _dragging = false;
         _dragTargetRing = -1;
         _dragTargetPos = -1;
+        _dragProspectiveResident = -2;
         PanelCanvas.CaptureMouse();
         e.Handled = true;
     }
@@ -1249,11 +1326,17 @@ public partial class RadialWindow : Window
             // by shifting the other icons into the insertion arrangement. The
             // grid may be scrolled, so compare against scroll-corrected slots.
             int src = _iconElements.IndexOf(_pressedIcon);
-            int tgt = ComputeGridTarget(GlassToContent(p), src);
-            if (tgt != _dragTargetPos)
+            Point content = GlassToContent(p);
+            int tgt = ComputeGridTarget(content, src);
+            // For the glass dock, the resident block may grow/shrink as the icon
+            // crosses the framed-rows boundary; reflow to that prospective layout
+            // so the animation matches what the drop will actually commit.
+            int prosp = _theme.ShowGlassPanel ? ProspectiveResidentCount(src, content) : -1;
+            if (tgt != _dragTargetPos || prosp != _dragProspectiveResident)
             {
                 _dragTargetPos = tgt;
-                ReflowGrid(src, tgt);
+                _dragProspectiveResident = prosp;
+                ReflowGrid(src, tgt, prosp);
             }
         }
         else if (_dragTargetRing != -1 || _dragTargetPos != -1)
@@ -1261,6 +1344,7 @@ public partial class RadialWindow : Window
             // Dragged into the delete zone — snap the others back to their slots.
             _dragTargetRing = -1;
             _dragTargetPos = -1;
+            _dragProspectiveResident = -2;
             RestoreSlots();
         }
     }
@@ -1387,23 +1471,45 @@ public partial class RadialWindow : Window
     }
 
     /// <summary>Animates every non-dragged icon to its slot in the prospective
-    /// grid arrangement, producing the neighbour "push aside" effect.</summary>
-    private void ReflowGrid(int src, int tgt)
+    /// grid arrangement, producing the neighbour "push aside" effect.
+    /// <paramref name="prospectiveResident"/> is the resident count the drop will
+    /// commit (glass dock only; -1 to use the current layout), so the neighbours
+    /// reflow to the layout that the drop actually produces rather than letting a
+    /// non-resident icon visually slide into a shrinking resident block.</summary>
+    private void ReflowGrid(int src, int tgt, int prospectiveResident = -1)
     {
         int[] slotOfEntry = GridArrangement(src, tgt);
+        // When the resident block is changing size mid-drag, animate against the
+        // prospective slot layout instead of the (stale) current one.
+        IReadOnlyList<Point> slots =
+            (prospectiveResident >= 0 && _theme.ShowGlassPanel)
+                ? ComputeGlassSlots(prospectiveResident)
+                : _slotPositions;
         for (int i = 0; i < _iconElements.Count; i++)
         {
             if (_iconElements[i] == _pressedIcon)
                 continue;
             int slot = slotOfEntry[i];
-            if (slot >= 0 && slot < _slotPositions.Count)
+            if (slot >= 0 && slot < slots.Count)
             {
                 // Icons live in the scroll layer at true positions, so reflow to
                 // the plain slot centre — the layer transform + clip handle the
                 // scroll and viewport masking automatically.
-                AnimateTo(_iconElements[i], _slotPositions[slot]);
+                AnimateTo(_iconElements[i], slots[slot]);
             }
         }
+    }
+
+    /// <summary>Computes the glass-dock slot centres for a hypothetical resident
+    /// count, used to animate the live reorder to the prospective drop layout.</summary>
+    private IReadOnlyList<Point> ComputeGlassSlots(int residentCount)
+    {
+        var scaled = new AppSettings
+        {
+            IconSize = EffectiveIconSize,
+            Ring0Count = Math.Clamp(residentCount, 0, _config.Apps.Count),
+        };
+        return _theme.ComputeSlots(_config.Apps.Count, GlassGridCenter, scaled, out _);
     }
 
     /// <summary>Commits a free-grid reorder: reorders the app entries so entry
@@ -1447,6 +1553,18 @@ public partial class RadialWindow : Window
     /// before the move (-1 for a brand-new icon).</summary>
     private void UpdateResidentCountForDrop(int srcBefore, Point dropPoint)
     {
+        int resident = DockSync.ResidentCount(_config);
+        int newResident = ProspectiveResidentCount(srcBefore, dropPoint);
+        if (newResident != resident)
+            _config.Settings.Ring0Count = newResident;
+    }
+
+    /// <summary>Computes the resident count a drop would commit: dragging an icon
+    /// into the framed rows promotes it (+1), dragging a resident icon out of
+    /// them demotes it (-1). <paramref name="srcBefore"/> is the dragged entry's
+    /// index before the move (-1 for a brand-new icon).</summary>
+    private int ProspectiveResidentCount(int srcBefore, Point dropPoint)
+    {
         int cols = LiquidGlassTheme.Columns;
         int resident = DockSync.ResidentCount(_config);
         int residentRows = Math.Max(1, (resident + cols - 1) / cols);
@@ -1454,14 +1572,11 @@ public partial class RadialWindow : Window
         bool inResident = dropRow >= 0 && dropRow < residentRows;
         bool wasResident = srcBefore >= 0 && srcBefore < resident;
 
-        int newResident = resident;
         if (inResident && !wasResident && resident < DockSync.MaxResidentCount)
-            newResident = resident + 1;          // promoted into the resident rows
-        else if (!inResident && wasResident && resident > 1)
-            newResident = resident - 1;          // demoted out of the resident rows
-
-        if (newResident != resident)
-            _config.Settings.Ring0Count = newResident;
+            return resident + 1;                 // promoted into the resident rows
+        if (!inResident && wasResident && resident > 1)
+            return resident - 1;                 // demoted out of the resident rows
+        return resident;
     }
 
     /// <summary>

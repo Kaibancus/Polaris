@@ -24,7 +24,7 @@ namespace Polaris.Views;
 public partial class LeftDockWindow : Window
 {
     private const double GlassIconScale = 1.32;   // match the main dock's grid icon size
-    private const double HoverScale = 2.1;
+    private const double HoverScale = 1.7;
     private const double DragThreshold = 6.0;
     private const int RunningMaxComplete = 4;     // at most 4 full running-app icons
     // Left dock icon scale relative to the main dock. The Saturn theme uses a
@@ -103,6 +103,10 @@ public partial class LeftDockWindow : Window
     private Color AccentColor => ParseColor(_config.Settings.AccentColor, Color.FromRgb(0x3D, 0x7E, 0xFF));
 
     public bool DockVisible => _shown;
+
+    /// <summary>Invoked when the user clicks the Polaris tile in the running
+    /// strip. Wired by App to toggle the pinned docks (equivalent to Ctrl+4).</summary>
+    public Action? ToggleDocks { get; set; }
 
     public LeftDockWindow(AppConfig config, Action persist)
     {
@@ -572,18 +576,14 @@ public partial class LeftDockWindow : Window
 
         bool isSaturn = ThemeRegistry.Get(_config.Settings.Theme).IsSaturn;
 
-        // The Saturn (dark smoked-glass) dock uses a subtle, thin hairline so it
-        // doesn't fight the dark material; the liquid-glass dock keeps its
-        // original bold seam (a soft cool glow, a strong dark groove and a bright
-        // glassy highlight) for a deep, obvious split.
+        // A soft cool glow plus a bright glassy highlight form the divider. The
+        // old near-black groove line is omitted so the seam reads as a light
+        // split with no dark edge.
         double glowThk   = isSaturn ? 5.0  : 10.0;
         byte   glowA     = isSaturn ? (byte)0x3A : (byte)0x99;
         int    glowBlur  = isSaturn ? 5    : 6;
-        double grooveThk = isSaturn ? 1.4  : 5.0;
-        byte   grooveA   = isSaturn ? (byte)0x88 : (byte)0xF2;
         double shineThk  = isSaturn ? 1.0  : 2.2;
         byte   shineA    = isSaturn ? (byte)0x55 : (byte)0xFF;
-        double shineOff  = isSaturn ? 1.6  : 2.6;
 
         var glow = new System.Windows.Shapes.Line
         {
@@ -596,19 +596,9 @@ public partial class LeftDockWindow : Window
             StrokeEndLineCap = PenLineCap.Round,
             Effect = new System.Windows.Media.Effects.BlurEffect { Radius = glowBlur },
         };
-        var groove = new System.Windows.Shapes.Line
-        {
-            X1 = x1, X2 = x2, Y1 = seamY, Y2 = seamY,
-            StrokeThickness = grooveThk,
-            Stroke = new SolidColorBrush(Color.FromArgb(grooveA, 0x02, 0x05, 0x0D)),
-            Opacity = opacity,
-            IsHitTestVisible = false,
-            StrokeStartLineCap = PenLineCap.Round,
-            StrokeEndLineCap = PenLineCap.Round,
-        };
         var shine = new System.Windows.Shapes.Line
         {
-            X1 = x1, X2 = x2, Y1 = seamY + shineOff, Y2 = seamY + shineOff,
+            X1 = x1, X2 = x2, Y1 = seamY, Y2 = seamY,
             StrokeThickness = shineThk,
             Stroke = new SolidColorBrush(Color.FromArgb(shineA, 0xEA, 0xF4, 0xFF)),
             Opacity = opacity,
@@ -617,10 +607,8 @@ public partial class LeftDockWindow : Window
             StrokeEndLineCap = PenLineCap.Round,
         };
         Panel.SetZIndex(glow, -5);
-        Panel.SetZIndex(groove, -5);
         Panel.SetZIndex(shine, -4);
         PanelCanvas.Children.Add(glow);
-        PanelCanvas.Children.Add(groove);
         PanelCanvas.Children.Add(shine);
     }
 
@@ -736,11 +724,14 @@ public partial class LeftDockWindow : Window
             display = apps.GetRange(0, RunningMaxComplete);
             overflow = apps.Count - RunningMaxComplete;
         }
-        int slots = display.Count + (overflow > 0 ? 1 : 0);
+        // Polaris itself always occupies the first running-strip slot, so the
+        // running area is always present (even with no other apps running).
+        int slots = 1 + display.Count + (overflow > 0 ? 1 : 0);
 
         // Signature so we skip a needless rebuild (and the dock re-layout that a
         // changed slot count forces).
         var sb = new System.Text.StringBuilder();
+        sb.Append("polaris;");   // fixed leading Polaris tile
         foreach (var a in display)
             sb.Append(a.Aumid ?? a.Path).Append(';');
         if (overflow > 0)
@@ -748,7 +739,7 @@ public partial class LeftDockWindow : Window
         string sig = sb.ToString();
 
         bool hadArea = _hasRunningArea;
-        bool wantArea = slots > 0;
+        bool wantArea = slots > 0;   // always true now (Polaris tile)
         if (sig == _runSignature && hadArea == wantArea && _runSlotsCached == slots)
             return;
         _runSignature = sig;
@@ -777,16 +768,90 @@ public partial class LeftDockWindow : Window
         for (int k = 0; k < slots; k++)
         {
             double cy = _runAreaTop + k * RunStep + RunStep / 2.0;
-            bool isOverflow = overflow > 0 && k == slots - 1;
-            FrameworkElement el = isOverflow
-                ? BuildRunOverflowTile(overflow, tile)
-                : BuildRunTile(display[k], tile);
+            FrameworkElement el;
+            if (k == 0)
+            {
+                // Polaris itself as the first running-strip tile.
+                el = BuildPolarisRunTile(tile);
+            }
+            else
+            {
+                int appIdx = k - 1;   // shift past the leading Polaris tile
+                bool isOverflow = overflow > 0 && k == slots - 1;
+                el = isOverflow
+                    ? BuildRunOverflowTile(overflow, tile)
+                    : BuildRunTile(display[appIdx], tile);
+            }
             Canvas.SetLeft(el, _colCenterX - tile / 2.0);
             Canvas.SetTop(el, cy - tile / 2.0);
             Panel.SetZIndex(el, 60);
             PanelCanvas.Children.Add(el);
             _runTiles.Add(el);
         }
+    }
+
+    /// <summary>Builds the Polaris self-tile shown at the top of the running
+    /// strip. Clicking it toggles the pinned docks (equivalent to Ctrl+4) via
+    /// <see cref="ToggleDocks"/>.</summary>
+    private FrameworkElement BuildPolarisRunTile(double size)
+    {
+        string exe = Environment.ProcessPath ?? "";
+        if (!string.IsNullOrEmpty(exe) && !_runIconCache.TryGetValue(exe, out _))
+        {
+            try { _runIconCache[exe] = IconExtractor.GetIcon(exe); }
+            catch { /* fall through to no icon */ }
+        }
+        _runIconCache.TryGetValue(exe, out var bmp);
+
+        var image = new Image { Source = bmp, Stretch = Stretch.Uniform };
+        RenderOptions.SetBitmapScalingMode(image, BitmapScalingMode.HighQuality);
+
+        var plate = new Border
+        {
+            CornerRadius = new CornerRadius(12),
+            Background = Brushes.Transparent,
+            Padding = new Thickness(8),
+            Child = image,
+        };
+
+        var root = new Grid
+        {
+            Width = size,
+            Height = size,
+            Background = Brushes.Transparent,
+            Cursor = Cursors.Hand,
+            RenderTransformOrigin = new Point(0.5, 0.5),
+            RenderTransform = new ScaleTransform(1, 1),
+        };
+        root.Children.Add(plate);
+        // Polaris is always "running", so show the same breathing green dot.
+        root.Children.Add(BuildRunningDot(size));
+
+        var scale = (ScaleTransform)root.RenderTransform;
+        var dur = new Duration(TimeSpan.FromMilliseconds(110));
+        root.MouseEnter += (_, _) =>
+        {
+            Panel.SetZIndex(root, 100);
+            scale.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(HoverScale, dur));
+            scale.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(HoverScale, dur));
+            double cy = Canvas.GetTop(root) + size / 2.0;
+            _runLabelShown = true;
+            ShowHoverLabelCore("Polaris", cy, size / 2.0 * HoverScale);
+        };
+        root.MouseLeave += (_, _) =>
+        {
+            Panel.SetZIndex(root, 60);
+            scale.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(1.0, dur));
+            scale.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(1.0, dur));
+            _runLabelShown = false;
+            HideHoverLabel();
+        };
+        root.MouseLeftButtonUp += (_, e) =>
+        {
+            e.Handled = true;
+            ToggleDocks?.Invoke();
+        };
+        return root;
     }
 
     private FrameworkElement BuildRunTile(TaskbarApp app, double size)

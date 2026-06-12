@@ -307,13 +307,13 @@ public partial class SettingsWindow : Window
             if (!UpdateService.IsNewer(latest))
             {
                 MessageBox.Show(this,
-                    $"当前已是最新版本（v{UpdateService.CurrentVersion.ToString(2)}）。",
+                    $"当前已是最新版本（v{UpdateService.CurrentVersion.ToString(3)}）。",
                     "检查更新", MessageBoxButton.OK, MessageBoxImage.Information);
                 return;
             }
 
             var choice = MessageBox.Show(this,
-                $"发现新版本：{latest.TagName}\n当前版本：v{UpdateService.CurrentVersion.ToString(2)}\n\n是否现在下载并更新？",
+                $"发现新版本：{latest.TagName}\n当前版本：v{UpdateService.CurrentVersion.ToString(3)}\n\n是否现在下载并更新？",
                 "检查更新", MessageBoxButton.YesNo, MessageBoxImage.Question);
             if (choice != MessageBoxResult.Yes)
                 return;

@@ -53,7 +53,11 @@ public static class UpdateService
         get
         {
             var v = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version;
-            return v ?? new Version(0, 0);
+            if (v == null)
+                return new Version(0, 0, 0);
+            // Pad missing Build/Revision to 0 so ToString(3) is always valid
+            // (an unspecified Build is -1 and would throw when formatted).
+            return new Version(v.Major, v.Minor, Math.Max(0, v.Build));
         }
     }
 
