@@ -70,9 +70,6 @@ public static class DockSync
     }
 
     /// <summary>Inserts a new app into the resident region (so it appears in the
-    /// left dock). When the region is already full the last resident app is
-    /// pushed down into the regular grid.</summary>
-    /// <summary>Inserts a new app into the resident region (so it appears in the
     /// left dock). When the region has not yet reached the hard cap
     /// (<see cref="MaxResidentCount"/>) the resident count grows by one so the
     /// app is genuinely <i>added</i>; only once the cap is reached does the last

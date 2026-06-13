@@ -1238,14 +1238,15 @@ public partial class RadialWindow : Window
     private void ComputeLayout(int count)
     {
         _slotPositions.Clear();
-        _outerRadius = InnerRadius;
+        // Always reserve the outer ring band so it stays visible like the inner
+        // ring, even when no app currently occupies the outer ring.
+        _outerRadius = InnerRadius + RingStep;
 
         if (count <= 0)
             return;
 
         int r0 = EffectiveRing0Count(count);
         _slotPositions.AddRange(SlotPositionsFor(count, r0));
-        _outerRadius = (count - r0 > 0) ? InnerRadius + RingStep : InnerRadius;
     }
 
     // ---- External drop (add desktop shortcuts) ---------------------------

@@ -441,5 +441,19 @@ public partial class RadialIcon : UserControl
     /// <summary>Closes the preview popup if it is open (called by the host panel
     /// when it hides).</summary>
     public void ClosePreview() => _preview.Close();
+
+    /// <summary>True while this icon's hover thumbnail preview is shown.</summary>
+    public bool IsPreviewOpen => _preview.IsOpen;
+
+    /// <summary>If the hover preview is open, fades it out and invokes
+    /// <paramref name="onClosed"/> once the animation finishes, returning true.
+    /// Returns false (without calling back) when no preview is showing.</summary>
+    public bool TryFadePreview(Action onClosed)
+    {
+        if (!_preview.IsOpen)
+            return false;
+        _preview.CloseAnimated(onClosed);
+        return true;
+    }
 }
 

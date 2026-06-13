@@ -107,16 +107,7 @@ public partial class RadialWindow
         _taskbarSignature = signature;
         _taskbarIsRow = false;
 
-        // Prune the taskbar icon cache to the apps we are about to draw.
-        var live = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var a in apps)
-            live.Add(a.Path);
-        var stale = new List<string>();
-        foreach (var key in _taskbarIconCache.Keys)
-            if (!live.Contains(key))
-                stale.Add(key);
-        foreach (var key in stale)
-            _taskbarIconCache.Remove(key);
+        PruneTaskbarIconCache(apps);
 
         for (int k = 0; k < m; k++)
         {
@@ -183,16 +174,7 @@ public partial class RadialWindow
         _taskbarSignature = signature;
         _taskbarIsRow = true;
 
-        // Prune the taskbar icon cache to the apps we are about to draw.
-        var live = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var a in display)
-            live.Add(a.Path);
-        var stale = new List<string>();
-        foreach (var key in _taskbarIconCache.Keys)
-            if (!live.Contains(key))
-                stale.Add(key);
-        foreach (var key in stale)
-            _taskbarIconCache.Remove(key);
+        PruneTaskbarIconCache(display);
 
         double rowW = (m - 1) * cellW;
         double x0 = _center.X - rowW / 2.0;
@@ -219,14 +201,7 @@ public partial class RadialWindow
     /// but carries no icon, running animation or preview popup.</summary>
     private FrameworkElement BuildOverflowTile(int extra, double size)
     {
-        bool glass = _theme.ShowGlassPanel;
-        var idleBg = glass
-            ? new SolidColorBrush(Color.FromArgb(0x08, 0xFF, 0xFF, 0xFF))
-            : new SolidColorBrush(Color.FromArgb(0x33, 0x10, 0x12, 0x18));
-        var hoverBg = glass
-            ? new SolidColorBrush(Color.FromArgb(0x22, 0xFF, 0xFF, 0xFF))
-            : new SolidColorBrush(Color.FromArgb(0x66, 0x2A, 0x2E, 0x3A));
-        double radius = glass ? 12 : size * 0.22;
+        var (idleBg, hoverBg, radius) = TaskbarTileChrome(size);
 
         var label = new TextBlock
         {
@@ -257,24 +232,8 @@ public partial class RadialWindow
         root.Children.Add(plate);
 
         var scale = (ScaleTransform)root.RenderTransform;
-        var dur = new Duration(TimeSpan.FromMilliseconds(110));
         int index = _taskbarTiles.Count;
-        root.MouseEnter += (_, _) =>
-        {
-            plate.Background = hoverBg;
-            Panel.SetZIndex(root, 100);
-            scale.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(1.7, dur));
-            scale.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(1.7, dur));
-            MagnifyTaskbar(index);
-        };
-        root.MouseLeave += (_, _) =>
-        {
-            plate.Background = idleBg;
-            Panel.SetZIndex(root, 0);
-            scale.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(1.0, dur));
-            scale.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(1.0, dur));
-            ResetTaskbarMagnify();
-        };
+        AttachTaskbarHover(root, plate, scale, idleBg, hoverBg, index);
 
         return root;
     }
@@ -347,18 +306,8 @@ public partial class RadialWindow
             _taskbarIconCache[app.Path] = bmp;
         }
 
-        // Background plate. Saturn uses a dark 80%-transparent plate; the glass
-        // theme matches the pinned grid icons' liquid-glass background so the
-        // running tiles read as part of the same set.
-        bool glass = _theme.ShowGlassPanel;
-        var idleBg = glass
-            ? new SolidColorBrush(Color.FromArgb(0x08, 0xFF, 0xFF, 0xFF))
-            : new SolidColorBrush(Color.FromArgb(0x33, 0x10, 0x12, 0x18));
-        var hoverBg = glass
-            ? new SolidColorBrush(Color.FromArgb(0x22, 0xFF, 0xFF, 0xFF))
-            : new SolidColorBrush(Color.FromArgb(0x66, 0x2A, 0x2E, 0x3A));
-        double radius = glass ? 12 : size * 0.22;
-        double pad = glass ? size * 0.125 : size * 0.16;
+        var (idleBg, hoverBg, radius) = TaskbarTileChrome(size);
+        double pad = _theme.ShowGlassPanel ? size * 0.125 : size * 0.16;
 
         var image = new Image
         {
@@ -448,7 +397,6 @@ public partial class RadialWindow
 
         IntPtr win = app.Window;
         var scale = (ScaleTransform)root.RenderTransform;
-        var dur = new Duration(TimeSpan.FromMilliseconds(110));
 
         // Hover-thumbnail popup: show a live window preview even with a single
         // open window so the user can peek/pick any running app.
@@ -463,24 +411,8 @@ public partial class RadialWindow
             onActivated: HidePanel);
         _taskbarPopups.Add(preview);
 
-        root.MouseEnter += (_, _) =>
-        {
-            plate.Background = hoverBg;
-            Panel.SetZIndex(root, 100);
-            scale.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(1.7, dur));
-            scale.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(1.7, dur));
-            MagnifyTaskbar(index);
-            preview.OnPointerEnter();
-        };
-        root.MouseLeave += (_, _) =>
-        {
-            plate.Background = idleBg;
-            Panel.SetZIndex(root, 0);
-            scale.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(1.0, dur));
-            scale.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(1.0, dur));
-            ResetTaskbarMagnify();
-            preview.OnPointerLeave();
-        };
+        AttachTaskbarHover(root, plate, scale, idleBg, hoverBg, index,
+            preview.OnPointerEnter, preview.OnPointerLeave);
         root.MouseLeftButtonUp += (_, e) =>
         {
             e.Handled = true;
@@ -490,5 +422,64 @@ public partial class RadialWindow
         };
 
         return root;
+    }
+
+    /// <summary>Removes cached taskbar icons for apps that are no longer being
+    /// drawn, keying on each app's launcher path.</summary>
+    private void PruneTaskbarIconCache(IEnumerable<TaskbarApp> apps)
+    {
+        var live = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var a in apps)
+            live.Add(a.Path);
+        var stale = new List<string>();
+        foreach (var key in _taskbarIconCache.Keys)
+            if (!live.Contains(key))
+                stale.Add(key);
+        foreach (var key in stale)
+            _taskbarIconCache.Remove(key);
+    }
+
+    /// <summary>Idle/hover plate brushes and corner radius shared by every
+    /// taskbar tile. Saturn uses a dark plate; glass matches the pinned grid
+    /// icons' liquid-glass background.</summary>
+    private (SolidColorBrush idle, SolidColorBrush hover, double radius) TaskbarTileChrome(double size)
+    {
+        bool glass = _theme.ShowGlassPanel;
+        var idle = glass
+            ? new SolidColorBrush(Color.FromArgb(0x08, 0xFF, 0xFF, 0xFF))
+            : new SolidColorBrush(Color.FromArgb(0x33, 0x10, 0x12, 0x18));
+        var hover = glass
+            ? new SolidColorBrush(Color.FromArgb(0x22, 0xFF, 0xFF, 0xFF))
+            : new SolidColorBrush(Color.FromArgb(0x66, 0x2A, 0x2E, 0x3A));
+        double radius = glass ? 12 : size * 0.22;
+        return (idle, hover, radius);
+    }
+
+    /// <summary>Wires the shared dock-style hover behaviour (plate highlight,
+    /// 1.7x zoom, neighbour magnify) onto a taskbar tile. Optional callbacks let
+    /// a tile hook extra enter/leave work (e.g. its preview popup).</summary>
+    private void AttachTaskbarHover(Grid root, Border plate, ScaleTransform scale,
+        SolidColorBrush idleBg, SolidColorBrush hoverBg, int index,
+        Action? onEnter = null, Action? onLeave = null)
+    {
+        var dur = new Duration(TimeSpan.FromMilliseconds(110));
+        root.MouseEnter += (_, _) =>
+        {
+            plate.Background = hoverBg;
+            Panel.SetZIndex(root, 100);
+            scale.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(1.7, dur));
+            scale.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(1.7, dur));
+            MagnifyTaskbar(index);
+            onEnter?.Invoke();
+        };
+        root.MouseLeave += (_, _) =>
+        {
+            plate.Background = idleBg;
+            Panel.SetZIndex(root, 0);
+            scale.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(1.0, dur));
+            scale.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(1.0, dur));
+            ResetTaskbarMagnify();
+            onLeave?.Invoke();
+        };
     }
 }

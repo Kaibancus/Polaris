@@ -65,9 +65,6 @@ public static class RunningAppTracker
 
     private const int SW_RESTORE = 9;
     private const int SW_SHOW = 5;
-    private const int SW_MAXIMIZE = 3;
-    private const int SW_SHOWNORMAL = 1;
-    private const int SW_SHOWMINIMIZED = 2;
     private const int SW_SHOWMAXIMIZED = 3;
 
     private const int WPF_RESTORETOMAXIMIZED = 0x0002;

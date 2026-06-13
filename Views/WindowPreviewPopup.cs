@@ -405,6 +405,9 @@ internal sealed class WindowPreviewPopup
         };
     }
 
+    /// <summary>True while the thumbnail popup is currently shown.</summary>
+    public bool IsOpen => _previewPopup != null;
+
     /// <summary>Closes and disposes the preview popup if it is open.</summary>
     public void Close()
     {
@@ -413,6 +416,45 @@ internal sealed class WindowPreviewPopup
         _closeTimer.Stop();
         _pointerInPopup = false;
         ClosePopupUi();
+    }
+
+    /// <summary>
+    /// Dismisses the popup while letting its fade-out animation actually play
+    /// (unlike <see cref="Close"/>, which blanks the popup instantly), then
+    /// invokes <paramref name="onClosed"/> once the fade has visibly finished.
+    /// Used so a right-click context menu only appears after the thumbnail
+    /// preview has animated away rather than overlapping it.
+    /// </summary>
+    public void CloseAnimated(Action onClosed)
+    {
+        _previewToken++;            // invalidate any in-flight capture
+        _openTimer.Stop();
+        _closeTimer.Stop();
+        _pointerInPopup = false;
+
+        var popup = _previewPopup;
+        if (popup == null)
+        {
+            onClosed();
+            return;
+        }
+        // Detach so a concurrent hover can't reuse this fading popup, but keep
+        // its Child intact so PopupAnimation.Fade has something to fade out.
+        _previewPopup = null;
+        _tileHosts.Clear();
+
+        popup.IsOpen = false;       // begins the fade-out
+
+        // PopupAnimation.Fade runs for ~200 ms; wait that out (plus a little
+        // margin) before tearing the popup down and signalling completion.
+        var done = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(230) };
+        done.Tick += (_, _) =>
+        {
+            done.Stop();
+            popup.Child = null;
+            onClosed();
+        };
+        done.Start();
     }
 
     /// <summary>Tears down the popup window only, leaving _previewToken and the
