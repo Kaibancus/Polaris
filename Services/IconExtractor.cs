@@ -1,9 +1,11 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Interop;
 using System.Windows.Media.Imaging;
+using Polaris.Models;
 using Drawing = System.Drawing;
 
 namespace Polaris.Services;
@@ -64,6 +66,30 @@ public static class IconExtractor
         if (bmp != null)
             cache[iconSource] = bmp;
         return bmp;
+    }
+
+    /// <summary>Drops cached icon bitmaps no longer referenced by any of
+    /// <paramref name="liveApps"/>, so a cache cannot grow unbounded as the
+    /// user adds and removes entries over a long session.</summary>
+    public static void PruneCache(
+        IDictionary<string, BitmapSource?> cache,
+        IEnumerable<AppEntry> liveApps)
+    {
+        if (cache.Count == 0)
+            return;
+
+        var live = new HashSet<string>();
+        foreach (var app in liveApps)
+            live.Add(app.EffectiveIconSource);
+
+        List<string>? stale = null;
+        foreach (var key in cache.Keys)
+            if (!live.Contains(key))
+                (stale ??= new List<string>()).Add(key);
+
+        if (stale != null)
+            foreach (var key in stale)
+                cache.Remove(key);
     }
 
     private static Drawing.Icon? GetAssociatedIcon(string path)
