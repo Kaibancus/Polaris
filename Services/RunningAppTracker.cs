@@ -287,6 +287,23 @@ public static class RunningAppTracker
             return false;
         try
         {
+            // Shell-namespace launchers (File Explorer, This PC, Recycle Bin…)
+            // all run inside the always-present explorer.exe desktop shell, so
+            // their resolved exe (explorer.exe) and entry.Path can never be a
+            // reliable running signal — they would light up permanently. Detect
+            // them solely by the set of open Explorer file windows.
+            if (WindowPreviewService.IsShellHostedLauncher(entry.Path, entry.Arguments)
+                || WindowPreviewService.IsFileExplorerLauncher(entry.Path, entry.Arguments))
+            {
+                if (explorerTitles == null || explorerTitles.Count == 0)
+                    return false;
+                // Generic File Explorer is running whenever any Explorer file
+                // window is open; a specific shell folder only when a window
+                // carrying its display name is open.
+                return WindowPreviewService.IsFileExplorerLauncher(entry.Path, entry.Arguments)
+                    || IsShellItemRunning(entry.Name, entry.Path, explorerTitles);
+            }
+
             // Packaged apps (UWP / Store, launched via shell:AppsFolder) own no
             // exe-path process to match, so detect them by AUMID first.
             string? aumid = WindowPreviewService.TryGetLauncherAumid(entry.Path, entry.Arguments);

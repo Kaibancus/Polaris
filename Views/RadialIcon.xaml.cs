@@ -133,7 +133,7 @@ public partial class RadialIcon : UserControl
             // as a tray. The macOS-style magnify wave is the only hover feedback.
             HoverGlow.Visibility = Visibility.Collapsed;
 
-            double dot = Math.Max(3.0, iconSize * 0.075);
+            double dot = Math.Max(2.6, iconSize * 0.065);
             double glow = dot * 2.3;
             RunDot.Width = RunDot.Height = dot;
             RunDotGlow.Width = RunDotGlow.Height = glow;

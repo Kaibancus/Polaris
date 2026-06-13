@@ -10,7 +10,7 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <AssemblyName>Polaris</AssemblyName>
     <RootNamespace>Polaris</RootNamespace>
-    <Version>1.6.0</Version>
+    <Version>1.6.1</Version>
     <NoWarn>WFO0003</NoWarn>
     <ApplicationIcon>Assets\app.ico</ApplicationIcon>
   </PropertyGroup>

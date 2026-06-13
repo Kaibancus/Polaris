@@ -523,6 +523,31 @@ public static class WindowPreviewService
     }
 
     /// <summary>
+    /// True when the entry launches the generic Windows File Explorer — either a
+    /// bare explorer.exe pin (<see cref="IsFileExplorer"/>) or the AppsFolder
+    /// form <c>shell:AppsFolder\Microsoft.Windows.Explorer</c>. Unlike specific
+    /// shell folders (This PC, Recycle Bin…), File Explorer has no single window
+    /// title to match — it is "running" whenever ANY Explorer file window is
+    /// open. Single source of truth for the green-light test on both docks.
+    /// </summary>
+    public static bool IsFileExplorerLauncher(string path, string? arguments)
+    {
+        try
+        {
+            if (IsFileExplorer(path, arguments))
+                return true;
+            string? aumid = TryGetLauncherAumid(path, arguments);
+            return !string.IsNullOrEmpty(aumid)
+                && aumid.IndexOf("Microsoft.Windows.Explorer",
+                       StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
     /// Returns the visible, alt-tab-style top-level windows whose Application
     /// User Model ID matches <paramref name="aumid"/> (used for packaged apps
     /// such as the new Teams / Outlook).

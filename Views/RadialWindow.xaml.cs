@@ -63,7 +63,7 @@ public partial class RadialWindow : Window
     private double PlanetDiameter => PlanetIconBase * _uiScale * _themeScale * _diskScale * 2.5;
 
     // Outer-ring icons are drawn slightly larger than inner-ring icons.
-    private const double OuterIconScale = 0.96;
+    private const double OuterIconScale = 1.0;
 
     // Inner-ring (resident) icons are drawn 10% smaller than the base icon size,
     // so the dense inner ring reads as a tidy "pinned" cluster.

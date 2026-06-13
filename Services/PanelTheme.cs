@@ -72,9 +72,9 @@ public sealed class SaturnRingTheme : PanelTheme
     public override string DisplayName => "土星环";
     public override bool IsSaturn => true;
     public override Brush WindowBackground => Brushes.Transparent;
-    public override double DefaultTransparency => 0.10;
-    // 50% of the settings icon-size slider range [40, 96]: 40 + 0.50 * 56 = 68.
-    public override double DefaultIconSize => 68;
+    public override double DefaultTransparency => 0.05;
+    // 40% of the settings icon-size slider range [40, 96]: 40 + 0.40 * 56 = 62.4.
+    public override double DefaultIconSize => 62.4;
 
     public override IReadOnlyList<Point> ComputeSlots(
         int count, Point center, AppSettings settings, out double outerReach)
