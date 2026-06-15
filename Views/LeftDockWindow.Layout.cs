@@ -289,7 +289,11 @@ public partial class LeftDockWindow
             // as a 3-D slab rather than a flat sheet.
             DrawGlassBevel(r.X, r.Y, r.Width, r.Height, trayRadius, opacity);
             // Cool light source orbiting the slab centre (one revolution / minute).
-            BuildGlassOrbitLight(r, trayRadius);
+            // Always-on animated layer; skip it in low-performance mode (subtle
+            // enough that its absence is near-imperceptible) to spare the layered
+            // window a continuous per-tick recomposite.
+            if (_config.Settings.PerformanceMode == Models.PerformanceMode.High)
+                BuildGlassOrbitLight(r, trayRadius);
         }
         if (_hasRunningArea)
             DrawSeam(_seamMain, opacity);

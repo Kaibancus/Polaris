@@ -686,11 +686,24 @@ public partial class RadialWindow : Window
             double shadowPad = 72.0 * _uiScale;        // slab drop shadow (blur 48 + depth)
             double scrollPad = icon * 1.6;             // scrollbar parked right of the grid
             double hoverHeadroom = icon * 2.4;         // 1.7x zoom + label above the top row
+            // The liquid-glass dock is a software-composited per-pixel-alpha
+            // layered window: it has NO dirty-rect upload, so every animation
+            // frame re-uploads the WHOLE window bitmap and the per-frame cost is
+            // directly proportional to the window's physical pixel AREA. The
+            // generic dragHeadroom (5x icon) is empty space that exists only to
+            // keep an icon visible while it is flicked out past the slab to
+            // delete it — yet it inflates EVERY frame's upload during the common
+            // hover / summon / pulse paths. Deletion only needs the dragged icon
+            // to clear the slab edge (IsDeleteDrop = outside GlassSlabRect), so a
+            // tighter glass-specific headroom (still ~2 icon widths past the
+            // slab) keeps the gesture comfortable while shrinking the composited
+            // area ~30%, which lifts the real glass frame rate.
+            double glassDragHeadroom = _config.Settings.IconSize * _themeScale * 2.5;
             // dragHeadroom is added sideways (both edges) and upward only — the
             // window's bottom stays pinned to the screen edge so the dock keeps
             // its position while drag-out clearance grows above and beside it.
-            w = Math.Min(dockW + shadowPad * 2 + scrollPad + dragHeadroom * 2, sw);
-            h = Math.Min(GlassDockTotalHeight + GlassDockBottomMargin + hoverHeadroom + shadowPad + dragHeadroom, sh);
+            w = Math.Min(dockW + shadowPad * 2 + scrollPad + glassDragHeadroom * 2, sw);
+            h = Math.Min(GlassDockTotalHeight + GlassDockBottomMargin + hoverHeadroom + shadowPad + glassDragHeadroom, sh);
         }
 
         Width = w;

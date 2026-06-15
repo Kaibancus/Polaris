@@ -33,6 +33,15 @@ public partial class App : Application
     /// composition budget for the interactive hover/zoom to stay fluid.</summary>
     public static int GlassLoopFrameRate { get; private set; } = 30;
 
+    /// <summary>Tick rate for VERY slow ambient drifts (e.g. the glass orbit light
+    /// that takes a full minute per revolution). At ~0.1°/frame even 30 fps is
+    /// visually identical to 60, so capping these mode-independently at this rate
+    /// halves the layered window's full-frame upload frequency for them with no
+    /// perceptible difference — regardless of the High/Low loop rate, which is
+    /// meant for faster motion (hover/zoom, running pulses) where it actually
+    /// shows. Kept low enough to matter, high enough to stay perfectly smooth.</summary>
+    public const int SlowDriftFrameRate = 30;
+
     /// <summary>Whether the one-shot global timeline frame-rate metadata override
     /// has been installed (it can only be set once per process).</summary>
     private static bool _frameMetadataApplied;

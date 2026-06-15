@@ -137,8 +137,12 @@ public partial class RadialWindow
         }
 
         // Cool light source orbiting the dock centre, lighting the glass from a
-        // slowly drifting direction (one revolution per minute).
-        BuildGlassOrbitLight(left, top, w, totalH, radius);
+        // slowly drifting direction (one revolution per minute). This is an
+        // always-on animated layer; skip it in low-performance mode where every
+        // tick re-composites the layered window, the effect being subtle enough
+        // (peak alpha ~20%) that its absence is near-imperceptible.
+        if (_config.Settings.PerformanceMode == Models.PerformanceMode.High)
+            BuildGlassOrbitLight(left, top, w, totalH, radius);
 
         // Settings gear in the panel's top-right corner.
         double gs = Math.Max(40, icon * 0.72);

@@ -73,7 +73,11 @@ public partial class RadialWindow
         {
             RepeatBehavior = RepeatBehavior.Forever,
         };
-        Timeline.SetDesiredFrameRate(spin, App.GlassLoopFrameRate);
+        // A 60-second revolution is ~0.1°/frame even at 30 fps, so cap this very
+        // slow drift mode-independently — running it at the 60 fps loop rate (High)
+        // would just double its full-frame layered-window uploads for no visible
+        // gain. (In low-perf mode the orbit light is skipped entirely upstream.)
+        Timeline.SetDesiredFrameRate(spin, Math.Min(App.GlassLoopFrameRate, App.SlowDriftFrameRate));
         rot.BeginAnimation(RotateTransform.AngleProperty, spin);
     }
 }
