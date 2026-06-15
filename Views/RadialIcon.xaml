@@ -203,6 +203,54 @@
             </Ellipse>
         </Canvas>
 
+        <!-- New-message attention badge (top-right corner), mirroring the system
+             taskbar: a red pill carrying the unread count, or a small red dot when
+             the app only requests attention (flashing) without a known count. Sits
+             on a full-size overlay grid (HorizontalAlignment=Right / Top) so it
+             never affects the icon's measured size, and overhangs the corner via a
+             translate. Pulses when the app is actively flashing. -->
+        <Grid Width="{Binding IconSize, RelativeSource={RelativeSource AncestorType=UserControl}}"
+              Height="{Binding IconSize, RelativeSource={RelativeSource AncestorType=UserControl}}"
+              IsHitTestVisible="False">
+            <Border x:Name="AttentionBadge"
+                    HorizontalAlignment="Right"
+                    VerticalAlignment="Top"
+                    MinWidth="16"
+                    Height="16"
+                    CornerRadius="8"
+                    Padding="4,0"
+                    Opacity="0"
+                    Visibility="Collapsed"
+                    RenderTransformOrigin="0.5,0.5"
+                    Panel.ZIndex="100">
+                <Border.RenderTransform>
+                    <TransformGroup>
+                        <ScaleTransform x:Name="AttentionScale" ScaleX="1" ScaleY="1"/>
+                        <TranslateTransform x:Name="AttentionShift" X="5" Y="-5"/>
+                    </TransformGroup>
+                </Border.RenderTransform>
+                <Border.Background>
+                    <RadialGradientBrush GradientOrigin="0.35,0.3" Center="0.35,0.3"
+                                         RadiusX="0.9" RadiusY="0.9">
+                        <GradientStop Color="#FFFF6B6B" Offset="0.0"/>
+                        <GradientStop Color="#FFF5342E" Offset="0.6"/>
+                        <GradientStop Color="#FFD11A14" Offset="1.0"/>
+                    </RadialGradientBrush>
+                </Border.Background>
+                <Border.Effect>
+                    <DropShadowEffect Color="#80000000" BlurRadius="4" ShadowDepth="0.6" Direction="270"/>
+                </Border.Effect>
+                <TextBlock x:Name="AttentionCount"
+                           Text=""
+                           Foreground="White"
+                           FontSize="10.5"
+                           FontWeight="SemiBold"
+                           HorizontalAlignment="Center"
+                           VerticalAlignment="Center"
+                           TextOptions.TextFormattingMode="Ideal"/>
+            </Border>
+        </Grid>
+
         <!-- Name label. Hosted on a zero-size Canvas so it never affects the
              icon's measured size / centering. Positioned + sized in code-behind.
              Hidden by default, fades in on hover. -->

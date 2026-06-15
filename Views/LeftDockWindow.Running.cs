@@ -122,6 +122,8 @@ public partial class LeftDockWindow
             }
         }
 
+        var pinnedIcons = new List<RadialIcon>(_pinnedIcons);
+        var flashing = AttentionService.SnapshotFlashing();
         System.Threading.Tasks.Task.Run(() =>
         {
             // Process snapshot drives the running blue-glow on pinned icons,
@@ -177,11 +179,48 @@ public partial class LeftDockWindow
                 filtered.Add(ta);
             }
 
+            // New-message attention badges for the pinned icons (mirrors the main
+            // dock): flashing if any of the app's windows requests attention, with
+            // a best-effort unread count parsed from the window titles.
+            var attention = new Dictionary<RadialIcon, (bool flashing, int count)>();
+            foreach (var icon in pinnedIcons)
+            {
+                bool isRunning = snapshot != null && RunningAppTracker.IsEntryRunning(
+                    icon.Entry, snapshot, explorerTitles, runningAumids);
+                if (!isRunning)
+                {
+                    attention[icon] = (false, 0);
+                    continue;
+                }
+                bool flash = false;
+                int count = 0;
+                try
+                {
+                    var wins = WindowPreviewService.GetWindowsForEntry(
+                        icon.Entry.Path, icon.Entry.Arguments);
+                    foreach (var w in wins)
+                    {
+                        if (flashing.Contains(w.Handle))
+                            flash = true;
+                        int c = AttentionService.ParseUnread(w.Title);
+                        if (c > count)
+                            count = c;
+                    }
+                }
+                catch { /* best effort */ }
+                attention[icon] = (flash, count);
+            }
+
             Dispatcher.BeginInvoke(() =>
             {
                 if (!_shown)
                     return;
                 ApplyPinnedRunning(snapshot, explorerTitles, runningAumids);
+                foreach (var icon in pinnedIcons)
+                {
+                    if (attention.TryGetValue(icon, out var a))
+                        icon.SetAttention(a.flashing, a.count);
+                }
                 ApplyRunning(filtered);
             });
         });

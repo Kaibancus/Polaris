@@ -232,6 +232,10 @@ public partial class App : Application
         RebuildHook();
         SetupPinnedHooks();
 
+        // Listen for taskbar "needs attention" flashes so dock icons can show a
+        // new-message badge mirroring the system taskbar.
+        Polaris.Services.AttentionService.Start();
+
         SetupTray();
     }
 
@@ -1203,6 +1207,7 @@ public partial class App : Application
         _hook?.Dispose();
         _pinnedHook?.Dispose();
         _escHook?.Dispose();
+        Polaris.Services.AttentionService.Stop();
         _singleInstanceMutex?.Dispose();
         base.OnExit(e);
     }

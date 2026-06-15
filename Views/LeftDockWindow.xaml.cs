@@ -258,6 +258,57 @@ public partial class LeftDockWindow : Window
             Interval = TimeSpan.FromSeconds(1.5),
         };
         _runningTimer.Tick += (_, _) => RefreshRunning();
+
+        // Refresh badges promptly when an app starts/stops flashing for attention.
+        AttentionService.Changed += () =>
+        {
+            if (!_shown)
+                return;
+            Dispatcher.BeginInvoke(new Action(RefreshAttentionOnly));
+        };
+    }
+
+    /// <summary>Lightweight badge-only refresh for the prompt flash event: resolves
+    /// each pinned icon's windows to update its new-message badge without the heavy
+    /// running-process snapshot, so the dot appears with minimal latency.</summary>
+    private void RefreshAttentionOnly()
+    {
+        if (!_shown)
+            return;
+        var pinnedIcons = new List<RadialIcon>(_pinnedIcons);
+        var flashing = AttentionService.SnapshotFlashing();
+        System.Threading.Tasks.Task.Run(() =>
+        {
+            var attention = new Dictionary<RadialIcon, (bool flashing, int count)>();
+            foreach (var icon in pinnedIcons)
+            {
+                bool flash = false;
+                int count = 0;
+                try
+                {
+                    var wins = WindowPreviewService.GetWindowsForEntry(
+                        icon.Entry.Path, icon.Entry.Arguments);
+                    foreach (var w in wins)
+                    {
+                        if (flashing.Contains(w.Handle))
+                            flash = true;
+                        int c = AttentionService.ParseUnread(w.Title);
+                        if (c > count)
+                            count = c;
+                    }
+                }
+                catch { /* best effort */ }
+                attention[icon] = (flash, count);
+            }
+            Dispatcher.BeginInvoke(() =>
+            {
+                if (!_shown)
+                    return;
+                foreach (var icon in pinnedIcons)
+                    if (attention.TryGetValue(icon, out var a))
+                        icon.SetAttention(a.flashing, a.count);
+            });
+        });
     }
 
     // ---- Window setup ----------------------------------------------------

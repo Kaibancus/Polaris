@@ -398,6 +398,92 @@ public partial class RadialIcon : UserControl
         }
     }
 
+    private bool _attentionFlashing;
+    private int _attentionCount;
+
+    /// <summary>Shows / hides the new-message attention badge (top-right corner),
+    /// mirroring the taskbar. <paramref name="flashing"/> means the app is actively
+    /// requesting attention (its taskbar button would be flashing) — the badge then
+    /// pulses; <paramref name="count"/> is a best-effort unread count parsed from the
+    /// window title (0 = unknown). A plain red dot is shown when the app flashes but
+    /// no count is known.</summary>
+    public void SetAttention(bool flashing, int count)
+    {
+        if (count < 0)
+            count = 0;
+        if (_attentionFlashing == flashing && _attentionCount == count)
+            return;
+        _attentionFlashing = flashing;
+        _attentionCount = count;
+        UpdateAttentionVisual();
+    }
+
+    private void UpdateAttentionVisual()
+    {
+        bool show = _attentionFlashing || _attentionCount > 0;
+        if (!show)
+        {
+            AttentionBadge.BeginAnimation(OpacityProperty, null);
+            AttentionScale.BeginAnimation(ScaleTransform.ScaleXProperty, null);
+            AttentionScale.BeginAnimation(ScaleTransform.ScaleYProperty, null);
+            AttentionBadge.Opacity = 0;
+            AttentionBadge.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        bool hasCount = _attentionCount > 0;
+        if (hasCount)
+        {
+            AttentionCount.Text = _attentionCount > 99 ? "99+" : _attentionCount.ToString();
+            AttentionCount.Visibility = Visibility.Visible;
+            double h = Math.Max(14.0, Math.Min(22.0, IconSize * 0.34));
+            AttentionBadge.Height = h;
+            AttentionBadge.CornerRadius = new CornerRadius(h / 2.0);
+            AttentionBadge.MinWidth = h;
+            AttentionBadge.Padding = new Thickness(Math.Max(3.0, h * 0.28), 0, Math.Max(3.0, h * 0.28), 0);
+            AttentionCount.FontSize = Math.Max(8.5, h * 0.6) * Polaris.Services.FontScale.Current;
+            AttentionShift.X = -4;
+            AttentionShift.Y = 4;
+        }
+        else
+        {
+            // Attention without a known count → a compact red dot, nudged toward
+            // the icon's lower-left so it hugs the corner rather than overhanging.
+            AttentionCount.Text = "";
+            AttentionCount.Visibility = Visibility.Collapsed;
+            double d = Math.Max(5.0, Math.Min(10.0, IconSize * 0.10));
+            AttentionBadge.Height = d;
+            AttentionBadge.CornerRadius = new CornerRadius(d / 2.0);
+            AttentionBadge.MinWidth = d;
+            AttentionBadge.Padding = new Thickness(0);
+            AttentionShift.X = -4;
+            AttentionShift.Y = 4;
+        }
+
+        AttentionBadge.Visibility = Visibility.Visible;
+        AttentionBadge.Opacity = 1;
+
+        if (_attentionFlashing)
+        {
+            // Pulse to draw the eye, like the taskbar's flash.
+            int fps = App.AmbientFrameRate;
+            var pulse = new DoubleAnimation(1.0, 1.18, new Duration(TimeSpan.FromSeconds(0.7)))
+            {
+                AutoReverse = true,
+                RepeatBehavior = RepeatBehavior.Forever,
+            };
+            Timeline.SetDesiredFrameRate(pulse, fps);
+            AttentionScale.BeginAnimation(ScaleTransform.ScaleXProperty, pulse);
+            AttentionScale.BeginAnimation(ScaleTransform.ScaleYProperty, pulse);
+        }
+        else
+        {
+            AttentionScale.BeginAnimation(ScaleTransform.ScaleXProperty, null);
+            AttentionScale.BeginAnimation(ScaleTransform.ScaleYProperty, null);
+            AttentionScale.ScaleX = AttentionScale.ScaleY = 1;
+        }
+    }
+
     private void OnEnter(object sender, MouseEventArgs e)
     {
         FpsProfiler.Push("HoverZoom");

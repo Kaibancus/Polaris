@@ -489,6 +489,60 @@ public partial class RadialWindow : Window
         };
         // Repaint the clock line as soon as fresh weather arrives.
         _weather.Updated += () => Dispatcher.BeginInvoke(new Action(UpdateGlassClock));
+
+        // Refresh badges promptly when an app starts/stops flashing for attention
+        // (instead of waiting up to 1.5s for the next poll). Only while shown.
+        AttentionService.Changed += OnAttentionChanged;
+    }
+
+    private void OnAttentionChanged()
+    {
+        if (!_shown)
+            return;
+        Dispatcher.BeginInvoke(new Action(RefreshAttentionOnly));
+    }
+
+    /// <summary>Lightweight badge-only refresh used on the prompt flash event: it
+    /// skips the (relatively slow) full running-process snapshot and only resolves
+    /// each icon's windows to update its new-message badge, so the dot appears with
+    /// minimal latency (the heavy IsRunning recompute still happens on the 1.5s
+    /// poll). Runs the window scan on a background thread.</summary>
+    private void RefreshAttentionOnly()
+    {
+        if (!_shown)
+            return;
+        var icons = new List<RadialIcon>(_iconElements);
+        var flashing = AttentionService.SnapshotFlashing();
+        System.Threading.Tasks.Task.Run(() =>
+        {
+            var attention = new Dictionary<RadialIcon, (bool flashing, int count)>();
+            foreach (var icon in icons)
+            {
+                bool flash = false;
+                int count = 0;
+                try
+                {
+                    var wins = WindowPreviewService.GetWindowsForEntry(
+                        icon.Entry.Path, icon.Entry.Arguments);
+                    foreach (var w in wins)
+                    {
+                        if (flashing.Contains(w.Handle))
+                            flash = true;
+                        int c = AttentionService.ParseUnread(w.Title);
+                        if (c > count)
+                            count = c;
+                    }
+                }
+                catch { /* best effort */ }
+                attention[icon] = (flash, count);
+            }
+            Dispatcher.BeginInvoke(() =>
+            {
+                foreach (var icon in icons)
+                    if (attention.TryGetValue(icon, out var a))
+                        icon.SetAttention(a.flashing, a.count);
+            });
+        });
     }
 
     /// <summary>Updates the glass dock's clock labels to the current local time,
@@ -890,6 +944,7 @@ public partial class RadialWindow : Window
         // Enumerate processes on a background thread so the (relatively slow)
         // snapshot never blocks the UI thread and stutters the light animation.
         var icons = new List<RadialIcon>(_iconElements);
+        var flashing = AttentionService.SnapshotFlashing();
         System.Threading.Tasks.Task.Run(() =>
         {
             var running = RunningAppTracker.SnapshotRunning();
@@ -899,12 +954,49 @@ public partial class RadialWindow : Window
             System.Collections.Generic.HashSet<string> runningAumids;
             try { runningAumids = WindowPreviewService.SnapshotRunningAumids(); }
             catch { runningAumids = new System.Collections.Generic.HashSet<string>(); }
+
+            // Resolve each running icon's windows to derive its new-message badge:
+            // flashing if any of its windows is requesting attention, with a best-
+            // effort unread count parsed from the window titles. Reusing
+            // GetWindowsForEntry keeps the icon→window matching identical to the
+            // hover previews (AUMID / folder / Office gating all handled there).
+            var attention = new Dictionary<RadialIcon, (bool flashing, int count)>();
+            foreach (var icon in icons)
+            {
+                bool isRunning = RunningAppTracker.IsEntryRunning(
+                    icon.Entry, running, explorerTitles, runningAumids);
+                if (!isRunning)
+                {
+                    attention[icon] = (false, 0);
+                    continue;
+                }
+                bool flash = false;
+                int count = 0;
+                try
+                {
+                    var wins = WindowPreviewService.GetWindowsForEntry(
+                        icon.Entry.Path, icon.Entry.Arguments);
+                    foreach (var w in wins)
+                    {
+                        if (flashing.Contains(w.Handle))
+                            flash = true;
+                        int c = AttentionService.ParseUnread(w.Title);
+                        if (c > count)
+                            count = c;
+                    }
+                }
+                catch { /* best effort: no badge for this icon */ }
+                attention[icon] = (flash, count);
+            }
+
             Dispatcher.BeginInvoke(() =>
             {
                 foreach (var icon in icons)
                 {
                     icon.IsRunning = RunningAppTracker.IsEntryRunning(
                         icon.Entry, running, explorerTitles, runningAumids);
+                    if (attention.TryGetValue(icon, out var a))
+                        icon.SetAttention(a.flashing, a.count);
                 }
             });
         });
