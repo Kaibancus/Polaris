@@ -149,7 +149,7 @@ public partial class RadialIcon : UserControl
             // as a tray. The macOS-style magnify wave is the only hover feedback.
             HoverGlow.Visibility = Visibility.Collapsed;
 
-            double dot = Math.Max(2.6, iconSize * 0.065);
+            double dot = Math.Max(2.6, iconSize * 0.07);
             double glow = dot * 2.3;
             RunDot.Width = RunDot.Height = dot;
             RunDotGlow.Width = RunDotGlow.Height = glow;
@@ -399,29 +399,23 @@ public partial class RadialIcon : UserControl
     }
 
     private bool _attentionFlashing;
-    private int _attentionCount;
 
-    /// <summary>Shows / hides the new-message attention badge (top-right corner),
-    /// mirroring the taskbar. <paramref name="flashing"/> means the app is actively
-    /// requesting attention (its taskbar button would be flashing) — the badge then
-    /// pulses; <paramref name="count"/> is a best-effort unread count parsed from the
-    /// window title (0 = unknown). A plain red dot is shown when the app flashes but
-    /// no count is known.</summary>
+    /// <summary>Shows / hides the new-message attention dot (lower-left corner),
+    /// mirroring the taskbar's flash. <paramref name="flashing"/> means the app is
+    /// actively requesting attention (its taskbar button would be flashing); the
+    /// dot then pulses. <paramref name="count"/> is accepted for source
+    /// compatibility but no longer rendered as a number.</summary>
     public void SetAttention(bool flashing, int count)
     {
-        if (count < 0)
-            count = 0;
-        if (_attentionFlashing == flashing && _attentionCount == count)
+        if (_attentionFlashing == flashing)
             return;
         _attentionFlashing = flashing;
-        _attentionCount = count;
         UpdateAttentionVisual();
     }
 
     private void UpdateAttentionVisual()
     {
-        bool show = _attentionFlashing || _attentionCount > 0;
-        if (!show)
+        if (!_attentionFlashing)
         {
             AttentionBadge.BeginAnimation(OpacityProperty, null);
             AttentionScale.BeginAnimation(ScaleTransform.ScaleXProperty, null);
@@ -431,34 +425,17 @@ public partial class RadialIcon : UserControl
             return;
         }
 
-        bool hasCount = _attentionCount > 0;
-        if (hasCount)
-        {
-            AttentionCount.Text = _attentionCount > 99 ? "99+" : _attentionCount.ToString();
-            AttentionCount.Visibility = Visibility.Visible;
-            double h = Math.Max(14.0, Math.Min(22.0, IconSize * 0.34));
-            AttentionBadge.Height = h;
-            AttentionBadge.CornerRadius = new CornerRadius(h / 2.0);
-            AttentionBadge.MinWidth = h;
-            AttentionBadge.Padding = new Thickness(Math.Max(3.0, h * 0.28), 0, Math.Max(3.0, h * 0.28), 0);
-            AttentionCount.FontSize = Math.Max(8.5, h * 0.6) * Polaris.Services.FontScale.Current;
-            AttentionShift.X = -4;
-            AttentionShift.Y = 4;
-        }
-        else
-        {
-            // Attention without a known count → a compact red dot, nudged toward
-            // the icon's lower-left so it hugs the corner rather than overhanging.
-            AttentionCount.Text = "";
-            AttentionCount.Visibility = Visibility.Collapsed;
-            double d = Math.Max(5.0, Math.Min(10.0, IconSize * 0.10));
-            AttentionBadge.Height = d;
-            AttentionBadge.CornerRadius = new CornerRadius(d / 2.0);
-            AttentionBadge.MinWidth = d;
-            AttentionBadge.Padding = new Thickness(0);
-            AttentionShift.X = -4;
-            AttentionShift.Y = 4;
-        }
+        // A compact red dot, nudged toward the icon's lower-left so it hugs the
+        // corner rather than overhanging.
+        AttentionCount.Text = "";
+        AttentionCount.Visibility = Visibility.Collapsed;
+        double d = Math.Max(5.0, Math.Min(10.0, IconSize * 0.12));
+        AttentionBadge.Height = d;
+        AttentionBadge.CornerRadius = new CornerRadius(d / 2.0);
+        AttentionBadge.MinWidth = d;
+        AttentionBadge.Padding = new Thickness(0);
+        AttentionShift.X = -4;
+        AttentionShift.Y = 4;
 
         AttentionBadge.Visibility = Visibility.Visible;
         AttentionBadge.Opacity = 1;

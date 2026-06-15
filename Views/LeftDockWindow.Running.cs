@@ -75,11 +75,14 @@ public partial class LeftDockWindow
                     excludeFileNames.Add(h);
             }
         }
-        // Same logic as the main dock's running strip: hide any app that is
-        // pinned in EITHER dock, so both strips show the identical set of
-        // "running but not pinned anywhere" apps.
-        var pinned = new List<AppEntry>(_config.Apps);
-        pinned.AddRange(_config.LeftDockApps);
+        // The running strip lists apps that are running but NOT in the resident
+        // region (the side dock's pinned column = _config.LeftDockApps, which
+        // mirrors the main dock's first ResidentCount entries). Non-resident
+        // pinned apps are intentionally NOT excluded, so they surface in the
+        // running strip while running (they don't otherwise appear on the side
+        // dock). Only the resident apps — already shown as pinned tiles here — are
+        // excluded to avoid duplicating them.
+        var pinned = new List<AppEntry>(_config.LeftDockApps);
         foreach (var a in pinned)
         {
             if (string.IsNullOrWhiteSpace(a.Path))
@@ -516,7 +519,10 @@ public partial class LeftDockWindow
     /// animating.</summary>
     private FrameworkElement BuildRunningDot(double iconSize)
     {
-        double dot = Math.Max(3.0, iconSize * 0.075);
+        // Keep these EXACTLY in step with RadialIcon's running dot (the pinned
+        // icons) — factor 0.07 / min 2.6 / glow 2.3 — so the breathing indicator
+        // is the same size in the pinned column and the running strip.
+        double dot = Math.Max(2.6, iconSize * 0.07);
         double glow = dot * 2.3;
         // Hug the screen-edge side of the tile so the indicator always sits on
         // the outer edge regardless of which screen edge the dock is on.
