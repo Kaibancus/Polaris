@@ -25,8 +25,6 @@ internal static class GlassChrome
     /// transparency reaches <see cref="FrostThreshold"/>).</summary>
     public static double FrostStrengthFor(double transparency)
     {
-        if (FrostThreshold <= 0)
-            return 0;
         double t = Math.Clamp(transparency, 0.0, 1.0);
         return Math.Clamp((FrostThreshold - t) / FrostThreshold, 0.0, 1.0);
     }
