@@ -64,6 +64,14 @@ public partial class App : Application
     // reads simple volatile fields and never touches WPF objects across threads.
     private volatile bool _guardActive;       // taskbar auto-hide AND bottom dock
 
+    // Snapshot of every monitor's bounds, refreshed periodically by the poll
+    // thread (and once at install). The hot paths use it to decide whether a
+    // monitor's bottom edge is a TRUE outer edge (guarded) or has another display
+    // adjacent below it (not guarded, so the cursor can cross down). Volatile
+    // reference swap keeps reads lock-free.
+    private volatile RECT[] _monitorRects = Array.Empty<RECT>();
+    private int _lastMonitorScanTick;
+
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
@@ -451,6 +459,9 @@ public partial class App : Application
         if (_guardThread != null)
             return;
         _guardStop = false;
+        // Seed the monitor layout before the hook starts so the very first mouse
+        // moves are evaluated against a valid snapshot.
+        RefreshMonitorSnapshot();
         _guardThread = new Thread(TaskbarGuardThread)
         {
             IsBackground = true,
@@ -495,17 +506,26 @@ public partial class App : Application
             }
             try
             {
+                // Refresh the monitor layout at most ~once a second so display
+                // hot-plug / rearrangement is reflected without per-tick cost.
+                int tick = Environment.TickCount;
+                if (_monitorRects.Length == 0 || tick - _lastMonitorScanTick >= 1000)
+                {
+                    RefreshMonitorSnapshot();
+                    _lastMonitorScanTick = tick;
+                }
+
                 if (GetCursorPos(out POINT pt))
                 {
                     IntPtr hMon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
                     var mi = new MONITORINFO { cbSize = Marshal.SizeOf<MONITORINFO>() };
                     if (GetMonitorInfo(hMon, ref mi))
                     {
-                        bool isPrimary = (mi.dwFlags & MONITORINFOF_PRIMARY) != 0;
-                        // Only ever guard the PRIMARY monitor's bottom edge. The
-                        // taskbar-reveal mask must never block the bottom edge of a
-                        // secondary display, even when the dock shows on all monitors.
-                        if (isPrimary)
+                        // Guard a monitor's bottom edge only when it is a TRUE outer
+                        // edge (no display connected below it in the centre band). If
+                        // another monitor sits below, leave the edge open so the cursor
+                        // can cross down into it.
+                        if (!HasNeighborBelow(mi.rcMonitor))
                         {
                             int w = mi.rcMonitor.Right - mi.rcMonitor.Left;
                             double bandStart = mi.rcMonitor.Left + w * 0.25;
@@ -605,11 +625,10 @@ public partial class App : Application
                     var mi = new MONITORINFO { cbSize = Marshal.SizeOf<MONITORINFO>() };
                     if (GetMonitorInfo(hMon, ref mi))
                     {
-                        bool isPrimary = (mi.dwFlags & MONITORINFOF_PRIMARY) != 0;
-                        // Only ever mask the taskbar reveal on the PRIMARY monitor.
-                        // Secondary displays' bottom edges are never blocked, so their
-                        // auto-hide taskbar stays fully reachable.
-                        if (isPrimary)
+                        // Mask the taskbar reveal only on a TRUE outer bottom edge.
+                        // If another display is connected below this monitor, its
+                        // bottom edge is left open so the cursor can cross down.
+                        if (!HasNeighborBelow(mi.rcMonitor))
                         {
                             int w = mi.rcMonitor.Right - mi.rcMonitor.Left;
                             double bandStart = mi.rcMonitor.Left + w * 0.25;
@@ -650,6 +669,49 @@ public partial class App : Application
         _guardThread = null;
         _guardPollThread = null;
         _guardThreadId = 0;
+    }
+
+    /// <summary>Re-reads the current monitor layout into <see cref="_monitorRects"/>.
+    /// Cheap (a handful of monitors) and called at most ~once a second from the poll
+    /// loop, plus once at install, so display hot-plug / rearrangement is picked up.</summary>
+    private void RefreshMonitorSnapshot()
+    {
+        var rects = new System.Collections.Generic.List<RECT>(4);
+        bool Collect(IntPtr hMon, IntPtr hdc, ref RECT lprc, IntPtr data)
+        {
+            var mi = new MONITORINFO { cbSize = Marshal.SizeOf<MONITORINFO>() };
+            if (GetMonitorInfo(hMon, ref mi))
+                rects.Add(mi.rcMonitor);
+            return true;
+        }
+        try
+        {
+            EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, Collect, IntPtr.Zero);
+            _monitorRects = rects.ToArray();
+        }
+        catch { }
+    }
+
+    /// <summary>True when another display sits directly below <paramref name="m"/>'s
+    /// bottom edge and overlaps the guarded centre band — i.e. the cursor should be
+    /// allowed to cross downward there, so no taskbar-guard wall is placed. False for
+    /// a true outer bottom edge (nothing below in the band), which IS guarded.</summary>
+    private bool HasNeighborBelow(in RECT m)
+    {
+        int w = m.Right - m.Left;
+        double bandStart = m.Left + w * 0.25;
+        double bandEnd = m.Right - w * 0.25;
+        const int tol = 2;   // tolerate a 1-2px seam between adjacent monitors
+        var rects = _monitorRects;
+        foreach (var r in rects)
+        {
+            // A monitor whose TOP meets this monitor's BOTTOM (self never matches,
+            // since its own Top != its own Bottom) and whose horizontal span covers
+            // any part of the guarded band counts as "connected below".
+            if (Math.Abs(r.Top - m.Bottom) <= tol && r.Right > bandStart && r.Left < bandEnd)
+                return true;
+        }
+        return false;
     }
 
     private const int WH_MOUSE_LL = 14;
@@ -733,6 +795,12 @@ public partial class App : Application
     [DllImport("user32.dll", CharSet = CharSet.Auto)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFO lpmi);
+
+    private delegate bool MonitorEnumProc(IntPtr hMonitor, IntPtr hdc, ref RECT lprc, IntPtr data);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool EnumDisplayMonitors(IntPtr hdc, IntPtr lprcClip, MonitorEnumProc lpfnEnum, IntPtr dwData);
 
     [DllImport("shell32.dll")]
     private static extern IntPtr SHAppBarMessage(uint dwMessage, ref APPBARDATA pData);
