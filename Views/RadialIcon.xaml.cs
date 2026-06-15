@@ -158,6 +158,7 @@ public partial class RadialIcon : UserControl
 
         // Centre the (zero-layout) name label below the icon.
         LabelChrome.Width = LabelWidth;
+        Label.FontSize = 11.5 * Polaris.Services.FontScale.Current;
         Canvas.SetLeft(LabelChrome, (iconSize - LabelWidth) / 2.0);
         Canvas.SetTop(LabelChrome, iconSize + 8);
 

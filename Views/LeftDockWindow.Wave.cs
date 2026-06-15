@@ -476,8 +476,8 @@ public partial class LeftDockWindow
         // vertical docks the label grows along the cross axis toward the far
         // edge; for horizontal docks it grows along the main axis, centred on
         // the icon, so the budget is whichever side has less room.
-        double maxFont = 10.5 * HoverScale;
-        double minFont = 7.5 * HoverScale;
+        double maxFont = 10.5 * HoverScale * Polaris.Services.FontScale.Current;
+        double minFont = 7.5 * HoverScale * Polaris.Services.FontScale.Current;
         double horizPad = 20 * _uiScale;                 // matches Border padding (10 + 10)
         double avail = IsVertical
             ? Math.Max(40 * _uiScale, thickness - crossPos - horizPad - 6 * _uiScale)

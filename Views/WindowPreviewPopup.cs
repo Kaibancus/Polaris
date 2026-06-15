@@ -270,7 +270,7 @@ internal sealed class WindowPreviewPopup
                     Foreground = new SolidColorBrush(Color.FromArgb(0x99, 0xFF, 0xFF, 0xFF)),
                     HorizontalAlignment = HorizontalAlignment.Center,
                     VerticalAlignment = VerticalAlignment.Center,
-                    FontSize = 12,
+                    FontSize = 12 * Polaris.Services.FontScale.Current,
                 };
             }
             else
@@ -296,7 +296,7 @@ internal sealed class WindowPreviewPopup
                         Foreground = new SolidColorBrush(Color.FromArgb(0x99, 0xFF, 0xFF, 0xFF)),
                         HorizontalAlignment = HorizontalAlignment.Center,
                         VerticalAlignment = VerticalAlignment.Center,
-                        FontSize = 12,
+                        FontSize = 12 * Polaris.Services.FontScale.Current,
                     };
                 }
             }
@@ -337,7 +337,7 @@ internal sealed class WindowPreviewPopup
         {
             Text = w.Title,
             Foreground = Brushes.White,
-            FontSize = 12,
+            FontSize = 12 * Polaris.Services.FontScale.Current,
             Margin = new Thickness(2, 6, 2, 0),
             TextTrimming = TextTrimming.CharacterEllipsis,
             MaxWidth = PreviewThumbWidth,

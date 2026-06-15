@@ -11,6 +11,16 @@ public enum DockSide
     Bottom,
 }
 
+/// <summary>Frame-rate / animation-throttling profile.
+/// <see cref="Low"/> caps everything for minimal resource use (60 fps, slow
+/// loops at 30 fps); <see cref="High"/> follows the display refresh rate and
+/// runs loop animations at 60 fps.</summary>
+public enum PerformanceMode
+{
+    Low,
+    High,
+}
+
 /// <summary>
 /// User-configurable appearance and behavior settings.
 /// </summary>
@@ -74,6 +84,12 @@ public sealed class AppSettings
     /// </summary>
     public int TriggerKey { get; set; } = 0xA5;
 
+    /// <summary>
+    /// Virtual-key code of the toggle (sticky open/close) hotkey, always combined
+    /// with Ctrl. One of 0x30..0x39, i.e. Ctrl+0 .. Ctrl+9. Default 0x34 (Ctrl+4).
+    /// </summary>
+    public int ToggleKey { get; set; } = 0x34;
+
     /// <summary>Screen edge the quick-launch (side) dock is anchored to.
     /// Defaults to the bottom edge.</summary>
     public DockSide DockPosition { get; set; } = DockSide.Bottom;
@@ -86,6 +102,14 @@ public sealed class AppSettings
     /// keyed by theme id. Lets each theme restore its own look when re-selected;
     /// missing entries fall back to the theme's built-in defaults.</summary>
     public Dictionary<string, ThemeAppearance> ThemeAppearances { get; set; } = new();
+
+    /// <summary>Global dock-text size, as a slider percentage where 50 maps to the
+    /// original sizes (1.0×). Applied across all dock typography. Default 50.</summary>
+    public double FontSizePercent { get; set; } = 50;
+
+    /// <summary>Frame-rate / animation profile. Low (default) minimises resource
+    /// use; High follows the display refresh rate for the smoothest motion.</summary>
+    public PerformanceMode PerformanceMode { get; set; } = PerformanceMode.Low;
 }
 
 /// <summary>Remembered per-theme appearance values.</summary>

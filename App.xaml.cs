@@ -33,6 +33,51 @@ public partial class App : Application
     /// composition budget for the interactive hover/zoom to stay fluid.</summary>
     public static int GlassLoopFrameRate { get; private set; } = 30;
 
+    /// <summary>Whether the one-shot global timeline frame-rate metadata override
+    /// has been installed (it can only be set once per process).</summary>
+    private static bool _frameMetadataApplied;
+
+    /// <summary>Applies the user's frame-rate / animation profile by setting the
+    /// three static rate fields (read whenever an animation is created) and, on
+    /// the first call, the global timeline default frame rate.
+    ///
+    /// High: follows the display refresh. The default metadata under-samples short
+    /// transitions and the display's ACTUAL refresh is never an exact integer (a
+    /// "60 Hz" panel runs at 59.94 Hz); ticking at exactly 60 beats against it and
+    /// drops/doubles frames -> visible judder. Over-sampling ~2x on 60 Hz panels
+    /// masks that beat; high-refresh panels (>=90 Hz) present fast enough to run at
+    /// their native rate. Loop animations run at 60 fps.
+    ///
+    /// Low: caps everything for minimal resource use — 60 fps motion, slow/loop
+    /// animations throttled to 30 fps.</summary>
+    internal static void ApplyPerformanceMode(Models.PerformanceMode mode)
+    {
+        int hz = (int)Math.Clamp(GetPrimaryRefreshRate(), 60, 240);
+        int animHz;
+        if (mode == Models.PerformanceMode.High)
+        {
+            animHz = hz < 90 ? Math.Min(hz * 2, 240) : hz;  // 60->120, 144->144
+            AnimationFrameRate = animHz;
+            AmbientFrameRate = 60;                 // full loop animations at 60 fps
+            GlassLoopFrameRate = Math.Min(60, hz);
+        }
+        else
+        {
+            animHz = 60;
+            AnimationFrameRate = 60;
+            AmbientFrameRate = 30;                 // slow loop animations at 30 fps
+            GlassLoopFrameRate = 30;
+        }
+
+        if (!_frameMetadataApplied)
+        {
+            System.Windows.Media.Animation.Timeline.DesiredFrameRateProperty.OverrideMetadata(
+                typeof(System.Windows.Media.Animation.Timeline),
+                new FrameworkPropertyMetadata(animHz));
+            _frameMetadataApplied = true;
+        }
+    }
+
     private AppConfig _config = new();
     private KeyboardHook? _hook;
     private KeyboardHook? _pinnedHook;
@@ -83,26 +128,8 @@ public partial class App : Application
         AppDomain.CurrentDomain.UnhandledException += OnDomainUnhandledException;
         System.Threading.Tasks.TaskScheduler.UnobservedTaskException += OnUnobservedTaskException;
 
-        // Render WPF animations at the display's native refresh rate. The
-        // default metadata under-samples short transitions (they look "slow
-        // motion"), but the choice of value interacts subtly with the display's
-        // ACTUAL refresh, which is never an exact integer (a "60 Hz" panel runs
-        // at 59.94 Hz). Ticking the timeline at exactly 60 against a 59.94 Hz
-        // present makes the two beat against each other, periodically dropping or
-        // doubling a frame -> visible judder that reads as a frame-rate drop.
-        // Over-sampling at ~2x the refresh puts two animation samples in every
-        // presented frame, halving that sampling error and masking the beat, so
-        // motion looks markedly smoother on 60 Hz panels. Genuine high-refresh
-        // panels (>=90 Hz) already present fast enough that the beat is invisible,
-        // so we drive the timeline at their native rate there.
-        int hz = (int)Math.Clamp(GetPrimaryRefreshRate(), 60, 240);
-        int refreshHz = hz < 90 ? Math.Min(hz * 2, 240) : hz;  // 60->120, 144->144
-        System.Windows.Media.Animation.Timeline.DesiredFrameRateProperty.OverrideMetadata(
-            typeof(System.Windows.Media.Animation.Timeline),
-            new FrameworkPropertyMetadata(refreshHz));
-        AmbientFrameRate = hz;   // un-oversampled present rate for slow loops
-        AnimationFrameRate = refreshHz;  // oversampled tick rate for smooth motion
-        GlassLoopFrameRate = Math.Min(30, hz);  // throttled loops for the fullscreen glass overlay
+        // Frame-rate / animation profile is applied from config (see
+        // ApplyPerformanceMode) once settings are loaded below.
 
         // Opt-in frame-rate profiler (POLARIS_FPS=1). No-op otherwise.
         FpsProfiler.StartIfRequested();
@@ -122,6 +149,12 @@ public partial class App : Application
         }
 
         _config = ConfigStore.Load();
+
+        // Apply the saved frame-rate / animation profile before any window opens.
+        ApplyPerformanceMode(_config.Settings.PerformanceMode);
+
+        // Seed the global dock-text multiplier before any dock renders.
+        Polaris.Services.FontScale.SetFromPercent(_config.Settings.FontSizePercent);
 
         // One-time migration: default "run at startup" to on for configs saved
         // before this became the default. Subsequent user changes are honored.
@@ -247,19 +280,17 @@ public partial class App : Application
 
     /// <summary>
     /// Dedicated global hotkeys for the pinned (drag-to-add) panel:
-    /// press Ctrl+4 to toggle it (open if hidden, close if shown), or press Esc
-    /// to dismiss it. The '4' key is swallowed only while Ctrl is held, so a
-    /// normal '4' keystroke is unaffected.
+    /// press Ctrl+<digit> (configurable, default Ctrl+4) to toggle it (open if
+    /// hidden, close if shown), or press Esc to dismiss it. The digit key is
+    /// swallowed only while Ctrl is held, so a normal digit keystroke is unaffected.
     /// </summary>
     private void SetupPinnedHooks()
     {
-        const int VK_4 = 0x34;
         const int VK_ESCAPE = 0x1B;
 
-        // Ctrl+4 toggles the pinned panel: open when hidden, close when shown.
-        _pinnedHook = new KeyboardHook(VK_4, suppressKey: true, requireCtrl: true);
-        _pinnedHook.KeyPressed += TogglePinnedDock;
-        _pinnedHook.Start();
+        // Ctrl+<digit> toggles the pinned panel (built from the current setting so
+        // it can be rebuilt live when the user picks a different combination).
+        RebuildPinnedHook();
 
         _escHook = new KeyboardHook(VK_ESCAPE);
         _escHook.KeyPressed += () =>
@@ -271,6 +302,25 @@ public partial class App : Application
             }
         };
         _escHook.Start();
+    }
+
+    /// <summary>(Re)installs the Ctrl+&lt;digit&gt; toggle hotkey from the current
+    /// <see cref="AppSettings.ToggleKey"/> setting and refreshes the tray tooltip.</summary>
+    private void RebuildPinnedHook()
+    {
+        _pinnedHook?.Dispose();
+        _pinnedHook = new KeyboardHook(_config.Settings.ToggleKey, suppressKey: true, requireCtrl: true);
+        _pinnedHook.KeyPressed += TogglePinnedDock;
+        _pinnedHook.Start();
+        if (_tray != null)
+            _tray.Text = BuildTrayTooltip();
+    }
+
+    /// <summary>The tray tooltip, including the currently configured toggle combo.</summary>
+    private string BuildTrayTooltip()
+    {
+        char digit = (char)_config.Settings.ToggleKey;
+        return $"Polaris — 单击开关固定显示 / 长按触发键临时显示 / Ctrl+{digit} 开关（Esc关闭）";
     }
 
     /// <summary>Toggles the pinned (sticky) main + left dock: open both when
@@ -1041,6 +1091,10 @@ public partial class App : Application
             // shared positioning target so the refresh below lands the docks on
             // the right monitor (the cursor's when enabled, the primary when not).
             SetActiveMonitorFromCursor();
+            // The performance profile may have changed; re-apply the frame-rate
+            // fields so loop / transition animations re-created in the refresh
+            // below tick at the new profile's rates.
+            ApplyPerformanceMode(_config.Settings.PerformanceMode);
             // A theme switch can change the resident count (Ring0Count is stored
             // per theme), so re-mirror the resident region into the side dock
             // before relaying it — otherwise the side dock keeps the old theme's
@@ -1056,6 +1110,7 @@ public partial class App : Application
             _panel?.RefreshFromConfig();
         };
         _settings.TriggerKeyChanged += RebuildHook;
+        _settings.ToggleKeyChanged += RebuildPinnedHook;
         _settings.Closed += (_, _) => _settings = null;
 
         // The window cloaks itself on SourceInitialized (see SettingsWindow) so
@@ -1089,7 +1144,7 @@ public partial class App : Application
         {
             Icon = LoadAppIcon(),
             Visible = true,
-            Text = "Polaris — 单击开关固定显示 / 长按呼出键临时显示 / Ctrl+4 开关（Esc关闭）",
+            Text = BuildTrayTooltip(),
             ContextMenuStrip = menu,
         };
         // Left-click toggles the pinned main + left dock (equivalent to Ctrl+4);

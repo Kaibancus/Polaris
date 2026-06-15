@@ -262,7 +262,7 @@ public partial class RadialWindow
         var clockTime = new TextBlock
         {
             FontFamily = new FontFamily("Segoe UI Semibold, Microsoft YaHei UI, Segoe UI"),
-            FontSize = Math.Max(18, icon * 0.36),
+            FontSize = Math.Max(18, icon * 0.36) * Polaris.Services.FontScale.Current,
             FontWeight = FontWeights.SemiBold,
             TextWrapping = TextWrapping.NoWrap,
             // Frosted-glass glyphs: a soft, milky translucent fill (semi-opaque

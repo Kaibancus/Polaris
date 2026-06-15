@@ -116,7 +116,7 @@ public partial class RadialWindow
         // icon's visual tree and was scaled up by the 1.7x hover zoom, so a fixed
         // 11.5pt read as ~11.5*1.7. Replicate that here (the floating label is
         // NOT scaled) so the font doesn't look shrunken.
-        _glassHoverLabelText!.FontSize = 11.5 * HoverScaleConst;
+        _glassHoverLabelText!.FontSize = 11.5 * HoverScaleConst * Polaris.Services.FontScale.Current;
         _glassHoverLabelText.Text = ic.Entry.Name;
 
         // Position centred BELOW the hovered icon. The icon zooms to 1.7x about

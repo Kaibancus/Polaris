@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Interop;
@@ -21,6 +22,9 @@ public partial class SettingsWindow : Window
     /// <summary>Raised when the trigger key changes, so the hook can be reinstalled.</summary>
     public event Action? TriggerKeyChanged;
 
+    /// <summary>Raised when the toggle key changes, so the Ctrl+digit hook is reinstalled.</summary>
+    public event Action? ToggleKeyChanged;
+
     /// <summary>Selectable trigger keys: display name + virtual-key code.</summary>
     private static readonly (string Name, int Vk)[] TriggerKeyOptions =
     {
@@ -35,6 +39,10 @@ public partial class SettingsWindow : Window
         ("F10", 0x79),
         ("F12", 0x7B),
     };
+
+    /// <summary>Selectable toggle hotkeys: Ctrl+0 .. Ctrl+9 (digit virtual-key 0x30..0x39).</summary>
+    private static readonly (string Name, int Vk)[] ToggleKeyOptions =
+        Enumerable.Range(0, 10).Select(d => ($"Ctrl+{d}", 0x30 + d)).ToArray();
 
 
     public SettingsWindow(AppConfig config, Action persist)
@@ -91,6 +99,7 @@ public partial class SettingsWindow : Window
         var s = _config.Settings;
         TransparencySlider.Value = s.PanelTransparency;
         IconSizeSlider.Value = s.IconSize;
+        FontSizeSlider.Value = s.FontSizePercent;
         UpdateSliderLabels();
         StartupCheck.IsChecked = StartupManager.IsEnabled() || s.RunAtStartup;
 
@@ -102,6 +111,10 @@ public partial class SettingsWindow : Window
             TriggerKeyCombo.Items.Add(new ComboBoxItem { Content = opt.Name, Tag = opt.Vk });
         SelectTriggerKey(s.TriggerKey);
 
+        foreach (var opt in ToggleKeyOptions)
+            ToggleKeyCombo.Items.Add(new ComboBoxItem { Content = opt.Name, Tag = opt.Vk });
+        SelectToggleKey(s.ToggleKey);
+
         DockPositionCombo.Items.Add(new ComboBoxItem { Content = "左侧", Tag = DockSide.Left });
         DockPositionCombo.Items.Add(new ComboBoxItem { Content = "右侧", Tag = DockSide.Right });
         DockPositionCombo.Items.Add(new ComboBoxItem { Content = "顶部", Tag = DockSide.Top });
@@ -109,7 +122,25 @@ public partial class SettingsWindow : Window
         SelectDockPosition(s.DockPosition);
         MultiMonitorCheck.IsChecked = s.DockOnAllMonitors;
 
+        PerformanceModeCombo.Items.Add(new ComboBoxItem { Content = "低性能模式", Tag = PerformanceMode.Low });
+        PerformanceModeCombo.Items.Add(new ComboBoxItem { Content = "高性能模式", Tag = PerformanceMode.High });
+        SelectPerformanceMode(s.PerformanceMode);
+
         UpdateHint();
+    }
+
+    private void SelectPerformanceMode(PerformanceMode mode)
+    {
+        foreach (ComboBoxItem item in PerformanceModeCombo.Items)
+        {
+            if (item.Tag is PerformanceMode m && m == mode)
+            {
+                PerformanceModeCombo.SelectedItem = item;
+                return;
+            }
+        }
+        if (PerformanceModeCombo.Items.Count > 0)
+            PerformanceModeCombo.SelectedIndex = 0;
     }
 
     private void SelectDockPosition(DockSide side)
@@ -156,6 +187,29 @@ public partial class SettingsWindow : Window
             TriggerKeyCombo.SelectedIndex = 0;
     }
 
+    private void SelectToggleKey(int vk)
+    {
+        foreach (ComboBoxItem item in ToggleKeyCombo.Items)
+        {
+            if (item.Tag is int v && v == vk)
+            {
+                ToggleKeyCombo.SelectedItem = item;
+                return;
+            }
+        }
+        // Unknown stored key: default to Ctrl+4 (the fifth item, 0x34).
+        foreach (ComboBoxItem item in ToggleKeyCombo.Items)
+        {
+            if (item.Tag is int v && v == 0x34)
+            {
+                ToggleKeyCombo.SelectedItem = item;
+                return;
+            }
+        }
+        if (ToggleKeyCombo.Items.Count > 0)
+            ToggleKeyCombo.SelectedIndex = 0;
+    }
+
     private void UpdateHint()
     {
         if (TriggerKeyCombo.SelectedItem is ComboBoxItem item)
@@ -167,6 +221,8 @@ public partial class SettingsWindow : Window
         var s = _config.Settings;
         s.PanelTransparency = TransparencySlider.Value;
         s.IconSize = IconSizeSlider.Value;
+        s.FontSizePercent = FontSizeSlider.Value;
+        Services.FontScale.SetFromPercent(s.FontSizePercent);
         // Remember these values for the current theme so switching back restores them.
         ThemeRegistry.SaveAppearance(s);
         _persist();
@@ -187,6 +243,10 @@ public partial class SettingsWindow : Window
     /// as a percentage of its adjustable range.</summary>
     private void UpdateSliderLabels()
     {
+        // Slider value coercion during XAML parse can fire ValueChanged before
+        // every named element exists; bail until the tree is fully built.
+        if (!IsInitialized)
+            return;
         int transPct = (int)Math.Round(TransparencySlider.Value * 100.0);
         double iRange = IconSizeSlider.Maximum - IconSizeSlider.Minimum;
         int iconPct = iRange > 0
@@ -194,6 +254,7 @@ public partial class SettingsWindow : Window
             : 0;
         TransparencyLabel.Text = $"面板透明度 {transPct}%";
         IconSizeLabel.Text = $"图标大小 {iconPct}%";
+        FontSizeLabel.Text = $"字体大小 {(int)Math.Round(FontSizeSlider.Value)}%";
     }
 
     private void OnStartupChanged(object sender, RoutedEventArgs e)
@@ -219,6 +280,18 @@ public partial class SettingsWindow : Window
         }
     }
 
+    private void OnToggleKeyChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!_loaded)
+            return;
+        if (ToggleKeyCombo.SelectedItem is ComboBoxItem item && item.Tag is int vk)
+        {
+            _config.Settings.ToggleKey = vk;
+            _persist();
+            ToggleKeyChanged?.Invoke();
+        }
+    }
+
     private void OnClose(object sender, RoutedEventArgs e) => Close();
 
     private void OnDockPositionChanged(object sender, SelectionChangedEventArgs e)
@@ -240,6 +313,18 @@ public partial class SettingsWindow : Window
         _config.Settings.DockOnAllMonitors = MultiMonitorCheck.IsChecked == true;
         _persist();
         Changed?.Invoke();
+    }
+
+    private void OnPerformanceModeChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!_loaded)
+            return;
+        if (PerformanceModeCombo.SelectedItem is ComboBoxItem item && item.Tag is PerformanceMode mode)
+        {
+            _config.Settings.PerformanceMode = mode;
+            _persist();
+            Changed?.Invoke();
+        }
     }
 
     private void OnThemeChanged(object sender, SelectionChangedEventArgs e)

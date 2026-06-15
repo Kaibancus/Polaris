@@ -287,6 +287,16 @@
                     <Slider Grid.Column="1" x:Name="IconSizeSlider" Minimum="40" Maximum="96"
                             VerticalAlignment="Center" ValueChanged="OnSettingChanged"/>
                 </Grid>
+
+                <Grid Margin="0,8,0,2">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="150"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" x:Name="FontSizeLabel" Text="字体大小" Style="{DynamicResource RowLabel}"/>
+                    <Slider Grid.Column="1" x:Name="FontSizeSlider" Minimum="20" Maximum="100"
+                            VerticalAlignment="Center" ValueChanged="OnSettingChanged"/>
+                </Grid>
             </StackPanel>
         </Border>
 
@@ -300,8 +310,17 @@
                         <ColumnDefinition Width="150"/>
                         <ColumnDefinition Width="*"/>
                     </Grid.ColumnDefinitions>
-                    <TextBlock Grid.Column="0" Text="呼出按键" Style="{DynamicResource RowLabel}"/>
+                    <TextBlock Grid.Column="0" Text="按住触发按键" Style="{DynamicResource RowLabel}"/>
                     <ComboBox Grid.Column="1" x:Name="TriggerKeyCombo" SelectionChanged="OnTriggerKeyChanged"/>
+                </Grid>
+
+                <Grid Margin="0,4">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="150"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="切换触发按键" Style="{DynamicResource RowLabel}"/>
+                    <ComboBox Grid.Column="1" x:Name="ToggleKeyCombo" SelectionChanged="OnToggleKeyChanged"/>
                 </Grid>
 
                 <Grid Margin="0,8">
@@ -349,6 +368,15 @@
                     <Button Grid.Column="1" x:Name="CheckUpdateButton" Content="检查更新"
                             Style="{DynamicResource PillButton}" Height="38" Padding="36,0"
                             Click="OnCheckUpdate"/>
+                </Grid>
+
+                <Grid Margin="0,10,0,2">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="150"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="性能模式" Style="{DynamicResource RowLabel}"/>
+                    <ComboBox Grid.Column="1" x:Name="PerformanceModeCombo" SelectionChanged="OnPerformanceModeChanged"/>
                 </Grid>
             </StackPanel>
         </Border>

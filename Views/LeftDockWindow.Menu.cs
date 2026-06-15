@@ -116,7 +116,7 @@ public partial class LeftDockWindow
             {
                 Text = text,
                 FontFamily = new FontFamily("Microsoft YaHei UI, Segoe UI"),
-                FontSize = 13,
+                FontSize = 13 * Polaris.Services.FontScale.Current,
                 Foreground = new SolidColorBrush(textColor),
             };
             var row = new Border
