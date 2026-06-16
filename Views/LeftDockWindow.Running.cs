@@ -195,23 +195,7 @@ public partial class LeftDockWindow
                     attention[icon] = (false, 0);
                     continue;
                 }
-                bool flash = false;
-                int count = 0;
-                try
-                {
-                    var wins = WindowPreviewService.GetWindowsForEntry(
-                        icon.Entry.Path, icon.Entry.Arguments);
-                    foreach (var w in wins)
-                    {
-                        if (flashing.Contains(w.Handle))
-                            flash = true;
-                        int c = AttentionService.ParseUnread(w.Title);
-                        if (c > count)
-                            count = c;
-                    }
-                }
-                catch (System.Exception ex) { Polaris.Services.Log.Debug("SideDock", "attention badge computation failed", ex); }
-                attention[icon] = (flash, count);
+                attention[icon] = AttentionBadges.ForIcon(icon, flashing, "SideDock");
             }
 
             Dispatcher.BeginInvoke(() =>
