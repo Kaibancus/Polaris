@@ -25,4 +25,12 @@
     <Resource Include="Assets\app.ico" />
   </ItemGroup>
 
+  <!-- The unit-test project lives in Tests\ beneath this project root. The WPF
+       SDK globs **/*.cs, so exclude it here or the app would try to compile the
+       xUnit-dependent test sources. -->
+  <ItemGroup>
+    <Compile Remove="Tests\**\*.cs" />
+    <None Remove="Tests\**" />
+  </ItemGroup>
+
 </Project>
