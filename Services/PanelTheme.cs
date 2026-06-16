@@ -73,8 +73,8 @@ public sealed class SaturnRingTheme : PanelTheme
     public override bool IsSaturn => true;
     public override Brush WindowBackground => Brushes.Transparent;
     public override double DefaultTransparency => 0.05;
-    // 40% of the settings icon-size slider range [40, 96]: 40 + 0.40 * 56 = 62.4.
-    public override double DefaultIconSize => 62.4;
+    // 50% of the settings icon-size slider range [40, 96]: 40 + 0.50 * 56 = 68.
+    public override double DefaultIconSize => 68;
 
     public override IReadOnlyList<Point> ComputeSlots(
         int count, Point center, AppSettings settings, out double outerReach)
@@ -122,8 +122,8 @@ public sealed class LiquidGlassTheme : PanelTheme
     public override Brush WindowBackground => Brushes.Transparent;
     // Liquid-glass dock defaults to 80% transparency.
     public override double DefaultTransparency => 0.80;
-    // 40% of the settings icon-size slider range [40, 96]: 40 + 0.40 * 56 = 62.4.
-    public override double DefaultIconSize => 62.4;
+    // 50% of the settings icon-size slider range [40, 96]: 40 + 0.50 * 56 = 68.
+    public override double DefaultIconSize => 68;
 
     public override IReadOnlyList<Point> ComputeSlots(
         int count, Point center, AppSettings settings, out double outerReach)

@@ -479,7 +479,8 @@ public partial class RadialIcon : UserControl
             if (_dropletHover)
                 HoverGlow.BeginAnimation(OpacityProperty, new DoubleAnimation(1.0, Anim));
             else
-                BlueGlow.BeginAnimation(OpacityProperty, new DoubleAnimation(1.0, Anim));
+                // Glass theme: the magnify glow sits a touch dimmer than full.
+                BlueGlow.BeginAnimation(OpacityProperty, new DoubleAnimation(0.8, Anim));
         }
         // Glass theme shows a floating label (hosted unclipped by the host) so
         // the bottom row's name isn't cut by the scroll clip; suppress the

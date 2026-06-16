@@ -31,7 +31,9 @@ public partial class LeftDockWindow : Window
     // theme so the side dock's icon size, cell pitch and gaps are consistent no
     // matter which theme is active (previously Saturn used a larger 0.60 scale,
     // which made its side-dock spacing differ from the glass theme's).
-    private const double LeftDockScale = 0.50;
+    // Sized so the rendered glyph (GIcon = EffectiveIconSize * GlassIconScale)
+    // lands at exactly 0.70 * IconSize * _uiScale for both themes.
+    private const double LeftDockScale = 0.70 / GlassIconScale;
 
     private readonly AppConfig _config;
     private readonly Action _persist;

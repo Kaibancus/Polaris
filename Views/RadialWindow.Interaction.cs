@@ -144,7 +144,11 @@ public partial class RadialWindow
         base.OnMouseMove(e);
 
         if (_pressedIcon == null)
+        {
+            // No icon pressed: drive the High-mode cursor-distance magnification.
+            UpdateMagnifyFromPointer(e.GetPosition(PanelCanvas));
             return;
+        }
 
         Point p = e.GetPosition(PanelCanvas);
         if (!_dragging)
@@ -152,6 +156,9 @@ public partial class RadialWindow
             if ((p - _pressPoint).Length < DragThreshold)
                 return;
             _dragging = true;
+            // A drag has begun: settle the magnification wave so it doesn't fight
+            // the drag/reflow animations.
+            ResetMagnify();
             Panel.SetZIndex(_pressedIcon, 1000);
             // Stop any residual reflow animation on the dragged icon so it tracks
             // the cursor exactly.

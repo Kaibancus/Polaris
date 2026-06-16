@@ -43,7 +43,8 @@ public partial class RadialWindow : Window
     // Extra scale applied ONLY to the Saturn rings (disk) and centre planet —
     // NOT to the icons or the side dock — so the planet/disk can be enlarged
     // without changing icon size. 1.0 for non-Saturn themes.
-    private const double SaturnDiskEnlarge = 1.05;
+    // (1.05 base disk enlarge, then a further +10% on the whole Saturn dock.)
+    private const double SaturnDiskEnlarge = 1.3;
     private double _diskScale = 1.0;
 
     // Ring radii scaled by the current resolution + theme factors (plus the
@@ -809,6 +810,11 @@ public partial class RadialWindow : Window
 
         PanelCanvas.Children.Clear();
         _iconElements.Clear();
+        // Icons are about to be recreated, so drop any in-flight magnification
+        // wave state (its per-icon array indexes the old icon list).
+        StopMagTicking();
+        _magCur = Array.Empty<double>();
+        _magCursor = new Point(double.NaN, double.NaN);
         _hoverIcon = null;
         _glassHoverLabel = null;
         _glassHoverLabelText = null;
@@ -1068,6 +1074,7 @@ public partial class RadialWindow : Window
         // blue used by the glass theme.
         Color glow = _theme.IsSaturn ? Color.FromArgb(0x30, 0x00, 0x00, 0x00) : AccentColor;
         var icon = new RadialIcon(entry, bmp, iconSize, glow, LabelBrush, _theme.ShowGlassPanel);
+        icon.ExternalMagnify = MainMagnifyEnabled;   // High mode: dock drives a cursor-distance wave
         icon.PreviewMouseLeftButtonDown += Icon_PreviewMouseLeftButtonDown;
         icon.HoverStarted += OnIconHoverStarted;
         icon.HoverEnded += OnIconHoverEnded;

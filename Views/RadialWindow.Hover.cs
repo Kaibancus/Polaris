@@ -42,7 +42,10 @@ public partial class RadialWindow
         if (_theme.ShowGlassPanel)
             ShowGlassHoverLabel(ic, idx);
 
-        SpreadNeighbours(idx);
+        // High mode drives a continuous cursor-distance magnification wave which
+        // owns spacing/scale, so skip the binary "spread neighbours" shove.
+        if (!MainMagnifyEnabled)
+            SpreadNeighbours(idx);
     }
 
     private void OnIconHoverEnded(RadialIcon ic)
@@ -60,7 +63,10 @@ public partial class RadialWindow
         if (_hoverIcon == ic)
             _hoverIcon = null;
 
-        RestoreSlots();
+        // In High mode the magnification wave restores spacing as the cursor
+        // moves away, so the legacy slot-restore (which fights it) is skipped.
+        if (!MainMagnifyEnabled)
+            RestoreSlots();
     }
 
     /// <summary>Floating name label shown under a hovered glass icon, hosted on

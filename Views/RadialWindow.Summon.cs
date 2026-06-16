@@ -218,6 +218,7 @@ public partial class RadialWindow
         _runningTimer.Stop();
         _clockTimer.Stop();
         _notch?.HideNotch();
+        ResetMagnify();
 
         // Let the host retract the left-edge dock together with the main dock
         // (e.g. when an icon launch hides the panel).
