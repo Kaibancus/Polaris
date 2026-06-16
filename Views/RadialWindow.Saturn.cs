@@ -18,6 +18,15 @@ public partial class RadialWindow
     // lets WPF share a single immutable GPU resource.
     private static T Frozen<T>(T f) where T : Freezable { f.Freeze(); return f; }
 
+    /// <summary>High-performance mode renders the Saturn rings with extra,
+    /// purely-static (or group-rotated, GPU-composited) detail — finer band
+    /// striations, denser icy speckle, embedded ringlets, more shimmer/spokes,
+    /// more density clumps and a richer starfield. All of it builds at summon
+    /// time and adds ~no per-frame cost, so low-performance mode keeps the
+    /// lighter baseline.</summary>
+    private bool SaturnHiDetail =>
+        _config.Settings.PerformanceMode == Models.PerformanceMode.High;
+
     private void DrawBackingDisc()
     {
         double icon = EffectiveIconSize;
@@ -122,6 +131,16 @@ public partial class RadialWindow
         DrawRingZone(MapR(RCin), MapR(RCout), dimC, 0.18, 0.35, icon);     // C ring (crepe)
         DrawRingZone(MapR(RBin), MapR(RBout), paleB, 0.60, 0.66, icon);    // B ring (bright, widest)
 
+        if (SaturnHiDetail)
+        {
+            // (C) Embedded fine ringlets: bright/dark lanes that give the B ring
+            // a grooved, many-laned "record" structure (real Saturn has thousands).
+            double rbi = MapR(RBin), rbo = MapR(RBout), bw = rbo - rbi;
+            AddRinglet(rbi + bw * 0.22, Lighten(paleB, 0.24), 0.30, 1.1);   // bright lane
+            AddRinglet(rbi + bw * 0.46, Darken(paleB, 0.45), 0.26, 1.4);    // dark gap
+            AddRinglet(rbi + bw * 0.70, Lighten(paleB, 0.20), 0.28, 1.1);   // bright lane
+        }
+
         if (hasOuter)
         {
             // Outer group drawn into the outer rotating layer (slower revolution).
@@ -136,6 +155,17 @@ public partial class RadialWindow
             // A ring, split by the thin dark Encke gap.
             DrawRingZone(MapR(RAin), MapR(REncke - 0.004), tanA, 0.42, 0.50, icon);   // A inner
             DrawRingZone(MapR(REncke + 0.004), MapR(RAout), tanA, 0.44, 0.48, icon);  // A outer
+
+            if (SaturnHiDetail)
+            {
+                // (C) A faint dark ringlet inside the Cassini Division plus a
+                // couple of bright/dark lanes threading the A ring.
+                double rci = MapR(RCassIn), rco = MapR(RCassOut);
+                AddRinglet((rci + rco) / 2, Lighten(paleB, 0.20), 0.10, 1.0);   // Cassini ringlet
+                double rai = MapR(RAin), rao = MapR(RAout), aw = rao - rai;
+                AddRinglet(rai + aw * 0.34, Lighten(tanA, 0.20), 0.24, 1.1);    // bright lane
+                AddRinglet(rai + aw * 0.68, Darken(tanA, 0.42), 0.22, 1.3);     // dark lane
+            }
 
             // Roche Division then the narrow, bright F ringlet centred on rF.
             DrawRingZone(MapR(RRoche), MapR(RF) - icon * 0.06, faintD, 0.03, 0.05, icon); // Roche gap
@@ -173,6 +203,17 @@ public partial class RadialWindow
         AddRingBlob(rB, _innerOrbit, phaseDeg: 60, rx: rB * 0.16, ry: rB * 0.05,
                     color: Lighten(paleB, 0.30), alpha: 0.22);
 
+        if (SaturnHiDetail)
+        {
+            // (D) One extra, fainter shimmer arc + one extra spoke on the inner
+            // ring, at a different phase so the revolution reads richer.
+            AddShimmer(rB, _innerOrbit, paleB, phaseDeg: 168, intensity: 0.55, arcSpan: 0.24);
+            AddSpoke(rBin, rBout, _innerOrbit, phaseDeg: 140, widthDeg: 5.0, alpha: 0.18);
+            // (E) An extra density clump on the B ring.
+            AddRingBlob(rB, _innerOrbit, phaseDeg: 300, rx: rB * 0.12, ry: rB * 0.04,
+                        color: Lighten(paleB, 0.26), alpha: 0.16);
+        }
+
         if (hasOuter)
         {
             double rAmid = (MapR(RAin) + MapR(RAout)) / 2;
@@ -182,6 +223,17 @@ public partial class RadialWindow
             AddSpoke(rAin, rAout, _outerOrbit, phaseDeg: 80, widthDeg: 6.0, alpha: 0.20);
             AddRingBlob(rAmid, _outerOrbit, phaseDeg: 150, rx: rAmid * 0.13, ry: rAmid * 0.04,
                         color: Lighten(tanA, 0.30), alpha: 0.16);
+
+            if (SaturnHiDetail)
+            {
+                // (D) One extra, fainter shimmer arc + one extra spoke on the
+                // outer ring, phased apart from the primaries.
+                AddShimmer(rAmid, _outerOrbit, paleB, phaseDeg: 200, intensity: 0.45, arcSpan: 0.22);
+                AddSpoke(rAin, rAout, _outerOrbit, phaseDeg: 290, widthDeg: 5.0, alpha: 0.14);
+                // (E) An extra density clump on the A ring.
+                AddRingBlob(rAmid, _outerOrbit, phaseDeg: 40, rx: rAmid * 0.10, ry: rAmid * 0.035,
+                            color: Lighten(tanA, 0.26), alpha: 0.12);
+            }
 
             // --- Saturn's shepherd moons: five faint bright points embedded in
             // the rings, each at its real ring location, revolving with the
@@ -203,7 +255,8 @@ public partial class RadialWindow
     /// a few twinkling stars, so the planet reads as floating in space.</summary>
     private void DrawStarfield(double r)
     {
-        const int count = 64;
+        int count = SaturnHiDetail ? 104 : 64;
+        double twinkleGate = SaturnHiDetail ? 0.55 : 0.68;
         for (int i = 0; i < count; i++)
         {
             double ang = Hash01(i * 2.17) * Math.PI * 2;
@@ -223,7 +276,7 @@ public partial class RadialWindow
             Canvas.SetTop(star, py - sz / 2);
             PanelCanvas.Children.Add(star);
 
-            if (Hash01(i * 11.1) > 0.68)   // a subset twinkles
+            if (Hash01(i * 11.1) > twinkleGate)   // a subset twinkles
             {
                 double full = br / 255.0;
                 var tw = new DoubleAnimation(full * 0.3, full,
@@ -281,13 +334,13 @@ public partial class RadialWindow
 
         // Warm trailing half (just behind the crest).
         AddRevolvedEllipse(radius, orbit, phaseDeg - 6, rx * 0.9, ry,
-            WithAlpha(Lighten(WarmShift(baseColor), 0.45), 0.22 * intensity), null);
+            WithAlpha(Lighten(WarmShift(baseColor), 0.45), 0.18 * intensity), null);
         // Cool leading half (just ahead of the crest).
         AddRevolvedEllipse(radius, orbit, phaseDeg + 6, rx * 0.9, ry,
-            WithAlpha(Lighten(CoolShift(baseColor), 0.55), 0.25 * intensity), null);
+            WithAlpha(Lighten(CoolShift(baseColor), 0.55), 0.21 * intensity), null);
         // Bright central crest on top.
         AddRevolvedEllipse(radius, orbit, phaseDeg, rx, ry,
-            WithAlpha(Lighten(baseColor, 0.70), 0.42 * intensity), baseColor);
+            WithAlpha(Lighten(baseColor, 0.70), 0.35 * intensity), baseColor);
     }
 
     /// <summary>Creates a soft radial-gradient ellipse on the ring at the given phase,
@@ -447,7 +500,7 @@ public partial class RadialWindow
         if (rOuter <= rInner || rOuter <= 1)
             return;
 
-        double spacing = Math.Max(1.4, iconSize * 0.030);
+        double spacing = Math.Max(1.4, iconSize * (SaturnHiDetail ? 0.020 : 0.030));
         double thickness = spacing * 1.7;
         int n = Math.Max(1, (int)Math.Round((rOuter - rInner) / spacing));
 
@@ -504,7 +557,8 @@ public partial class RadialWindow
         // Sparse bright/dark speckle scattered through the zone to break up the
         // perfect concentric stroke pattern (icy-particle grain). Positions are
         // deterministic so the look is stable across rebuilds.
-        int speckles = (int)Math.Clamp((rOuter - rInner) * 0.52, 0, 34);
+        int speckles = (int)Math.Clamp((rOuter - rInner) * (SaturnHiDetail ? 0.85 : 0.52),
+                                       0, SaturnHiDetail ? 60 : 34);
         for (int i = 0; i < speckles; i++)
         {
             double rr = rInner + (rOuter - rInner) * Hash01(rInner * 7.1 + i * 2.3);
@@ -533,6 +587,26 @@ public partial class RadialWindow
     {
         double s = Math.Sin(x * 12.9898) * 43758.5453;
         return s - Math.Floor(s);
+    }
+
+    /// <summary>(High-detail only) Draws one thin, crisp ringlet — a single
+    /// foreshortened ellipse stroke at <paramref name="radius"/> in the current
+    /// ring band layer — used for the embedded bright/dark lanes that give the
+    /// rings their finely grooved structure. Builds once; revolves with its
+    /// group layer at no per-frame cost.</summary>
+    private void AddRinglet(double radius, Color color, double alpha, double thickness)
+    {
+        if (radius <= 1)
+            return;
+        var ringlet = new Ellipse
+        {
+            Width = radius * 2,
+            Height = radius * 2,
+            Stroke = Frozen(new SolidColorBrush(WithAlpha(color, alpha))),
+            StrokeThickness = thickness,
+            IsHitTestVisible = false,
+        };
+        StackCentered(ringlet, radius);
     }
 
     private static Color LerpColor(Color a, Color b, double t)

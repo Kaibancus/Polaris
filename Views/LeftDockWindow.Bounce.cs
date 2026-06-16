@@ -288,8 +288,8 @@ public partial class LeftDockWindow
         // Two populations: a dense rubble BELT straddling the interior edge, and a
         // sparser scattering of grains spread through the whole dock body so the
         // centre and the screen-edge side aren't bare.
-        int beltCount = Math.Max(16, (int)(span / (8.0 * s)));
-        int bodyCount = Math.Max(16, (int)(span / (8.0 * s)));
+        int beltCount = Math.Max(16, (int)(span / (6.0 * s)));
+        int bodyCount = Math.Max(20, (int)(span / (6.0 * s)));
 
         for (int i = 0; i < beltCount; i++)
         {

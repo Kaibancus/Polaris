@@ -384,6 +384,10 @@ public partial class RadialWindow : Window
     // Whether the window has been realised (shown once) at startup.
     private bool _realized;
 
+    // Phone-"notch"-style date/time panel shown at the screen top (or bottom when
+    // the side dock is on the top edge) while the Saturn dock is summoned.
+    private NotchClockWindow? _notch;
+
     private Point _center;
     private double _outerRadius;
     private readonly List<Point> _slotPositions = new();
@@ -547,6 +551,21 @@ public partial class RadialWindow : Window
 
     /// <summary>Updates the glass dock's clock labels to the current local time,
     /// appending the key-free weather + city after the time when available.</summary>
+    /// <summary>Shows the phone-notch date/time panel when the Saturn theme is
+    /// active (hides it for any other theme). It sits on the active monitor's top
+    /// edge, or its bottom edge when the side dock is anchored to the top.</summary>
+    private void ShowNotchIfSaturn()
+    {
+        if (!_theme.IsSaturn)
+        {
+            _notch?.HideNotch();
+            return;
+        }
+        _notch ??= new NotchClockWindow { Owner = this };
+        bool atBottom = _config.Settings.DockPosition == Models.DockSide.Top;
+        _notch.ShowNotch(atBottom);
+    }
+
     private void UpdateGlassClock()
     {
         if (_glassClockTime == null && _glassClockDate == null)

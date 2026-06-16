@@ -95,6 +95,7 @@ public partial class RadialWindow
         Activate();
         _runningTimer.Start();
         UpdateGlassClock();
+        ShowNotchIfSaturn();
         _clockTimer.Start();
         _ = _weather.RefreshAsync();   // fetch weather promptly on show
 
@@ -216,6 +217,7 @@ public partial class RadialWindow
         CancelDrag();
         _runningTimer.Stop();
         _clockTimer.Stop();
+        _notch?.HideNotch();
 
         // Let the host retract the left-edge dock together with the main dock
         // (e.g. when an icon launch hides the panel).

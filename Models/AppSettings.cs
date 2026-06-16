@@ -107,9 +107,10 @@ public sealed class AppSettings
     /// original sizes (1.0×). Applied across all dock typography. Default 50.</summary>
     public double FontSizePercent { get; set; } = 50;
 
-    /// <summary>Frame-rate / animation profile. Low (default) minimises resource
-    /// use; High follows the display refresh rate for the smoothest motion.</summary>
-    public PerformanceMode PerformanceMode { get; set; } = PerformanceMode.Low;
+    /// <summary>Frame-rate / animation profile. High (default) follows the
+    /// display refresh rate for the smoothest motion; Low minimises resource
+    /// use by throttling the always-on background loops.</summary>
+    public PerformanceMode PerformanceMode { get; set; } = PerformanceMode.High;
 }
 
 /// <summary>Remembered per-theme appearance values.</summary>
