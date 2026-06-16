@@ -106,7 +106,7 @@ public partial class LeftDockWindow
                         if (!string.IsNullOrWhiteSpace(fn))
                             excludeFileNames.Add(fn);
                     }
-                    catch { /* ignore */ }
+                    catch (System.Exception ex) { Polaris.Services.Log.Debug("SideDock", "self-exe filename resolve failed", ex); }
                     AddLauncherHelpers(exe);
                 }
             }
@@ -120,7 +120,7 @@ public partial class LeftDockWindow
                     if (!string.IsNullOrWhiteSpace(fn))
                         excludeFileNames.Add(fn);
                 }
-                catch { /* ignore */ }
+                catch (System.Exception ex) { Polaris.Services.Log.Debug("SideDock", "pinned-entry filename resolve failed", ex); }
                 AddLauncherHelpers(a.Path);
             }
         }
@@ -178,7 +178,7 @@ public partial class LeftDockWindow
                     if (!string.IsNullOrWhiteSpace(fn) && excludeFileNames.Contains(fn))
                         continue;
                 }
-                catch { /* ignore */ }
+                catch (System.Exception ex) { Polaris.Services.Log.Debug("SideDock", "running-app exclude filter failed", ex); }
                 filtered.Add(ta);
             }
 
@@ -210,7 +210,7 @@ public partial class LeftDockWindow
                             count = c;
                     }
                 }
-                catch { /* best effort */ }
+                catch (System.Exception ex) { Polaris.Services.Log.Debug("SideDock", "attention badge computation failed", ex); }
                 attention[icon] = (flash, count);
             }
 
@@ -347,7 +347,7 @@ public partial class LeftDockWindow
         if (!string.IsNullOrEmpty(exe) && !_runIconCache.TryGetValue(exe, out _))
         {
             try { _runIconCache[exe] = IconExtractor.GetIcon(exe); }
-            catch { /* fall through to no icon */ }
+            catch (System.Exception ex) { Polaris.Services.Log.Debug("SideDock", "self run-tile icon extraction failed", ex); }
         }
         _runIconCache.TryGetValue(exe, out var bmp);
 

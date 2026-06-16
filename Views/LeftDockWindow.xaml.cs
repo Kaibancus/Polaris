@@ -299,7 +299,7 @@ public partial class LeftDockWindow : Window
                             count = c;
                     }
                 }
-                catch { /* best effort */ }
+                catch (System.Exception ex) { Polaris.Services.Log.Debug("SideDock", "attention badge computation failed", ex); }
                 attention[icon] = (flash, count);
             }
             Dispatcher.BeginInvoke(() =>

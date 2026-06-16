@@ -71,7 +71,7 @@ public static class FpsProfiler
         string stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture);
         _csvPath = Path.Combine(dir, $"fps-samples-{stamp}.csv");
         _summaryPath = Path.Combine(dir, $"fps-summary-{stamp}.txt");
-        try { File.WriteAllText(_csvPath, "elapsed_s,scene,fps,worst_frame_ms\n"); } catch { /* best effort */ }
+        try { File.WriteAllText(_csvPath, "elapsed_s,scene,fps,worst_frame_ms\n"); } catch (System.Exception ex) { Log.Debug("FpsProfiler", "CSV header write failed", ex); }
 
         _wall.Restart();
         CompositionTarget.Rendering += OnRendering;
@@ -182,7 +182,7 @@ public static class FpsProfiler
                 File.AppendAllText(_csvPath, sb.ToString());
             }
         }
-        catch { /* best effort */ }
+        catch (System.Exception ex) { Log.Debug("FpsProfiler", "CSV flush failed", ex); }
 
         try
         {
@@ -220,6 +220,6 @@ public static class FpsProfiler
             }
             File.WriteAllText(_summaryPath, sb.ToString());
         }
-        catch { /* best effort */ }
+        catch (System.Exception ex) { Log.Debug("FpsProfiler", "summary write failed", ex); }
     }
 }

@@ -295,7 +295,7 @@ public static class RunningAppTracker
                 if (string.Equals(Path.GetFileName(p), name, StringComparison.OrdinalIgnoreCase))
                     return true;
             }
-            catch { /* ignore a malformed path */ }
+            catch (System.Exception ex) { Log.Debug("RunningApps", "malformed path skipped", ex); }
         }
         return false;
     }

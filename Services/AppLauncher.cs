@@ -51,7 +51,7 @@ public static class AppLauncher
                 if (RunningAppTracker.ActivateExisting(entry.Path, entry.Arguments))
                     return;
             }
-            catch { /* fall through to a normal launch */ }
+            catch (System.Exception ex) { Log.Debug("AppLauncher", "activate existing window failed; launching fresh", ex); }
         }
 
         LaunchExecutable(entry);
@@ -70,7 +70,7 @@ public static class AppLauncher
                 if (RunningAppTracker.ActivateExisting(entry.Path, entry.Arguments))
                     return;
             }
-            catch { /* fall through to a fresh launch */ }
+            catch (System.Exception ex) { Log.Debug("AppLauncher", "activate existing window failed; opening fresh", ex); }
         }
 
         // Non-packaged AppsFolder launchers (iQiyi, VS Code…) resolve to a real

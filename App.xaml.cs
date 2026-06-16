@@ -649,7 +649,7 @@ public partial class App : Application
                     }
                 }
             }
-            catch { }
+            catch (Exception ex) { Log.Debug("TaskbarGuard", "cursor clip/release iteration failed", ex); }
             Thread.Sleep(10);
         }
         Release();
@@ -662,7 +662,11 @@ public partial class App : Application
         IntPtr hMod = GetModuleHandle(null);
         _taskbarGuardHook = SetWindowsHookEx(WH_MOUSE_LL, _taskbarGuardProc, hMod, 0);
         if (_taskbarGuardHook == IntPtr.Zero)
+        {
+            Log.Warn("TaskbarGuard", "SetWindowsHookEx failed; auto-hide guard inactive. " +
+                "Win32 error " + Marshal.GetLastWin32Error());
             return;
+        }
 
         // Pump this thread's message queue so the hook callback is dispatched
         // independently of the WPF UI thread. WM_QUIT (posted on shutdown) ends it.
@@ -721,7 +725,7 @@ public partial class App : Application
                     }
                 }
             }
-            catch { }
+            catch (Exception ex) { Log.Debug("TaskbarGuard", "mouse hook handler failed", ex); }
         }
         return CallNextHookEx(IntPtr.Zero, nCode, wParam, lParam);
     }
@@ -760,7 +764,7 @@ public partial class App : Application
             EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, Collect, IntPtr.Zero);
             _monitorRects = rects.ToArray();
         }
-        catch { }
+        catch (Exception ex) { Log.Debug("Monitors", "monitor snapshot enumeration failed", ex); }
     }
 
     /// <summary>True when another display sits directly below <paramref name="m"/>'s
@@ -1006,7 +1010,7 @@ public partial class App : Application
                 (s == QUNS.RUNNING_D3D_FULL_SCREEN || s == QUNS.PRESENTATION_MODE))
                 return true;
         }
-        catch { /* fall through to the geometry test */ }
+        catch (Exception ex) { Log.Debug("Fullscreen", "shell notification-state query failed; using geometry test", ex); }
 
         // 2. "Rude window" geometry test — a BORDERLESS window that covers the
         // whole monitor. The style test (no caption, no sizing frame) is essential:
@@ -1251,7 +1255,7 @@ public partial class App : Application
         {
             Forms.MessageBox.Show(
                 "Polaris 遇到一个错误，但仍在运行。\n" +
-                "详情已记录到日志：\n" + LogPath + "\n\n" + ex.Message,
+                "详情已记录到日志：\n" + Log.Path + "\n\n" + ex.Message,
                 "Polaris",
                 Forms.MessageBoxButtons.OK,
                 Forms.MessageBoxIcon.Warning);
@@ -1262,23 +1266,6 @@ public partial class App : Application
         }
     }
 
-    private static readonly string LogPath = System.IO.Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-        "Polaris", "errors.log");
-
     private static void LogException(string source, Exception ex)
-    {
-        try
-        {
-            var dir = System.IO.Path.GetDirectoryName(LogPath);
-            if (!string.IsNullOrEmpty(dir))
-                System.IO.Directory.CreateDirectory(dir);
-            System.IO.File.AppendAllText(LogPath,
-                $"[{DateTime.Now:o}] ({source}) {ex}\n\n");
-        }
-        catch
-        {
-            // Logging must never throw.
-        }
-    }
+        => Log.Error(source, "unhandled exception", ex);
 }

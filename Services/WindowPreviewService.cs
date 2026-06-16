@@ -1226,7 +1226,7 @@ public static class WindowPreviewService
                         return false;   // stop enumerating
                     }
                 }
-                catch { /* ignore a malformed path */ }
+                catch (System.Exception ex) { Log.Debug("WindowPreview", "malformed path skipped", ex); }
                 return true;
             }, IntPtr.Zero);
         }
@@ -1365,7 +1365,7 @@ public static class WindowPreviewService
                 // Prefer exact module-path match; fall back to name-only when the
                 // module path is inaccessible (elevated / bitness mismatch).
                 string? modulePath = null;
-                try { modulePath = p.MainModule?.FileName; } catch { /* denied */ }
+                try { modulePath = p.MainModule?.FileName; } catch (System.Exception ex) { Log.Debug("WindowPreview", "module path inaccessible (elevated/bitness)", ex); }
 
                 if (modulePath == null ||
                     string.Equals(Path.GetFullPath(modulePath), fullTarget,

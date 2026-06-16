@@ -15,7 +15,7 @@ public static class ColorUtil
                 ColorConverter.ConvertFromString(hex) is Color c)
                 return c;
         }
-        catch { /* ignore */ }
+        catch (System.Exception ex) { Log.Debug("ColorUtil", "unparseable colour '" + hex + "'", ex); }
         return fallback;
     }
 }

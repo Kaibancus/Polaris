@@ -125,7 +125,7 @@ public partial class RadialWindow : Window
                     }
                 }
             }
-            catch { /* fall through */ }
+            catch (System.Exception ex) { Polaris.Services.Log.Debug("MainDock", "border-thickness probe failed", ex); }
             return 0.0;
         }
     }
@@ -539,7 +539,7 @@ public partial class RadialWindow : Window
                             count = c;
                     }
                 }
-                catch { /* best effort */ }
+                catch (System.Exception ex) { Polaris.Services.Log.Debug("MainDock", "attention badge computation failed", ex); }
                 attention[icon] = (flash, count);
             }
             Dispatcher.BeginInvoke(() =>
@@ -1024,7 +1024,7 @@ public partial class RadialWindow : Window
                             count = c;
                     }
                 }
-                catch { /* best effort: no badge for this icon */ }
+                catch (System.Exception ex) { Polaris.Services.Log.Debug("MainDock", "attention badge computation failed (no badge for icon)", ex); }
                 attention[icon] = (flash, count);
             }
 

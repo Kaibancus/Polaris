@@ -163,7 +163,7 @@ public static class AttentionService
             _src.RemoveHook(WndProc);
             _src.Dispose();
         }
-        catch { /* shutting down */ }
+        catch (System.Exception ex) { Log.Debug("Attention", "shell-hook deregister during teardown failed", ex); }
         _src = null;
         _started = false;
     }
