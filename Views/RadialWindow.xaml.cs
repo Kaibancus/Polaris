@@ -376,6 +376,9 @@ public partial class RadialWindow : Window
     private readonly System.Windows.Threading.DispatcherTimer _clockTimer;
     // Key-free weather + city shown after the clock; refreshes itself every ~20 min.
     private readonly Polaris.Services.WeatherService _weather = new();
+    // Cached once instead of resolving the culture every clock tick (1/sec).
+    private static readonly System.Globalization.CultureInfo ClockCulture =
+        System.Globalization.CultureInfo.GetCultureInfo("zh-CN");
 
     // Set while showing the window so the SizeChanged fired by Show() does not
     // trigger a premature (wrong-centre) Rebuild that would flash the ring.
@@ -578,7 +581,7 @@ public partial class RadialWindow : Window
         if (_glassClockTime == null && _glassClockDate == null)
             return;
         var now = DateTime.Now;
-        var zh = System.Globalization.CultureInfo.GetCultureInfo("zh-CN");
+        var zh = ClockCulture;
         if (_glassClockTime != null)
         {
             string text = now.ToString("yyyy年M月d日  ddd   H:mm", zh);

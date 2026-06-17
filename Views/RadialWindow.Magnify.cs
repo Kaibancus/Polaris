@@ -23,6 +23,14 @@ public partial class RadialWindow
     private double[] _magCur = Array.Empty<double>();
     private double[] _magOffX = Array.Empty<double>();
     private double[] _magOffY = Array.Empty<double>();
+    // The scale/offsets last PUSHED to each icon, and its last applied z-index.
+    // We only call SetMagnify / SetZIndex when a value has moved past a small
+    // epsilon, so icons sitting at rest (far from the cursor) cost nothing per
+    // frame instead of re-writing four transform properties + a z-order sort.
+    private double[] _magAppScale = Array.Empty<double>();
+    private double[] _magAppX = Array.Empty<double>();
+    private double[] _magAppY = Array.Empty<double>();
+    private int[] _magAppZ = Array.Empty<int>();
     private bool _magTicking;
     private TimeSpan _magLastTick;
     // Cursor in CONTENT coordinates while the wave is active; NaN eases to rest.
@@ -94,6 +102,14 @@ public partial class RadialWindow
             Array.Clear(_magOffX);
         if (_magOffY.Length != 0)
             Array.Clear(_magOffY);
+        if (_magAppScale.Length != 0)
+            Array.Clear(_magAppScale);
+        if (_magAppX.Length != 0)
+            Array.Clear(_magAppX);
+        if (_magAppY.Length != 0)
+            Array.Clear(_magAppY);
+        if (_magAppZ.Length != 0)
+            Array.Clear(_magAppZ);
         StopMagTicking();
     }
 
@@ -145,6 +161,21 @@ public partial class RadialWindow
                 _magCur[i] = i < old.Length ? old[i] : 1.0;
                 _magOffX[i] = i < ox.Length ? ox[i] : 0.0;
                 _magOffY[i] = i < oy.Length ? oy[i] : 0.0;
+            }
+            // Resize the "last applied" trackers; seed to impossible sentinels
+            // (NOT NaN — any comparison with NaN is false, which would suppress
+            // the first push) so the first tick after a resize always pushes
+            // each icon once.
+            _magAppScale = new double[n];
+            _magAppX = new double[n];
+            _magAppY = new double[n];
+            _magAppZ = new int[n];
+            for (int i = 0; i < n; i++)
+            {
+                _magAppScale[i] = -1.0;
+                _magAppX[i] = double.MinValue;
+                _magAppY[i] = double.MinValue;
+                _magAppZ[i] = int.MinValue;
             }
         }
 
@@ -233,8 +264,24 @@ public partial class RadialWindow
             maxDelta = Math.Max(maxDelta, Math.Abs(tx - _magOffX[i]));
             maxDelta = Math.Max(maxDelta, Math.Abs(ty - _magOffY[i]));
 
-            _iconElements[i].SetMagnify(cur, _magOffX[i], _magOffY[i]);
-            Panel.SetZIndex(_iconElements[i], cur > 1.001 ? 3000 + (int)(cur * 1000) : 0);
+            // Only touch the icon when something actually moved past a small
+            // epsilon: icons resting at 1.0x far from the cursor are left alone
+            // instead of re-writing four transform properties every frame.
+            if (Math.Abs(cur - _magAppScale[i]) > 1e-4 ||
+                Math.Abs(_magOffX[i] - _magAppX[i]) > 1e-3 ||
+                Math.Abs(_magOffY[i] - _magAppY[i]) > 1e-3)
+            {
+                _iconElements[i].SetMagnify(cur, _magOffX[i], _magOffY[i]);
+                _magAppScale[i] = cur;
+                _magAppX[i] = _magOffX[i];
+                _magAppY[i] = _magOffY[i];
+            }
+            int z = cur > 1.001 ? 3000 + (int)(cur * 1000) : 0;
+            if (z != _magAppZ[i])
+            {
+                Panel.SetZIndex(_iconElements[i], z);
+                _magAppZ[i] = z;
+            }
         }
 
         if (!active && maxDelta < 0.0015)
@@ -247,7 +294,11 @@ public partial class RadialWindow
                 _magCur[i] = 1.0;
                 _magOffX[i] = 0.0;
                 _magOffY[i] = 0.0;
+                _magAppScale[i] = 1.0;
+                _magAppX[i] = 0.0;
+                _magAppY[i] = 0.0;
                 Panel.SetZIndex(_iconElements[i], 0);
+                _magAppZ[i] = 0;
             }
             StopMagTicking();
         }

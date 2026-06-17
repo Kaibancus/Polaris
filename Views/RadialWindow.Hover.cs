@@ -113,6 +113,12 @@ public partial class RadialWindow
                 IsHitTestVisible = false,
                 Child = _glassHoverLabelText,
                 Opacity = 0,
+                // The label fades in/out via an Opacity animation; cache the
+                // text + drop-shadow as one bitmap so each fade frame just blits
+                // a texture instead of re-rasterizing the blurred glyphs. The
+                // cache rebuilds once per hover when the name/font changes — a
+                // negligible cost next to the per-frame fade recomposite.
+                CacheMode = new BitmapCache(2.0),
             };
             Panel.SetZIndex(_glassHoverLabel, 4000);
             PanelCanvas.Children.Add(_glassHoverLabel);

@@ -445,18 +445,32 @@ public partial class RadialWindow
             _taskbarIconCache.Remove(key);
     }
 
+    // Frozen, shared plate brushes so every taskbar tile reuses one immutable
+    // brush per theme instead of allocating fresh SolidColorBrushes on rebuild.
+    private static readonly SolidColorBrush GlassTileIdle =
+        Frozen(Color.FromArgb(0x08, 0xFF, 0xFF, 0xFF));
+    private static readonly SolidColorBrush GlassTileHover =
+        Frozen(Color.FromArgb(0x22, 0xFF, 0xFF, 0xFF));
+    private static readonly SolidColorBrush SaturnTileIdle =
+        Frozen(Color.FromArgb(0x33, 0x10, 0x12, 0x18));
+    private static readonly SolidColorBrush SaturnTileHover =
+        Frozen(Color.FromArgb(0x66, 0x2A, 0x2E, 0x3A));
+
+    private static SolidColorBrush Frozen(Color c)
+    {
+        var b = new SolidColorBrush(c);
+        b.Freeze();
+        return b;
+    }
+
     /// <summary>Idle/hover plate brushes and corner radius shared by every
     /// taskbar tile. Saturn uses a dark plate; glass matches the pinned grid
     /// icons' liquid-glass background.</summary>
     private (SolidColorBrush idle, SolidColorBrush hover, double radius) TaskbarTileChrome(double size)
     {
         bool glass = _theme.ShowGlassPanel;
-        var idle = glass
-            ? new SolidColorBrush(Color.FromArgb(0x08, 0xFF, 0xFF, 0xFF))
-            : new SolidColorBrush(Color.FromArgb(0x33, 0x10, 0x12, 0x18));
-        var hover = glass
-            ? new SolidColorBrush(Color.FromArgb(0x22, 0xFF, 0xFF, 0xFF))
-            : new SolidColorBrush(Color.FromArgb(0x66, 0x2A, 0x2E, 0x3A));
+        var idle = glass ? GlassTileIdle : SaturnTileIdle;
+        var hover = glass ? GlassTileHover : SaturnTileHover;
         double radius = glass ? 12 : size * 0.22;
         return (idle, hover, radius);
     }
