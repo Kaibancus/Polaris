@@ -41,7 +41,7 @@ public static class DockSync
         string.Equals(a.Path, b.Path, StringComparison.OrdinalIgnoreCase) &&
         string.Equals(a.Arguments ?? "", b.Arguments ?? "", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>Rebuilds <see cref="AppConfig.LeftDockApps"/> so it mirrors the
+    /// <summary>Rebuilds <see cref="AppConfig.SideDockApps"/> so it mirrors the
     /// first <see cref="ResidentCount(AppConfig)"/> entries of
     /// <see cref="AppConfig.Apps"/>.
     /// Returns true when the left list actually changed.</summary>
@@ -52,11 +52,11 @@ public static class DockSync
         for (int i = 0; i < n; i++)
             resident.Add(cfg.Apps[i]);
 
-        if (resident.Count == cfg.LeftDockApps.Count)
+        if (resident.Count == cfg.SideDockApps.Count)
         {
             bool same = true;
             for (int i = 0; i < resident.Count; i++)
-                if (!ReferenceEquals(resident[i], cfg.LeftDockApps[i]))
+                if (!ReferenceEquals(resident[i], cfg.SideDockApps[i]))
                 {
                     same = false;
                     break;
@@ -65,7 +65,7 @@ public static class DockSync
                 return false;
         }
 
-        cfg.LeftDockApps = resident;
+        cfg.SideDockApps = resident;
         return true;
     }
 

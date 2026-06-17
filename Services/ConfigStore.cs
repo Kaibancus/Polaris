@@ -55,7 +55,7 @@ public static class ConfigStore
 
             cfg.Settings ??= new AppSettings();
             cfg.Apps ??= new();
-            cfg.LeftDockApps ??= new();
+            cfg.SideDockApps ??= new();
             MigrateAppsFolderPaths(cfg);
             config = cfg;
             return true;
@@ -92,7 +92,7 @@ public static class ConfigStore
             }
         }
         Fix(cfg.Apps);
-        Fix(cfg.LeftDockApps);
+        Fix(cfg.SideDockApps);
     }
 
     public static void Save(AppConfig config)

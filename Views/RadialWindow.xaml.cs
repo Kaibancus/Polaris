@@ -445,7 +445,7 @@ public partial class RadialWindow : Window
     /// the left-edge dock, this is invoked with the screen-space drop point and
     /// the entry. Returns true when the entry was pinned to the left dock (the
     /// main-dock entry is then left in place).</summary>
-    public Func<Point, AppEntry, bool>? DropToLeftDock;
+    public Func<Point, AppEntry, bool>? DropToSideDock;
 
     /// <summary>Set by the host: returns the height (DIP, measured up from the
     /// bottom screen edge) that the side dock occupies when it is docked at the

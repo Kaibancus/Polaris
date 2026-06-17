@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Text.Json.Serialization;
 
 namespace Polaris.Models;
 
@@ -13,10 +14,13 @@ public sealed class AppConfig
     public List<AppEntry> Apps { get; set; } = new();
 
     /// <summary>
-    /// Ordered list of apps pinned to the left-edge vertical dock. Every entry
-    /// here is also present in <see cref="Apps"/> (adding to the left dock always
-    /// adds to the main dock); removing from the left dock leaves the main dock
+    /// Ordered list of apps pinned to the side (edge) vertical dock. Every entry
+    /// here is also present in <see cref="Apps"/> (adding to the side dock always
+    /// adds to the main dock); removing from the side dock leaves the main dock
     /// entry intact.
     /// </summary>
-    public List<AppEntry> LeftDockApps { get; set; } = new();
+    /// <remarks>The JSON key stays "LeftDockApps" (the historical name) so configs
+    /// written by older versions still load after the SideDock rename.</remarks>
+    [JsonPropertyName("LeftDockApps")]
+    public List<AppEntry> SideDockApps { get; set; } = new();
 }

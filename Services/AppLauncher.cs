@@ -12,7 +12,7 @@ namespace Polaris.Services;
 /// activate decision tree — File Explorer, shell-namespace objects, packaged
 /// (UWP) apps, non-packaged AppsFolder launchers (iQiyi, VS Code…) and ordinary
 /// executables — can never drift between them. Historically this logic was
-/// duplicated in RadialWindow and LeftDockWindow, and every fix had to be made
+/// duplicated in RadialWindow and SideDockWindow, and every fix had to be made
 /// twice (and was occasionally missed); centralizing it removes that whole class
 /// of bug.
 /// </summary>

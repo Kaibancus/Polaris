@@ -106,7 +106,7 @@ public partial class App : Application
     // poll must NOT re-summon the side dock (which would flash on screen).
     private bool _openingSettings;
     private Forms.NotifyIcon? _tray;
-    private LeftDockWindow? _leftDock;
+    private SideDockWindow? _sideDock;
     private DispatcherTimer? _edgePollTimer;
 
     // Masks the system auto-hide taskbar's reveal trigger under the bottom
@@ -198,14 +198,14 @@ public partial class App : Application
         // The left dock mirrors the main dock's resident region (top two rows),
         // so seed that mirror once before the docks build.
         DockSync.MirrorResidentToLeft(_config);
-        _leftDock = new LeftDockWindow(_config, Persist);
-        _leftDock.MainDockChanged += () => _panel?.RefreshFromConfig();
+        _sideDock = new SideDockWindow(_config, Persist);
+        _sideDock.MainDockChanged += () => _panel?.RefreshFromConfig();
         // Clicking the Polaris tile in the left dock's running strip toggles the
         // pinned docks (equivalent to Ctrl+4).
-        _leftDock.ToggleDocks = TogglePinnedDock;
-        _leftDock.Realize();
+        _sideDock.ToggleDocks = TogglePinnedDock;
+        _sideDock.Realize();
         // Let the main dock hand an icon to the left dock when dragged onto it.
-        _panel.DropToLeftDock = TryDropToLeftDock;
+        _panel.DropToSideDock = TryDropToSideDock;
         // Lift the liquid-glass main dock clear of the side dock when the latter
         // is docked at the bottom (so they never overlap).
         _panel.BottomDockReserve = GetBottomDockReserve;
@@ -213,17 +213,17 @@ public partial class App : Application
         _panel.AppsChanged = () =>
         {
             if (DockSync.MirrorResidentToLeft(_config))
-                _leftDock?.RefreshFromConfig();
+                _sideDock?.RefreshFromConfig();
         };
         // Keep the left dock visible while a glass icon is being dragged.
-        _panel.GlassDragActiveChanged = active => _leftDock?.SetDragActive(active);
+        _panel.GlassDragActiveChanged = active => _sideDock?.SetDragActive(active);
         // Retract the left dock together with the main dock (e.g. when launching
         // an app from the main dock hides the panel). Clears every show reason —
         // including the Ctrl+4 "pinned" reason — so a launch always retracts both.
         _panel.PanelDismissed += () =>
         {
             _clickAway.Active = false;   // central disarm: covers every hide path
-            _leftDock?.HideAll();
+            _sideDock?.HideAll();
         };
         StartEdgePoll();
         _taskbarGuard.Start();
@@ -326,7 +326,7 @@ public partial class App : Application
             {
                 _clickAway.Active = false;
                 _panel.HidePanel();
-                _leftDock?.SetPinnedShown(false);
+                _sideDock?.SetPinnedShown(false);
             }
         };
         _escHook.Start();
@@ -360,7 +360,7 @@ public partial class App : Application
         {
             _clickAway.Active = false;
             _panel.HidePanel();
-            _leftDock?.SetPinnedShown(false);
+            _sideDock?.SetPinnedShown(false);
         }
         else
         {
@@ -371,7 +371,7 @@ public partial class App : Application
             // is enabled) so both docks appear where the user invoked them.
             SetActiveMonitorFromCursor();
             _panel?.ShowPinned();
-            _leftDock?.SetPinnedShown(true);   // summon the left dock together
+            _sideDock?.SetPinnedShown(true);   // summon the left dock together
             _clickAway.Active = true;          // arm click-away dismiss
         }
     }
@@ -383,7 +383,7 @@ public partial class App : Application
         CloseSettingsIfOpen();
         SetActiveMonitorFromCursor();
         _panel?.ShowPanel();
-        _leftDock?.SetMainShown(true);   // the left dock summons together with the main dock
+        _sideDock?.SetMainShown(true);   // the left dock summons together with the main dock
         _clickAway.Active = true;        // arm click-away dismiss
     }
 
@@ -419,7 +419,7 @@ public partial class App : Application
         // Releasing the hotkey drops the "shown by main" reason; the left dock
         // stays only if the mouse is currently over its edge trigger (handled by
         // the edge poll, which sets the edge-shown reason).
-        _leftDock?.SetMainShown(false);
+        _sideDock?.SetMainShown(false);
     }
 
     /// <summary>Polls the cursor position so the left dock appears when the mouse
@@ -430,7 +430,7 @@ public partial class App : Application
         _edgePollTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
         _edgePollTimer.Tick += (_, _) =>
         {
-            if (_leftDock == null)
+            if (_sideDock == null)
                 return;
             // Refresh the cached state the mouse-guard hook reads (one cheap shell
             // query per tick, off the hot mouse path): only mask the taskbar when
@@ -441,7 +441,7 @@ public partial class App : Application
                 bool autoHide =
                     ((long)SHAppBarMessage(ABM_GETSTATE, ref abd) & ABS_AUTOHIDE) != 0;
                 _taskbarGuard.Active = autoHide
-                    && _leftDock.DockSidePosition == DockSide.Bottom;
+                    && _sideDock.DockSidePosition == DockSide.Bottom;
             }
             catch { _taskbarGuard.Active = false; }
             // Suppress the left-edge auto-summon while the settings window is
@@ -449,14 +449,14 @@ public partial class App : Application
             // over it or flash during the dock fade-out.
             if (_settings != null || _openingSettings)
             {
-                _leftDock.SetEdgeShown(false);
+                _sideDock.SetEdgeShown(false);
                 return;
             }
             // Don't let the mouse summon the dock over a full-screen / borderless
             // app (typically a game running full-screen): the dock must not intrude.
             if (IsFullscreenForeground())
             {
-                _leftDock.SetEdgeShown(false);
+                _sideDock.SetEdgeShown(false);
                 return;
             }
             if (!GetCursorPos(out POINT pt))
@@ -493,7 +493,7 @@ public partial class App : Application
             // centre 50% of that edge. The threshold is generous (and a touch of
             // over-travel past the physical edge also counts) so the dock pops
             // without landing the pointer exactly on the edge.
-            DockSide side = _leftDock.DockSidePosition;
+            DockSide side = _sideDock.DockSidePosition;
             bool inTrigger = side switch
             {
                 DockSide.Right => x >= mon.Right - Reach && y >= mon.Top + bandV && y <= mon.Bottom - bandV,
@@ -507,9 +507,9 @@ public partial class App : Application
             // the pointer moves clear of the slab, without being so tight that it
             // flickers right at the slab boundary.
             bool inDock = false;
-            if (_leftDock.DockVisible)
+            if (_sideDock.DockVisible)
             {
-                Rect b = _leftDock.GetDockScreenBounds();
+                Rect b = _sideDock.GetDockScreenBounds();
                 const double Far = 28;       // interior reach beyond the slab
                 const double Slack = 14;     // slack along the edge
                 inDock = side switch
@@ -521,7 +521,7 @@ public partial class App : Application
                 };
             }
 
-            _leftDock.SetEdgeShown(inTrigger || inDock);
+            _sideDock.SetEdgeShown(inTrigger || inDock);
         };
         _edgePollTimer.Start();
     }
@@ -561,12 +561,12 @@ public partial class App : Application
 
     /// <summary>Adds the dragged main-dock entry to the left dock if the drop
     /// point lands over the left dock. Returns true when it was added there.</summary>
-    private bool TryDropToLeftDock(Point screenPoint, AppEntry entry)
+    private bool TryDropToSideDock(Point screenPoint, AppEntry entry)
     {
         // screenPoint is in DEVICE pixels (from Visual.PointToScreen). Let the
         // left dock convert it through its own PointFromScreen so the hit test is
         // DPI-correct without any manual scale math.
-        return _leftDock?.TryAcceptDrop(screenPoint, entry) == true;
+        return _sideDock?.TryAcceptDrop(screenPoint, entry) == true;
     }
 
     /// <summary>Height (DIP, measured up from the bottom screen edge) that the
@@ -575,9 +575,9 @@ public partial class App : Application
     /// side dock is on any other edge.</summary>
     private double GetBottomDockReserve()
     {
-        if (_leftDock == null || _leftDock.DockSidePosition != DockSide.Bottom)
+        if (_sideDock == null || _sideDock.DockSidePosition != DockSide.Bottom)
             return 0.0;
-        Rect b = _leftDock.GetDockScreenBounds();
+        Rect b = _sideDock.GetDockScreenBounds();
         // For a bottom dock the slab's rect HEIGHT is its thickness, which is
         // independent of which monitor it sits on. Reserve that thickness plus a
         // small gap so the glass dock lifts just clear of it. (Deriving the
@@ -739,7 +739,7 @@ public partial class App : Application
         // finished, so it never appears over a still-animating dock.
         _openingSettings = true;   // suppress edge re-summon during the fade
         _clickAway.Active = false;
-        _leftDock?.HideAll();   // dismiss the left dock too, not just the main dock
+        _sideDock?.HideAll();   // dismiss the left dock too, not just the main dock
         if (_panel != null)
             _panel.HidePanel(ShowSettingsWindow);
         else
@@ -779,7 +779,7 @@ public partial class App : Application
             // Re-anchor / re-lay the side dock FIRST so a changed dock position
             // (or any geometry-affecting setting) takes effect immediately and
             // its new bounds are available to the main dock below.
-            _leftDock?.RefreshLayout();
+            _sideDock?.RefreshLayout();
             // Then re-render the panel so theme / layout / size changes apply
             // live — and so the glass main dock reads the side dock's updated
             // bottom reserve and lifts clear of it.

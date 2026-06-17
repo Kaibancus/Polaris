@@ -14,7 +14,7 @@ using Polaris.Services;
 
 namespace Polaris.Views;
 
-public partial class LeftDockWindow
+public partial class SideDockWindow
 {
     // ---- Add / remove -----------------------------------------------------
 
@@ -46,7 +46,7 @@ public partial class LeftDockWindow
         AfterSharedChange();
     }
 
-    private void RemoveFromLeftDock(AppEntry entry)
+    private void RemoveFromSideDock(AppEntry entry)
     {
         // The left dock mirrors the resident region, so removing an icon here
         // removes the app from the main dock's resident apps as well.

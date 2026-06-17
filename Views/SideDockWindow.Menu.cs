@@ -14,7 +14,7 @@ using Polaris.Services;
 
 namespace Polaris.Views;
 
-public partial class LeftDockWindow
+public partial class SideDockWindow
 {
     // ---- Right-click context menus ---------------------------------------
 
@@ -26,7 +26,7 @@ public partial class LeftDockWindow
         var entry = icon.Entry;
         var items = new List<(string text, Action action)>
         {
-            ("从常驻区取消固定", () => RemoveFromLeftDock(entry)),
+            ("从常驻区取消固定", () => RemoveFromSideDock(entry)),
         };
         if (icon.IsRunning)
             items.Add(("关闭窗口", () => CloseEntryWindows(entry)));

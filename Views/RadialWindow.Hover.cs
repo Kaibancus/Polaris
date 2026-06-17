@@ -276,10 +276,10 @@ public partial class RadialWindow
         // Glass theme: dropping a dragged icon onto the left-edge dock pins it
         // there (the main-dock entry stays). Checked before delete/reorder so a
         // drag toward the left edge adds rather than deletes.
-        if (_theme.ShowGlassPanel && DropToLeftDock != null)
+        if (_theme.ShowGlassPanel && DropToSideDock != null)
         {
             Point screen = PointToScreen(p);
-            if (DropToLeftDock(screen, icon.Entry))
+            if (DropToSideDock(screen, icon.Entry))
             {
                 GlassDragActiveChanged?.Invoke(false);
                 Rebuild();   // snap the main-dock icon back into its slot

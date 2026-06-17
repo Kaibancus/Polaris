@@ -14,7 +14,7 @@ using Polaris.Services;
 
 namespace Polaris.Views;
 
-public partial class LeftDockWindow
+public partial class SideDockWindow
 {
     // ---- Running-but-unpinned strip --------------------------------------
 
@@ -76,13 +76,13 @@ public partial class LeftDockWindow
             }
         }
         // The running strip lists apps that are running but NOT in the resident
-        // region (the side dock's pinned column = _config.LeftDockApps, which
+        // region (the side dock's pinned column = _config.SideDockApps, which
         // mirrors the main dock's first ResidentCount entries). Non-resident
         // pinned apps are intentionally NOT excluded, so they surface in the
         // running strip while running (they don't otherwise appear on the side
         // dock). Only the resident apps — already shown as pinned tiles here — are
         // excluded to avoid duplicating them.
-        var pinned = new List<AppEntry>(_config.LeftDockApps);
+        var pinned = new List<AppEntry>(_config.SideDockApps);
         foreach (var a in pinned)
         {
             if (string.IsNullOrWhiteSpace(a.Path))

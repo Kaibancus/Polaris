@@ -77,7 +77,7 @@ public partial class RadialIcon : UserControl
     /// host panel can dismiss itself.</summary>
     public event Action? WindowActivated;
 
-    public RadialIcon(AppEntry entry, BitmapSource? icon, double iconSize, Color glowColor, Brush labelBrush, bool dropletHover, bool leftDockStyle = false)
+    public RadialIcon(AppEntry entry, BitmapSource? icon, double iconSize, Color glowColor, Brush labelBrush, bool dropletHover, bool sideDockStyle = false)
     {
         Entry = entry;
         IconImage = icon;
@@ -86,7 +86,7 @@ public partial class RadialIcon : UserControl
         LabelBrush = labelBrush;
         DisplayName = entry.Name;
         _dropletHover = dropletHover;
-        _leftDockStyle = leftDockStyle;
+        _sideDockStyle = sideDockStyle;
         InitializeComponent();
 
         // Pick the hover style per theme: the water-droplet lens is exclusive to
@@ -137,7 +137,7 @@ public partial class RadialIcon : UserControl
         // Left dock: no tray. Strip the glass plate (background / rim / shadow /
         // sheen) so the icon floats free, and size + place the breathing green
         // "running" dot at the icon's left edge.
-        if (_leftDockStyle)
+        if (_sideDockStyle)
         {
             IconPlate.Background = Brushes.Transparent;
             IconPlate.BorderThickness = new Thickness(0);
@@ -183,7 +183,7 @@ public partial class RadialIcon : UserControl
     public string DisplayName { get; }
 
     private readonly bool _dropletHover;
-    private readonly bool _leftDockStyle;
+    private readonly bool _sideDockStyle;
     private bool _isRunning;
     private DockSide _dockEdge = DockSide.Left;
 
@@ -193,7 +193,7 @@ public partial class RadialIcon : UserControl
     public void ApplyDockEdge(DockSide side)
     {
         _dockEdge = side;
-        if (_leftDockStyle)
+        if (_sideDockStyle)
             PositionRunDot();
         if (_preview != null)
             _preview.Placement = side switch
@@ -319,7 +319,7 @@ public partial class RadialIcon : UserControl
 
     private void UpdateRunningVisual()
     {
-        if (_leftDockStyle)
+        if (_sideDockStyle)
         {
             UpdateRunningDot();
             return;
@@ -474,7 +474,7 @@ public partial class RadialIcon : UserControl
         // Fade in the per-theme hover layer (Opacity is composited; the lens /
         // glow blurs are rasterised once via BitmapCache, so no per-frame
         // effect recompute). The left dock has no hover tray/lens at all.
-        if (!_leftDockStyle)
+        if (!_sideDockStyle)
         {
             if (_dropletHover)
                 HoverGlow.BeginAnimation(OpacityProperty, new DoubleAnimation(1.0, Anim));
@@ -501,7 +501,7 @@ public partial class RadialIcon : UserControl
             Scale.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(1.0, Anim));
             Scale.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(1.0, Anim));
         }
-        if (!_leftDockStyle)
+        if (!_sideDockStyle)
         {
             if (_dropletHover)
                 HoverGlow.BeginAnimation(OpacityProperty, new DoubleAnimation(0, Anim));
