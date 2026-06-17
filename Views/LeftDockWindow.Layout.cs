@@ -201,7 +201,7 @@ public partial class LeftDockWindow
             // Draw the black tray snug around the icon column, bleeding its
             // edge-side feather off-screen so the solid black sits flush against
             // the screen edge.
-            double darkPad = GIcon * 0.55;
+            double darkPad = GIcon * 0.5;
             double darkBleed = GIcon * 0.4;
             _bodyCross = _slabCross - darkBleed;
             _bodyCrossLen = (_colCenterCross - _bodyCross) + GIcon / 2.0 + darkPad;

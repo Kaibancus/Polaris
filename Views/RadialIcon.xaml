@@ -254,7 +254,7 @@
         <!-- Name label. Hosted on a zero-size Canvas so it never affects the
              icon's measured size / centering. Positioned + sized in code-behind.
              Hidden by default, fades in on hover. -->
-        <Canvas IsHitTestVisible="False">
+        <Canvas x:Name="LabelHost" IsHitTestVisible="False">
             <Border x:Name="LabelChrome"
                     Opacity="0"
                     Background="#261A1A1A"
