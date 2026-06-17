@@ -115,6 +115,11 @@ public partial class App : Application
     // Active flag. See Services/TaskbarGuard.cs.
     private readonly Polaris.Services.TaskbarGuard _taskbarGuard = new();
 
+    // Dismisses both docks when the user left-clicks outside every Polaris window
+    // while the main dock is open. Self-contained (own hook thread + message
+    // loop); the owner only toggles its Active flag. See ClickAwayWatcher.cs.
+    private readonly Polaris.Services.ClickAwayWatcher _clickAway = new();
+
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
@@ -215,9 +220,29 @@ public partial class App : Application
         // Retract the left dock together with the main dock (e.g. when launching
         // an app from the main dock hides the panel). Clears every show reason —
         // including the Ctrl+4 "pinned" reason — so a launch always retracts both.
-        _panel.PanelDismissed += () => _leftDock?.HideAll();
+        _panel.PanelDismissed += () =>
+        {
+            _clickAway.Active = false;   // central disarm: covers every hide path
+            _leftDock?.HideAll();
+        };
         StartEdgePoll();
         _taskbarGuard.Start();
+
+        // A left-click anywhere outside every Polaris window dismisses both docks
+        // while the main dock is open. The hook fires on its own thread, so marshal
+        // to the UI thread before hiding.
+        _clickAway.ClickedOutside += () =>
+        {
+            _panel?.Dispatcher.BeginInvoke(() =>
+            {
+                if (_panel?.IsShown == true)
+                {
+                    _clickAway.Active = false;
+                    _panel.HidePanel();   // also retracts the left dock via PanelDismissed
+                }
+            });
+        };
+        _clickAway.Start();
 
         RebuildHook();
         SetupPinnedHooks();
@@ -299,6 +324,7 @@ public partial class App : Application
         {
             if (_panel?.IsShown == true)
             {
+                _clickAway.Active = false;
                 _panel.HidePanel();
                 _leftDock?.SetPinnedShown(false);
             }
@@ -332,6 +358,7 @@ public partial class App : Application
     {
         if (_panel?.IsShown == true)
         {
+            _clickAway.Active = false;
             _panel.HidePanel();
             _leftDock?.SetPinnedShown(false);
         }
@@ -345,6 +372,7 @@ public partial class App : Application
             SetActiveMonitorFromCursor();
             _panel?.ShowPinned();
             _leftDock?.SetPinnedShown(true);   // summon the left dock together
+            _clickAway.Active = true;          // arm click-away dismiss
         }
     }
 
@@ -356,6 +384,7 @@ public partial class App : Application
         SetActiveMonitorFromCursor();
         _panel?.ShowPanel();
         _leftDock?.SetMainShown(true);   // the left dock summons together with the main dock
+        _clickAway.Active = true;        // arm click-away dismiss
     }
 
     /// <summary>Closes the settings window if it is open (or still in the middle
@@ -384,6 +413,9 @@ public partial class App : Application
     private void OnHotkeyReleased()
     {
         _panel?.HideIfNotPinned();
+        // HideIfNotPinned is a no-op while pinned (Ctrl+4), so keep click-away
+        // armed in that case; only disarm once the dock is actually hidden.
+        _clickAway.Active = _panel?.IsShown == true;
         // Releasing the hotkey drops the "shown by main" reason; the left dock
         // stays only if the mouse is currently over its edge trigger (handled by
         // the edge poll, which sets the edge-shown reason).
@@ -706,6 +738,7 @@ public partial class App : Application
         // settings window only AFTER the dock's fade-out animation has fully
         // finished, so it never appears over a still-animating dock.
         _openingSettings = true;   // suppress edge re-summon during the fade
+        _clickAway.Active = false;
         _leftDock?.HideAll();   // dismiss the left dock too, not just the main dock
         if (_panel != null)
             _panel.HidePanel(ShowSettingsWindow);
@@ -821,6 +854,7 @@ public partial class App : Application
     {
         FlushPersist();
         _taskbarGuard.Stop();
+        _clickAway.Stop();
         _tray?.Dispose();
         _hook?.Dispose();
         _pinnedHook?.Dispose();
@@ -834,6 +868,7 @@ public partial class App : Application
         FpsProfiler.Stop();
         FlushPersist();
         _taskbarGuard.Stop();
+        _clickAway.Stop();
         _tray?.Dispose();
         _hook?.Dispose();
         _pinnedHook?.Dispose();
