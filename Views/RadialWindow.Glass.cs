@@ -64,7 +64,7 @@ public partial class RadialWindow
     private void DrawGlassPanel()
     {
         double icon = EffectiveIconSize;
-        double cellW = icon * 2.15;
+        double cellW = icon * LiquidGlassTheme.ColumnPitch;
         double gridW = (LiquidGlassTheme.Columns - 1) * cellW;
 
         double padX = icon * 1.15;
@@ -205,6 +205,17 @@ public partial class RadialWindow
                     Color = Color.FromRgb(0x2A, 0x33, 0x40),
                 },
             },
+            // Bake the bead + blurred drop-shadow to a texture once: the gear is
+            // static apart from a RenderTransform spin/press, and a transform does
+            // not invalidate a BitmapCache, so the (expensive) blur is rasterised a
+            // single time instead of on every layered-window recomposite driven by
+            // the always-on orbit light / magnify wave. The shadow already rotates
+            // with the element (the RenderTransform maps the whole visual including
+            // its effect), so caching is pixel-identical.
+            CacheMode = new System.Windows.Media.BitmapCache(Math.Max(1.0, DeviceScale))
+            {
+                SnapsToDevicePixels = true,
+            },
         };
         // Spin the gear while hovered and shrink it on press like a real
         // physical button.
@@ -294,6 +305,14 @@ public partial class RadialWindow
                 Opacity = 0.95,
                 Color = Color.FromRgb(0x03, 0x06, 0x0E),
             },
+            // Cache the glyphs + blurred halo to a texture so the always-on orbit
+            // light / magnify wave don't re-rasterise the blur on every composite.
+            // The text changes only once per second (UpdateGlassClock), which simply
+            // rebuilds the cache then; rendered at device scale to stay crisp.
+            CacheMode = new System.Windows.Media.BitmapCache(Math.Max(1.0, DeviceScale))
+            {
+                SnapsToDevicePixels = true,
+            },
         };
         Canvas.SetLeft(clockTime, left + 18);
         Canvas.SetTop(clockTime, top + 14);
@@ -313,8 +332,8 @@ public partial class RadialWindow
             return;
 
         double icon = EffectiveIconSize;
-        double cellW = icon * 2.15;
-        double cellH = icon * 2.35;
+        double cellW = icon * LiquidGlassTheme.ColumnPitch;
+        double cellH = icon * LiquidGlassTheme.RowPitch;
         double gridW = (LiquidGlassTheme.Columns - 1) * cellW;
         Point center = GlassGridCenter;
         double y0 = center.Y - (LiquidGlassTheme.VisibleRows - 1) * cellH / 2.0;  // row 0 centre
@@ -370,6 +389,9 @@ public partial class RadialWindow
             Stroke = new SolidColorBrush(Color.FromArgb(0x30, 0xBF, 0xE0, 0xFF)),
             StrokeThickness = 2.0,
             Effect = new System.Windows.Media.Effects.BlurEffect { Radius = 4 },
+            // Static blurred glow: bake it once so it isn't re-rasterised on every
+            // layered-window recomposite (driven by the orbit light / magnify wave).
+            CacheMode = new System.Windows.Media.BitmapCache(),
         };
         var rim = new System.Windows.Shapes.Rectangle
         {
@@ -573,7 +595,7 @@ public partial class RadialWindow
     private void DrawGlassScrollBar()
     {
         double icon = EffectiveIconSize;
-        double cellW = icon * 2.15;
+        double cellW = icon * LiquidGlassTheme.ColumnPitch;
         double gridW = (LiquidGlassTheme.Columns - 1) * cellW;
         double barW = Math.Max(7, icon * 0.13);
 

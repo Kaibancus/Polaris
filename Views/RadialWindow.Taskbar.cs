@@ -131,7 +131,7 @@ public partial class RadialWindow
     {
         double icon = EffectiveIconSize;
         double tile = icon * GlassIconScale;   // same footprint as a glass grid icon
-        double cellW = icon * 2.15;            // same column pitch as the grid
+        double cellW = icon * LiquidGlassTheme.ColumnPitch;   // same column pitch as the grid
 
         // The dock body is a fixed 4-row block centred on GlassDockCenter; the
         // taskbar strip is carved at its bottom (see GlassTaskbarStripHeight /
@@ -322,6 +322,12 @@ public partial class RadialWindow
             Background = idleBg,
             Padding = new Thickness(pad),
             Child = image,
+            // Bake the (HighQuality-scaled) icon to a texture so the always-on running
+            // sweep/glow — and, in glass mode, the orbit light — don't re-sample the
+            // image on every layered-window recomposite. The hover zoom is a transform
+            // on the parent (cache stays valid); cached at 2.0 like the pinned grid
+            // icons so it remains crisp when magnified to 1.7x.
+            CacheMode = new System.Windows.Media.BitmapCache(2.0),
         };
 
         // Soft, breathing glow (blurred, behind the sweep). Matches the ring

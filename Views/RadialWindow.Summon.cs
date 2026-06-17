@@ -97,6 +97,8 @@ public partial class RadialWindow
         UpdateGlassClock();
         ShowNotchIfSaturn();
         _clockTimer.Start();
+        WarmPreviewCache();             // prime previews for this show, then poll
+        _previewWarmTimer.Start();
         _ = _weather.RefreshAsync();   // fetch weather promptly on show
 
         var fade = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(160))
@@ -217,6 +219,7 @@ public partial class RadialWindow
         CancelDrag();
         _runningTimer.Stop();
         _clockTimer.Stop();
+        _previewWarmTimer.Stop();       // no thumbnail polling needed while hidden
         _notch?.HideNotch();
         ResetMagnify();
 
