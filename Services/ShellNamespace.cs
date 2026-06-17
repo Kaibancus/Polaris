@@ -154,6 +154,34 @@ public static class ShellNamespace
         };
     }
 
+    /// <summary>Builds a launchable, update-proof AppEntry for a packaged
+    /// (UWP / Store) app from its window AUMID — e.g. pinning a running
+    /// Calculator whose immersive process exposes no readable exe path. Parses
+    /// "shell:AppsFolder\&lt;AUMID&gt;" into a shell PIDL and reuses
+    /// <see cref="FromAbsolutePidl"/> so the entry carries the proper display
+    /// name and icon source. Returns null when the AUMID can't be resolved.</summary>
+    public static AppEntry? FromAumid(string? aumid)
+    {
+        if (string.IsNullOrWhiteSpace(aumid))
+            return null;
+        IntPtr pidl = IntPtr.Zero;
+        try
+        {
+            if (SHParseDisplayName(AppsFolderPrefix + aumid, IntPtr.Zero,
+                    out pidl, 0, out _) != 0 || pidl == IntPtr.Zero)
+                return null;
+            return FromAbsolutePidl(pidl);
+        }
+        catch
+        {
+            return null;
+        }
+        finally
+        {
+            if (pidl != IntPtr.Zero) Marshal.FreeCoTaskMem(pidl);
+        }
+    }
+
     /// <summary>Releases a PIDL allocated by the shell (e.g. IShellLink.GetIDList).</summary>
     public static void FreePidl(IntPtr pidl)
     {

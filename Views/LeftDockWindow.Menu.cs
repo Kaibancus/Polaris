@@ -38,7 +38,10 @@ public partial class LeftDockWindow
     private void ShowRunTileMenu(FrameworkElement tile, TaskbarApp app)
     {
         var items = new List<(string text, Action action)>();
-        if (!string.IsNullOrWhiteSpace(app.Path))
+        // Offer "pin to resident" for any app we can build a stable entry for:
+        // a normal exe path, OR a packaged-app AUMID (Calculator and other UWP
+        // apps expose no readable exe path, only an AUMID).
+        if (!string.IsNullOrWhiteSpace(app.Path) || !string.IsNullOrWhiteSpace(app.Aumid))
             items.Add(("固定到常驻区", () => PinRunningApp(app)));
         items.Add(("关闭窗口", () => CloseTaskbarAppWindows(app)));
         if (items.Count > 0)
@@ -281,9 +284,13 @@ public partial class LeftDockWindow
     /// <summary>Pins a running app to the resident region from its run-tile menu.</summary>
     private void PinRunningApp(TaskbarApp app)
     {
-        if (string.IsNullOrWhiteSpace(app.Path))
-            return;
-        var entry = Polaris.Services.ShortcutResolver.CreateEntry(app.Path);
+        // Prefer a packaged-app (AppsFolder) entry built from the AUMID: it is
+        // update-proof and works for immersive apps (Calculator, Store…) whose
+        // exe path is empty or an ACL-restricted, version-pinned WindowsApps path.
+        // Fall back to resolving the raw exe path for classic desktop apps.
+        AppEntry? entry = Polaris.Services.ShellNamespace.FromAumid(app.Aumid);
+        if (entry == null && !string.IsNullOrWhiteSpace(app.Path))
+            entry = Polaris.Services.ShortcutResolver.CreateEntry(app.Path);
         if (entry == null)
             return;
         if (!string.IsNullOrWhiteSpace(app.Title) && string.IsNullOrWhiteSpace(entry.Name))
