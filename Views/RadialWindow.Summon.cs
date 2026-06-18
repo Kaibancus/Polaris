@@ -277,8 +277,21 @@ public partial class RadialWindow
                 // this is free apart from that rebuild we'd do on show anyway. Big
                 // idle (hidden-dock) memory saving. Deferred to a Background pass
                 // so it never blocks the final collapsed frame from presenting.
-                Dispatcher.BeginInvoke(() => { if (!_shown) ClearVisualTree(); },
-                    System.Windows.Threading.DispatcherPriority.Background);
+                Dispatcher.BeginInvoke(() =>
+                {
+                    if (!_shown)
+                    {
+                        ClearVisualTree();
+                        // Shrink the layered window to 1x1 while hidden so WPF frees
+                        // the large software-composited surface (AllowsTransparency
+                        // keeps a per-pixel-alpha buffer ~ window-area×4 bytes plus
+                        // render scratch — the bulk of the idle footprint). The next
+                        // ShowFaded's SizeToActiveContent restores the real size
+                        // before Rebuild, so the user never sees the 1x1 window.
+                        Width = 1;
+                        Height = 1;
+                    }
+                }, System.Windows.Threading.DispatcherPriority.Background);
             }
             // Defer the callback to a LATER dispatcher pass (Background) instead
             // of running it inline on the fade's final frame. The callback may

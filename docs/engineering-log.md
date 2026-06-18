@@ -113,6 +113,17 @@
 
 ## ⚡ 性能优化
 
+- **隐藏时把分层窗口缩到 1×1**（接续"隐藏时释放内存"）：`AllowsTransparency=True` 会维持一块
+  约 窗口面积×4 字节的逐像素 alpha 软件合成缓冲（外加渲染暂存），是隐藏态占用的主体。`HidePanel`
+  在 `ClearVisualTree()` 之后把 `Width=Height=1`，迫使 WPF 释放这块大缓冲；下次 `ShowFaded` 的
+  `SizeToActiveContent` 会在 `Rebuild` 前恢复真实尺寸，用户全程看不到 1×1 窗口。实测隐藏态
+  553MB→509MB（再 -44MB，无任何视觉变化）。
+- **⚠️ 调查结论：显示态 ~1GB 是 `AllowsTransparency` 软件渲染的架构固有成本**。dotnet-counters 实测
+  托管堆仅 ~10–19MB，~1GB 全是非托管（WPF MilCore 软件合成）。对照实验：空 Dock 738MB、满 42 图标
+  1029MB（图标视觉子树 ≈291MB ≈7MB/个，而图标位图本身仅 256×256×4≈262KB/个，故大头不是位图而是
+  软件渲染中间缓冲）；`POLARIS_NOCACHE` 实验证明 BitmapCache 反而更省（关掉更高），非元凶。空 Dock 仍
+  738MB 说明横跨屏幕的玻璃 slab 软件渲染缓冲占很大比重。结论：要大幅压低**显示态**内存须改架构
+  （改 GPU 渲染去掉 AllowsTransparency，或图标虚拟化），二者均有视觉/行为风险，未实施。
 - **隐藏时释放内存**：Dock 隐藏时归还其占用的渲染内存。①`WindowPreviewService.TrimThumbCacheForHide`
   在隐藏时丢弃可重新捕获的窗口缩略图（仅保留最小化窗口的 last-good 帧，其像素已无法重捕），
   缩略图是最大的缓存位图；②`HidePanel` 折叠后调用新提取的 `ClearVisualTree()` 清空整个 Dock
