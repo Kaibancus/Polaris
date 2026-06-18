@@ -35,7 +35,7 @@ internal sealed class CompositionHost : IDisposable
     public int Width { get; }
     public int Height { get; }
 
-    public CompositionHost(IntPtr hwnd, int width, int height)
+    public CompositionHost(IntPtr hwnd, int width, int height, float dpi = 96f)
     {
         Width = Math.Max(1, width);
         Height = Math.Max(1, height);
@@ -89,7 +89,7 @@ internal sealed class CompositionHost : IDisposable
         using var surface = _swapChain.GetBuffer<IDXGISurface>(0);
         var props = new BitmapProperties1(
             new Vortice.DCommon.PixelFormat(Format.B8G8R8A8_UNorm, D2DAlphaMode.Premultiplied),
-            96f, 96f, BitmapOptions.Target | BitmapOptions.CannotDraw);
+            dpi, dpi, BitmapOptions.Target | BitmapOptions.CannotDraw);
         _targetBitmap = _d2d.CreateBitmapFromDxgiSurface(surface, props);
         _d2d.Target = _targetBitmap;
     }

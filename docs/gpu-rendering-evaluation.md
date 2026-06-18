@@ -123,7 +123,7 @@ WPF 的硬件加速（Tier-2）只对**普通不透明窗口**生效。`AllowsTr
 |---|---|---|
 | `DragGhostWindow` | ✅ GPU 版可用（`POLARIS_GPU_GHOST=1`） | 视觉验证通过 |
 | `NotchClockWindow` | ✅ GPU 版可用（`POLARIS_GPU_NOTCH=1`） | 梯形板 + 真 **GaussianBlur** 暗光晕 + DirectWrite 立体金字，用户确认与原版一致、平滑无分层 |
-| `SideDockWindow` | 🔶 进行中 — Stage A 静态渲染器完成（`POLARIS_GPU_SIDEDOCK=1`） | D2D 玻璃 slab（复用 `GlassSlab`）+ 钉住图标列（图标位图+淡底板+绿色运行点），朝向感知（Left/Right/Top/Bottom），用户确认与真实底部 dock 一致。剩余 Stage B-E：命中测试/悬停标签、放大波、运行条、拖拽重排 |
+| `SideDockWindow` | 🔶 进行中 — Stage A-C 完成（`POLARIS_GPU_SIDEDOCK=1`） | D2D 玻璃 slab（复用 `GlassSlab`）+ 钉住图标列 + 命中测试/悬停标签 + macOS 式放大波（16ms 连续循环、逐图标缩放+pop 缓动），朝向感知（Left/Right/Top/Bottom）。**已修复每显示器 DPI 缩放 bug**：布局用 DIP，窗口/交换链按物理像素创建，D2D 目标 DPI 设为 96×scale，光标命中测试物理→DIP 换算；150% 缩放下与真实底部 dock 像素一致（pitch 81px）。剩余 Stage D-E：运行条、拖拽重排 |
 | 主 dock `RadialWindow` | ⬜ 待迁移（收益最大） | |
 
 迁移采用 `IDragGhost` / `INotchClock` 接口 + 环境变量做 A/B，默认仍走 WPF（零生产影响），验证满意后再翻默认。**NotchClock 迁移额外验证了 D2D 真高斯模糊管线**（主 dock 的 19 处 BlurEffect / 15 处 DropShadow 移植所需的关键能力）。**侧 dock Stage A** 抽出了可复用的 `Services/Gpu/GlassSlab.cs`（玻璃/暗色 slab 的 D2D 绘制，主 dock 也将复用）。

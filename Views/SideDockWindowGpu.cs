@@ -49,8 +49,12 @@ internal sealed class SideDockWindowGpu : IDisposable
     private readonly List<Slot> _slots = new();
     private DockSide _side;
     private int _winX, _winY, _winW, _winH;
+    private double _dpi = 1.0;
     private int _hover = -1;
     private float _sx, _sy, _sw, _sh, _trayRadius, _opacity, _frost;
+    private float _gIcon, _cellH;
+    private float[] _waveCur = Array.Empty<float>();
+    private const float WaveSupport = 2.3f;
 
     public SideDockWindowGpu(AppConfig config) => _config = config;
 
@@ -80,15 +84,25 @@ internal sealed class SideDockWindowGpu : IDisposable
 
         double startPad = effIcon * 0.7, endPad = effIcon * 0.7;
         double thickness = vertical ? gIcon * HoverScale + 240 * uiScale : gIcon * HoverScale + 130 * uiScale;
-        _winW = (int)Math.Ceiling(vertical ? thickness : wa.Width);
+
+        var apps = _config.SideDockApps;
+        int pinnedCount = apps.Count;
+
+        // Horizontal docks are sized to their CONTENT (centred), not full-width —
+        // matching the real dock's DesiredContentMain (incl. the running-area
+        // reserve), so the GPU dock has the same footprint.
+        double defCell = effIcon * 1.46;
+        const int maxRunSlots = 1 + 10 + 1;   // Polaris + RunningMaxComplete + overflow
+        double desiredMain = 12 * uiScale + startPad + pinnedCount * defCell
+                           + effIcon * 0.55 + maxRunSlots * defCell + endPad + 12 * uiScale;
+        double winMain = vertical ? wa.Height : Math.Min(desiredMain, wa.Width);
+        _winW = (int)Math.Ceiling(vertical ? thickness : winMain);
         _winH = (int)Math.Ceiling(vertical ? wa.Height : thickness);
-        double mainExtent = vertical ? wa.Height : wa.Width;
+        double mainExtent = winMain;
 
         double startReserve = 12 * uiScale, endReserve = vertical ? 56 * uiScale : 12 * uiScale;
         double usableMain = mainExtent - startReserve - endReserve;
 
-        var apps = _config.SideDockApps;
-        int pinnedCount = apps.Count;
         double availForCells = usableMain - (startPad + endPad);
         if (pinnedCount > 0 && pinnedCount * cellH > availForCells)
             cellH = Math.Max(gIcon * 1.04, availForCells / pinnedCount);
@@ -110,7 +124,12 @@ internal sealed class SideDockWindowGpu : IDisposable
         _opacity = (float)(1.0 - Math.Clamp(_config.Settings.PanelTransparency, 0.0, 1.0));
         _frost = (float)GlassChrome.FrostStrengthFor(_config.Settings.PanelTransparency);
 
-        _winX = _side switch { DockSide.Right => (int)(wa.Right - _winW), _ => (int)wa.Left };
+        _winX = _side switch
+        {
+            DockSide.Right => (int)(wa.Right - _winW),
+            DockSide.Left => (int)wa.Left,
+            _ => (int)(wa.Left + (wa.Width - _winW) / 2.0),   // Top/Bottom centred
+        };
         _winY = _side switch { DockSide.Bottom => (int)(wa.Bottom - _winH), _ => (int)wa.Top };
 
         (_sx, _sy, _sw, _sh) = _side switch
@@ -130,11 +149,22 @@ internal sealed class SideDockWindowGpu : IDisposable
             bool run = RunningAppTracker.IsEntryRunning(entry, running, new List<string>(), new HashSet<string>());
             _slots.Add(new Slot(new Vector2(cx, cy), (float)gIcon, entry.Name, entry, run));
         }
+        _gIcon = (float)gIcon;
+        _cellH = (float)cellH;
+        _waveCur = new float[_slots.Count];
+        Array.Fill(_waveCur, 1f);
 
         _hwnd = CreateWindow(_winW, _winH);
-        SetWindowPos(_hwnd, HWND_TOPMOST, _winX, _winY, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
+        uint rawDpi = GetDpiForWindow(_hwnd);
+        _dpi = rawDpi >= 48 ? rawDpi / 96.0 : 1.0;
+        // Layout is computed in DIPs (MonitorLayout returns DIPs); the Win32 window
+        // + DComp swap chain live in PHYSICAL pixels. Size the window to physical px
+        // and tell D2D the target DPI so all DIP-space drawing scales up 1:1.
+        int pw = (int)Math.Ceiling(_winW * _dpi), ph = (int)Math.Ceiling(_winH * _dpi);
+        int px = (int)Math.Round(_winX * _dpi), py = (int)Math.Round(_winY * _dpi);
+        SetWindowPos(_hwnd, HWND_TOPMOST, px, py, pw, ph, SWP_NOACTIVATE);
         ShowWindow(_hwnd, SW_SHOWNOACTIVATE);
-        _host = new CompositionHost(_hwnd, _winW, _winH);
+        _host = new CompositionHost(_hwnd, pw, ph, (float)(96.0 * _dpi));
         _dwrite = DWrite.DWriteCreateFactory<IDWriteFactory>();
         _labelFormat = _dwrite.CreateTextFormat("Microsoft YaHei UI", null, FontWeight.Normal,
             FontStyle.Normal, FontStretch.Normal, 13f, "zh-cn");
@@ -143,30 +173,68 @@ internal sealed class SideDockWindowGpu : IDisposable
 
         Render();
 
-        _timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(30) };
+        _timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(16) };
         _timer.Tick += (_, _) => Tick();
         _timer.Start();
     }
 
+    private float WaveScaleAt(float cursorMain, float iconMain)
+    {
+        float d = Math.Abs(cursorMain - iconMain) / _cellH;
+        if (d >= WaveSupport)
+            return 1f;
+        float f = 0.5f * (1f + (float)Math.Cos(Math.PI * d / WaveSupport));
+        return 1f + (HoverScale - 1f) * f;
+    }
+
+    private Vector2 PopOffset(float pop) => _side switch
+    {
+        DockSide.Left => new Vector2(pop, 0),
+        DockSide.Right => new Vector2(-pop, 0),
+        DockSide.Top => new Vector2(0, pop),
+        _ => new Vector2(0, -pop),
+    };
+
     private void Tick()
     {
-        if (!GetCursorPos(out POINT p))
+        if (_host == null)
             return;
-        float lx = p.X - _winX, ly = p.Y - _winY;
-        int hit = -1;
+        bool vertical = _side is DockSide.Left or DockSide.Right;
+        bool active = false;
+        float curMain = 0;
+        if (GetCursorPos(out POINT p))
+        {
+            float lx = (float)(p.X / _dpi - _winX), ly = (float)(p.Y / _dpi - _winY);
+            float m = _gIcon * 0.6f;
+            if (lx >= _sx - m && lx <= _sx + _sw + m && ly >= _sy - m && ly <= _sy + _sh + m)
+            {
+                active = true;
+                curMain = vertical ? ly : lx;
+            }
+        }
+
+        float k = 1f - (float)Math.Exp(-0.016 / 0.045);   // tau 45ms
+        float maxDelta = 0f;
+        int focal = -1; float best = float.MaxValue;
         for (int i = 0; i < _slots.Count; i++)
         {
-            var s = _slots[i];
-            float half = s.G / 2f;
-            if (lx >= s.Center.X - half && lx <= s.Center.X + half &&
-                ly >= s.Center.Y - half && ly <= s.Center.Y + half)
-            { hit = i; break; }
+            float iconMain = vertical ? _slots[i].Center.Y : _slots[i].Center.X;
+            float target = active ? WaveScaleAt(curMain, iconMain) : 1f;
+            float cur = _waveCur[i] + (target - _waveCur[i]) * k;
+            _waveCur[i] = cur;
+            maxDelta = Math.Max(maxDelta, Math.Abs(target - cur));
+            if (active)
+            {
+                float d = Math.Abs(curMain - iconMain);
+                if (d < best) { best = d; focal = i; }
+            }
         }
-        if (hit != _hover)
-        {
-            _hover = hit;
+        _hover = active && focal >= 0 && best <= _cellH ? focal : -1;
+
+        // Render every frame while the wave is live; once settled at rest, render
+        // one final frame and idle (the timer keeps polling for re-entry).
+        if (active || maxDelta > 0.001f)
             Render();
-        }
     }
 
     private static Color4 Col(byte a, byte r, byte g, byte b) => new(r / 255f, g / 255f, b / 255f, a / 255f);
@@ -179,17 +247,30 @@ internal sealed class SideDockWindowGpu : IDisposable
         ctx.BeginDraw();
         ctx.Clear(Col(0, 0, 0, 0));
         GlassSlab.DrawGlass(ctx, _sx, _sy, _sw, _sh, _trayRadius, _opacity, _frost);
-        for (int i = 0; i < _slots.Count; i++)
-            DrawIcon(ctx, _slots[i]);
+
+        // Draw smallest-first so the magnified (focal) icon sits on top.
+        var order = new int[_slots.Count];
+        for (int i = 0; i < order.Length; i++) order[i] = i;
+        Array.Sort(order, (a, b) => _waveCur[a].CompareTo(_waveCur[b]));
+        foreach (int i in order)
+        {
+            float scale = _waveCur[i];
+            Vector2 pop = PopOffset((scale - 1f) * _gIcon * 1.18f);
+            DrawIcon(ctx, _slots[i], scale, pop);
+        }
+
         if (_hover >= 0 && _hover < _slots.Count)
-            DrawHoverLabel(ctx, _slots[_hover]);
+            DrawHoverLabel(ctx, _slots[_hover], _waveCur[_hover]);
         ctx.EndDraw();
         _host.Present();
     }
 
-    private void DrawIcon(ID2D1DeviceContext ctx, in Slot s)
+    private void DrawIcon(ID2D1DeviceContext ctx, in Slot s, float scale, Vector2 pop)
     {
         float g = s.G, half = g / 2f, cx = s.Center.X, cy = s.Center.Y;
+        var wave = Matrix3x2.CreateScale(scale, scale, s.Center) * Matrix3x2.CreateTranslation(pop);
+
+        ctx.Transform = wave;
         var plate = new Rect(cx - half, cy - half, g, g);
         using (var pb = ctx.CreateSolidColorBrush(new Color4(1f, 1f, 1f, 0x08 / 255f)))
             ctx.FillRoundedRectangle(new RoundedRectangle { Rect = plate, RadiusX = 12f, RadiusY = 12f }, pb);
@@ -200,9 +281,9 @@ internal sealed class SideDockWindowGpu : IDisposable
             float pad = g * 0.14f, dstX = cx - half + pad, dstY = cy - half + pad, dstSz = g - pad * 2;
             var bs = bmp.Size;
             ctx.Transform = Matrix3x2.CreateScale(dstSz / Math.Max(1f, bs.Width), dstSz / Math.Max(1f, bs.Height))
-                          * Matrix3x2.CreateTranslation(dstX, dstY);
+                          * Matrix3x2.CreateTranslation(dstX, dstY) * wave;
             ctx.DrawBitmap(bmp, 1f, InterpolationMode.HighQualityCubic);
-            ctx.Transform = Matrix3x2.Identity;
+            ctx.Transform = wave;
         }
 
         if (s.Running)
@@ -220,20 +301,22 @@ internal sealed class SideDockWindowGpu : IDisposable
             using (var co = ctx.CreateSolidColorBrush(new Color4(0x4C / 255f, 0xE0 / 255f, 0x6B / 255f, 1f)))
                 ctx.FillEllipse(new Ellipse(new Vector2(dx, dy), dot / 2f, dot / 2f), co);
         }
+        ctx.Transform = Matrix3x2.Identity;
     }
 
-    private void DrawHoverLabel(ID2D1DeviceContext ctx, in Slot s)
+    private void DrawHoverLabel(ID2D1DeviceContext ctx, in Slot s, float scale)
     {
         if (_labelFormat == null || string.IsNullOrEmpty(s.Name))
             return;
-        float half = s.G / 2f;
+        // Clear the magnified + popped focal icon.
+        float reach = s.G / 2f * scale + (scale - 1f) * _gIcon * 1.18f;
         float w = Math.Max(40f, s.Name.Length * 13f * 0.95f + 18f), h = 24f, gap = 8f;
         (float lx, float ly) = _side switch
         {
-            DockSide.Left => (s.Center.X + half + gap + w / 2f, s.Center.Y),
-            DockSide.Right => (s.Center.X - half - gap - w / 2f, s.Center.Y),
-            DockSide.Top => (s.Center.X, s.Center.Y + half + gap + h / 2f),
-            _ => (s.Center.X, s.Center.Y - half - gap - h / 2f),
+            DockSide.Left => (s.Center.X + reach + gap + w / 2f, s.Center.Y),
+            DockSide.Right => (s.Center.X - reach - gap - w / 2f, s.Center.Y),
+            DockSide.Top => (s.Center.X, s.Center.Y + reach + gap + h / 2f),
+            _ => (s.Center.X, s.Center.Y - reach - gap - h / 2f),
         };
         var rect = new Rect(lx - w / 2f, ly - h / 2f, w, h);
         // The real hover label is just floating text on a barely-there dark tint
@@ -344,5 +427,6 @@ internal sealed class SideDockWindowGpu : IDisposable
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
     [DllImport("user32.dll")] private static extern bool GetCursorPos(out POINT p);
+    [DllImport("user32.dll")] private static extern uint GetDpiForWindow(IntPtr h);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr GetModuleHandleW(string? n);
 }
