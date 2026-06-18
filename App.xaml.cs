@@ -94,33 +94,41 @@ public partial class App : Application
     // poll must NOT re-summon the side dock (which would flash on screen).
     private bool _openingSettings;
     private Forms.NotifyIcon? _tray;
-    private LeftDockWindow? _leftDock;
+    private SideDockWindow? _sideDock;
     private DispatcherTimer? _edgePollTimer;
 
-    // Low-level mouse hook that masks the system auto-hide taskbar's reveal
-    // trigger under the bottom side-dock's centre-50% activation band. It runs on
-    // its OWN dedicated thread with a private message loop, isolated from the WPF
-    // UI thread: a low-level hook proc that misses the LowLevelHooksTimeout
-    // (~300ms) is silently skipped for that event, and the UI thread can stall
-    // that long while compositing the fullscreen glass layer or animating — which
-    // is exactly when (other windows open, system busier) the guard would leak.
-    private Thread? _guardThread;
-    private Thread? _guardPollThread;
-    private uint _guardThreadId;
-    private volatile bool _guardStop;
-    private IntPtr _taskbarGuardHook = IntPtr.Zero;
-    private LowLevelMouseProc? _taskbarGuardProc;   // keep alive while hooked
-    // Hot-path state, refreshed on the UI thread (edge poll) so the hook proc only
-    // reads simple volatile fields and never touches WPF objects across threads.
-    private volatile bool _guardActive;       // taskbar auto-hide AND bottom dock
+    // Idle working-set trimming. While both docks are hidden, Polaris's (almost
+    // entirely unmanaged) footprint can be evicted to the standby list so the
+    // physical RAM is returned to the system until the next summon. Tracked off
+    // the existing 100&#160;ms edge poll: trim once the app has been idle for a
+    // short grace period, then re-trim periodically so the figure stays low
+    // across a long idle (background timers slowly fault a few pages back).
+    private DateTime _idleSince = DateTime.MaxValue;
+    private DateTime _lastIdleTrim = DateTime.MinValue;
+    private static readonly TimeSpan IdleTrimDelay = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan IdleTrimInterval = TimeSpan.FromSeconds(30);
 
-    // Snapshot of every monitor's bounds, refreshed periodically by the poll
-    // thread (and once at install). The hot paths use it to decide whether a
-    // monitor's bottom edge is a TRUE outer edge (guarded) or has another display
-    // adjacent below it (not guarded, so the cursor can cross down). Volatile
-    // reference swap keeps reads lock-free.
-    private volatile RECT[] _monitorRects = Array.Empty<RECT>();
-    private int _lastMonitorScanTick;
+    // Cursor-movement tracking for the side dock's ambient-animation pause. The
+    // dock is a large per-pixel-alpha layered window, so its breathing run-dots
+    // re-composite the whole surface every tick. We freeze them whenever the
+    // cursor is not actively moving over the dock (stationary or away), and resume
+    // the instant it moves again — eliminating the idle render cost of a dock the
+    // user is merely parked next to.
+    private Point _lastCursorDip = new(double.NaN, double.NaN);
+    private DateTime _lastCursorMoveUtc = DateTime.MinValue;
+    private bool _cursorMovingRecently;
+    private static readonly TimeSpan AmbientStillDelay = TimeSpan.FromMilliseconds(700);
+
+    // Masks the system auto-hide taskbar's reveal trigger under the bottom
+    // side-dock's centre-50% activation band. Self-contained subsystem (own hook
+    // thread + message loop + poll thread); the edge poll only toggles its
+    // Active flag. See Services/TaskbarGuard.cs.
+    private readonly Polaris.Services.TaskbarGuard _taskbarGuard = new();
+
+    // Dismisses both docks when the user left-clicks outside every Polaris window
+    // while the main dock is open. Self-contained (own hook thread + message
+    // loop); the owner only toggles its Active flag. See ClickAwayWatcher.cs.
+    private readonly Polaris.Services.ClickAwayWatcher _clickAway = new();
 
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -209,14 +217,14 @@ public partial class App : Application
         // The left dock mirrors the main dock's resident region (top two rows),
         // so seed that mirror once before the docks build.
         DockSync.MirrorResidentToLeft(_config);
-        _leftDock = new LeftDockWindow(_config, Persist);
-        _leftDock.MainDockChanged += () => _panel?.RefreshFromConfig();
+        _sideDock = new SideDockWindow(_config, Persist);
+        _sideDock.MainDockChanged += () => _panel?.RefreshFromConfig();
         // Clicking the Polaris tile in the left dock's running strip toggles the
         // pinned docks (equivalent to Ctrl+4).
-        _leftDock.ToggleDocks = TogglePinnedDock;
-        _leftDock.Realize();
+        _sideDock.ToggleDocks = TogglePinnedDock;
+        _sideDock.Realize();
         // Let the main dock hand an icon to the left dock when dragged onto it.
-        _panel.DropToLeftDock = TryDropToLeftDock;
+        _panel.DropToSideDock = TryDropToSideDock;
         // Lift the liquid-glass main dock clear of the side dock when the latter
         // is docked at the bottom (so they never overlap).
         _panel.BottomDockReserve = GetBottomDockReserve;
@@ -224,16 +232,36 @@ public partial class App : Application
         _panel.AppsChanged = () =>
         {
             if (DockSync.MirrorResidentToLeft(_config))
-                _leftDock?.RefreshFromConfig();
+                _sideDock?.RefreshFromConfig();
         };
         // Keep the left dock visible while a glass icon is being dragged.
-        _panel.GlassDragActiveChanged = active => _leftDock?.SetDragActive(active);
+        _panel.GlassDragActiveChanged = active => _sideDock?.SetDragActive(active);
         // Retract the left dock together with the main dock (e.g. when launching
         // an app from the main dock hides the panel). Clears every show reason —
         // including the Ctrl+4 "pinned" reason — so a launch always retracts both.
-        _panel.PanelDismissed += () => _leftDock?.HideAll();
+        _panel.PanelDismissed += () =>
+        {
+            _clickAway.Active = false;   // central disarm: covers every hide path
+            _sideDock?.HideAll();
+        };
         StartEdgePoll();
-        InstallTaskbarGuard();
+        _taskbarGuard.Start();
+
+        // A left-click anywhere outside every Polaris window dismisses both docks
+        // while the main dock is open. The hook fires on its own thread, so marshal
+        // to the UI thread before hiding.
+        _clickAway.ClickedOutside += () =>
+        {
+            _panel?.Dispatcher.BeginInvoke(() =>
+            {
+                if (_panel?.IsShown == true)
+                {
+                    _clickAway.Active = false;
+                    _panel.HidePanel();   // also retracts the left dock via PanelDismissed
+                }
+            });
+        };
+        _clickAway.Start();
 
         RebuildHook();
         SetupPinnedHooks();
@@ -315,8 +343,9 @@ public partial class App : Application
         {
             if (_panel?.IsShown == true)
             {
+                _clickAway.Active = false;
                 _panel.HidePanel();
-                _leftDock?.SetPinnedShown(false);
+                _sideDock?.SetPinnedShown(false);
             }
         };
         _escHook.Start();
@@ -348,8 +377,9 @@ public partial class App : Application
     {
         if (_panel?.IsShown == true)
         {
+            _clickAway.Active = false;
             _panel.HidePanel();
-            _leftDock?.SetPinnedShown(false);
+            _sideDock?.SetPinnedShown(false);
         }
         else
         {
@@ -360,7 +390,8 @@ public partial class App : Application
             // is enabled) so both docks appear where the user invoked them.
             SetActiveMonitorFromCursor();
             _panel?.ShowPinned();
-            _leftDock?.SetPinnedShown(true);   // summon the left dock together
+            _sideDock?.SetPinnedShown(true);   // summon the left dock together
+            _clickAway.Active = true;          // arm click-away dismiss
         }
     }
 
@@ -371,7 +402,8 @@ public partial class App : Application
         CloseSettingsIfOpen();
         SetActiveMonitorFromCursor();
         _panel?.ShowPanel();
-        _leftDock?.SetMainShown(true);   // the left dock summons together with the main dock
+        _sideDock?.SetMainShown(true);   // the left dock summons together with the main dock
+        _clickAway.Active = true;        // arm click-away dismiss
     }
 
     /// <summary>Closes the settings window if it is open (or still in the middle
@@ -400,10 +432,13 @@ public partial class App : Application
     private void OnHotkeyReleased()
     {
         _panel?.HideIfNotPinned();
+        // HideIfNotPinned is a no-op while pinned (Ctrl+4), so keep click-away
+        // armed in that case; only disarm once the dock is actually hidden.
+        _clickAway.Active = _panel?.IsShown == true;
         // Releasing the hotkey drops the "shown by main" reason; the left dock
         // stays only if the mouse is currently over its edge trigger (handled by
         // the edge poll, which sets the edge-shown reason).
-        _leftDock?.SetMainShown(false);
+        _sideDock?.SetMainShown(false);
     }
 
     /// <summary>Polls the cursor position so the left dock appears when the mouse
@@ -414,7 +449,7 @@ public partial class App : Application
         _edgePollTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
         _edgePollTimer.Tick += (_, _) =>
         {
-            if (_leftDock == null)
+            if (_sideDock == null)
                 return;
             // Refresh the cached state the mouse-guard hook reads (one cheap shell
             // query per tick, off the hot mouse path): only mask the taskbar when
@@ -424,23 +459,23 @@ public partial class App : Application
                 var abd = new APPBARDATA { cbSize = Marshal.SizeOf<APPBARDATA>() };
                 bool autoHide =
                     ((long)SHAppBarMessage(ABM_GETSTATE, ref abd) & ABS_AUTOHIDE) != 0;
-                _guardActive = autoHide
-                    && _leftDock.DockSidePosition == DockSide.Bottom;
+                _taskbarGuard.Active = autoHide
+                    && _sideDock.DockSidePosition == DockSide.Bottom;
             }
-            catch { _guardActive = false; }
+            catch { _taskbarGuard.Active = false; }
             // Suppress the left-edge auto-summon while the settings window is
             // open (or in the middle of opening), so the dock cannot re-appear
             // over it or flash during the dock fade-out.
             if (_settings != null || _openingSettings)
             {
-                _leftDock.SetEdgeShown(false);
+                _sideDock.SetEdgeShown(false);
                 return;
             }
             // Don't let the mouse summon the dock over a full-screen / borderless
             // app (typically a game running full-screen): the dock must not intrude.
             if (IsFullscreenForeground())
             {
-                _leftDock.SetEdgeShown(false);
+                _sideDock.SetEdgeShown(false);
                 return;
             }
             if (!GetCursorPos(out POINT pt))
@@ -477,7 +512,7 @@ public partial class App : Application
             // centre 50% of that edge. The threshold is generous (and a touch of
             // over-travel past the physical edge also counts) so the dock pops
             // without landing the pointer exactly on the edge.
-            DockSide side = _leftDock.DockSidePosition;
+            DockSide side = _sideDock.DockSidePosition;
             bool inTrigger = side switch
             {
                 DockSide.Right => x >= mon.Right - Reach && y >= mon.Top + bandV && y <= mon.Bottom - bandV,
@@ -491,9 +526,9 @@ public partial class App : Application
             // the pointer moves clear of the slab, without being so tight that it
             // flickers right at the slab boundary.
             bool inDock = false;
-            if (_leftDock.DockVisible)
+            if (_sideDock.DockVisible)
             {
-                Rect b = _leftDock.GetDockScreenBounds();
+                Rect b = _sideDock.GetDockScreenBounds();
                 const double Far = 28;       // interior reach beyond the slab
                 const double Slack = 14;     // slack along the edge
                 inDock = side switch
@@ -505,306 +540,104 @@ public partial class App : Application
                 };
             }
 
-            _leftDock.SetEdgeShown(inTrigger || inDock);
+            _sideDock.SetEdgeShown(inTrigger || inDock);
+            // Freeze the dock's perpetual breathing animations unless the cursor is
+            // actively moving over (or summoning) it. On this large layered window
+            // each opacity tick re-composites the whole surface (~60% CPU + resident
+            // RAM), so it is wasteful while the cursor is parked still or away. Any
+            // cursor movement resumes them instantly; the magnify wave already stops
+            // itself once it has converged, so a still cursor leaves the dock fully
+            // static and the working-set trim can reclaim its memory.
+            var curDip = new Point(x, y);
+            if (double.IsNaN(_lastCursorDip.X) ||
+                Math.Abs(curDip.X - _lastCursorDip.X) > 0.5 ||
+                Math.Abs(curDip.Y - _lastCursorDip.Y) > 0.5)
+            {
+                _lastCursorDip = curDip;
+                _lastCursorMoveUtc = DateTime.UtcNow;
+            }
+            bool cursorMovingRecently = DateTime.UtcNow - _lastCursorMoveUtc < AmbientStillDelay;
+            _cursorMovingRecently = cursorMovingRecently;
+            bool ambientAttended = _sideDock.DockVisible && (inTrigger || inDock) && cursorMovingRecently;
+            _sideDock.SetAmbientPaused(!ambientAttended);
+            // The main dock's orbit light + running glows re-composite its large
+            // (often full-screen) layered window every tick; freeze them whenever the
+            // cursor is not moving, so a parked main dock goes static (CPU drops and
+            // the trim can reclaim its RAM) and resumes the instant the cursor moves.
+            _panel?.SetAmbientPaused(!cursorMovingRecently);
+            EvaluateIdleTrim();
         };
         _edgePollTimer.Start();
     }
 
-    /// <summary>
-    /// Starts the dedicated thread that installs the low-level mouse hook masking
-    /// the system auto-hide taskbar's reveal trigger under the bottom side-dock's
-    /// centre-50% activation band. Windows offers no regional way to suppress the
-    /// taskbar reveal, but the auto-hide bar only slides up when the cursor
-    /// reaches the monitor's bottom-edge pixels; holding the cursor a few rows
-    /// above that edge across the dock's centre band (and swallowing the edge
-    /// move) lets the dock pop there while the taskbar stays hidden. The outer
-    /// 50% at each end is untouched, so the taskbar can still be summoned there.
-    /// The hook lives on its own thread + message loop so a busy UI thread can
-    /// never make it miss the low-level-hook timeout and leak the edge event.
-    /// </summary>
-    private void InstallTaskbarGuard()
+    /// <summary>Called every edge-poll tick. Trims the process working set once
+    /// Polaris has been "passive" for <see cref="IdleTrimDelay"/> (re-trimming
+    /// every <see cref="IdleTrimInterval"/> while it stays passive), returning its
+    /// (almost entirely unmanaged) RAM to the system. Passive means the user is not
+    /// interacting with a Polaris surface AND no surface is continuously animating:
+    /// <list type="bullet">
+    /// <item>the main dock is hidden — while it is shown its running-app glows keep
+    /// breathing, which re-composites its (full-screen, layered) surface every frame,
+    /// so a trim would just churn pages straight back; AND</item>
+    /// <item>the cursor is not moving over a visible secondary surface (side dock /
+    /// settings), whose breathing freezes when the cursor stops.</item>
+    /// </list>
+    /// A visible window's on-screen pixels are held by DWM, so eviction never blanks
+    /// it; the next interaction faults the few pages it needs back in.</summary>
+    private void EvaluateIdleTrim()
     {
-        if (_guardThread != null)
+        // Main dock shown (its run-glows keep re-compositing the surface) or settings
+        // mid-open: treat as active so we don't churn pages.
+        if (_panel?.IsShown == true || _openingSettings)
+        {
+            _idleSince = DateTime.MaxValue;
             return;
-        _guardStop = false;
-        // Seed the monitor layout before the hook starts so the very first mouse
-        // moves are evaluated against a valid snapshot.
-        RefreshMonitorSnapshot();
-        _guardThread = new Thread(TaskbarGuardThread)
-        {
-            IsBackground = true,
-            Name = "PolarisTaskbarGuard",
-        };
-        _guardThread.SetApartmentState(ApartmentState.STA);
-        _guardThread.Start();
-
-        // A low-level hook is silently bypassed while an ELEVATED (admin) window
-        // is in the foreground (UIPI) — e.g. an admin Terminal — so the clamp
-        // would leak there. GetCursorPos/SetCursorPos are NOT UIPI-gated (they act
-        // on the global cursor, not a window), so a parallel polling clamp covers
-        // exactly that gap without elevating Polaris (which would break drag-add
-        // from Explorer and launch every app elevated).
-        _guardPollThread = new Thread(TaskbarGuardPollThread)
-        {
-            IsBackground = true,
-            Name = "PolarisTaskbarGuardPoll",
-        };
-        _guardPollThread.Start();
-    }
-
-    private void TaskbarGuardPollThread()
-    {
-        bool clipped = false;
-        void Release()
-        {
-            if (clipped)
-            {
-                ClipCursor(IntPtr.Zero);
-                clipped = false;
-            }
         }
 
-        while (!_guardStop)
+        // Active only while the cursor is actually MOVING over a visible secondary
+        // surface — a still cursor freezes the side dock's breathing, so its pages
+        // can be evicted and faulted back on the next move.
+        bool active = false;
+        if (_cursorMovingRecently && GetCursorPos(out POINT cp))
         {
-            if (!_guardActive)
-            {
-                Release();
-                Thread.Sleep(50);
-                continue;
-            }
-            try
-            {
-                // Refresh the monitor layout at most ~once a second so display
-                // hot-plug / rearrangement is reflected without per-tick cost.
-                int tick = Environment.TickCount;
-                if (_monitorRects.Length == 0 || tick - _lastMonitorScanTick >= 1000)
-                {
-                    RefreshMonitorSnapshot();
-                    _lastMonitorScanTick = tick;
-                }
+            double scale = GetDpiScale();
+            var cur = new Point(cp.X / scale, cp.Y / scale);
 
-                if (GetCursorPos(out POINT pt))
-                {
-                    IntPtr hMon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
-                    var mi = new MONITORINFO { cbSize = Marshal.SizeOf<MONITORINFO>() };
-                    if (GetMonitorInfo(hMon, ref mi))
-                    {
-                        // Guard a monitor's bottom edge only when it is a TRUE outer
-                        // edge (no display connected below it in the centre band). If
-                        // another monitor sits below, leave the edge open so the cursor
-                        // can cross down into it.
-                        if (!HasNeighborBelow(mi.rcMonitor))
-                        {
-                            int w = mi.rcMonitor.Right - mi.rcMonitor.Left;
-                            double bandStart = mi.rcMonitor.Left + w * 0.25;
-                            double bandEnd = mi.rcMonitor.Right - w * 0.25;
-                            int floor = mi.rcMonitor.Bottom - TaskbarGuardRows;
-                            // PROACTIVELY confine the cursor above the bottom edge
-                            // whenever it is within the centre band's X range. A
-                            // reactive SetCursorPos runs only AFTER the cursor has
-                            // already touched the edge — too late, the taskbar has
-                            // revealed and our bounce-back lands inside the now-shown
-                            // bar. ClipCursor makes the bottom rows physically
-                            // unreachable in the band, so the edge is never touched
-                            // and the bar never reveals; it is not UIPI-gated, so it
-                            // works even when an elevated window is in the
-                            // foreground. The clip is full monitor width (only the
-                            // bottom is cut) so horizontal motion stays free, and it
-                            // is released the moment the cursor leaves the band so
-                            // the outer 50% can still summon the taskbar.
-                            //
-                            // The clip's TOP is the virtual-screen top, not this
-                            // monitor's top: a single ClipCursor rect would otherwise
-                            // trap the cursor against the primary monitor's top edge
-                            // in the centre band, blocking it from crossing UP into a
-                            // monitor positioned above the primary. Extending the top
-                            // to the whole virtual desktop leaves the upward path free
-                            // (the cursor is still kept on real display surface) while
-                            // only the bottom edge stays clamped.
-                            if (pt.X >= bandStart && pt.X <= bandEnd)
-                            {
-                                const int SM_YVIRTUALSCREEN = 77;
-                                var clip = new RECT
-                                {
-                                    Left = mi.rcMonitor.Left,
-                                    Top = GetSystemMetrics(SM_YVIRTUALSCREEN),
-                                    Right = mi.rcMonitor.Right,
-                                    Bottom = floor,
-                                };
-                                ClipCursor(ref clip);
-                                clipped = true;
-                            }
-                            else
-                            {
-                                Release();
-                            }
-                        }
-                        else
-                        {
-                            Release();
-                        }
-                    }
-                }
+            if (_sideDock?.DockVisible == true)
+            {
+                Rect b = _sideDock.GetDockScreenBounds();
+                b.Inflate(24, 24);   // a little slack so a near-edge hover counts
+                if (b.Contains(cur))
+                    active = true;
             }
-            catch { }
-            Thread.Sleep(10);
+            if (!active && _settings is { IsLoaded: true } s && s.ActualWidth > 0)
+            {
+                var sb = new Rect(s.Left, s.Top, s.ActualWidth, s.ActualHeight);
+                sb.Inflate(16, 16);
+                if (sb.Contains(cur))
+                    active = true;
+            }
         }
-        Release();
-    }
+        if (active)
+        {
+            _idleSince = DateTime.MaxValue;
+            return;
+        }
 
-    private void TaskbarGuardThread()
-    {
-        _guardThreadId = GetCurrentThreadId();
-        _taskbarGuardProc = TaskbarGuardProc;   // keep alive while hooked
-        IntPtr hMod = GetModuleHandle(null);
-        _taskbarGuardHook = SetWindowsHookEx(WH_MOUSE_LL, _taskbarGuardProc, hMod, 0);
-        if (_taskbarGuardHook == IntPtr.Zero)
+        var now = DateTime.UtcNow;
+        if (_idleSince == DateTime.MaxValue)
+            _idleSince = now;
+        if (now - _idleSince < IdleTrimDelay)
+            return;
+        if (now - _lastIdleTrim < IdleTrimInterval)
             return;
 
-        // Pump this thread's message queue so the hook callback is dispatched
-        // independently of the WPF UI thread. WM_QUIT (posted on shutdown) ends it.
-        while (GetMessage(out MSG msg, IntPtr.Zero, 0, 0) > 0)
-        {
-            TranslateMessage(ref msg);
-            DispatchMessage(ref msg);
-        }
-
-        UnhookWindowsHookEx(_taskbarGuardHook);
-        _taskbarGuardHook = IntPtr.Zero;
-        _taskbarGuardProc = null;
+        MemoryTrimmer.TrimWorkingSet();
+        _lastIdleTrim = now;
     }
 
-    private IntPtr TaskbarGuardProc(int nCode, IntPtr wParam, IntPtr lParam)
-    {
-        if (nCode >= 0 && (int)wParam == WM_MOUSEMOVE && _guardActive)
-        {
-            try
-            {
-                // Read only the fields we need straight from the struct (x@0, y@4,
-                // flags@12) to keep the hot path allocation-free and fast.
-                int px = Marshal.ReadInt32(lParam, 0);
-                int py = Marshal.ReadInt32(lParam, 4);
-                uint flags = (uint)Marshal.ReadInt32(lParam, 12);
-                // Skip our own SetCursorPos-injected moves (prevents recursion).
-                if ((flags & LLMHF_INJECTED) == 0)
-                {
-                    var pt = new POINT { X = px, Y = py };
-                    IntPtr hMon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
-                    var mi = new MONITORINFO { cbSize = Marshal.SizeOf<MONITORINFO>() };
-                    if (GetMonitorInfo(hMon, ref mi))
-                    {
-                        // Mask the taskbar reveal only on a TRUE outer bottom edge.
-                        // If another display is connected below this monitor, its
-                        // bottom edge is left open so the cursor can cross down.
-                        if (!HasNeighborBelow(mi.rcMonitor))
-                        {
-                            int w = mi.rcMonitor.Right - mi.rcMonitor.Left;
-                            double bandStart = mi.rcMonitor.Left + w * 0.25;
-                            double bandEnd = mi.rcMonitor.Right - w * 0.25;
-                            // Hold the cursor clear of the very edge across the
-                            // centre band, and SWALLOW the original edge event
-                            // (return non-zero): on a fast flick a single move
-                            // lands directly at the edge, and if the shell sees
-                            // that coordinate it reveals the taskbar before our
-                            // reposition registers. Discarding it means the shell
-                            // only ever sees our injected, clamped position.
-                            if (px >= bandStart && px <= bandEnd
-                                && py >= mi.rcMonitor.Bottom - TaskbarGuardRows)
-                            {
-                                SetCursorPos(px, mi.rcMonitor.Bottom - TaskbarGuardRows);
-                                return (IntPtr)1;
-                            }
-                        }
-                    }
-                }
-            }
-            catch { }
-        }
-        return CallNextHookEx(IntPtr.Zero, nCode, wParam, lParam);
-    }
-
-    private void RemoveTaskbarGuard()
-    {
-        _guardStop = true;
-        var pt = _guardPollThread;
-        var t = _guardThread;
-        if (t == null && pt == null)
-            return;
-        if (_guardThreadId != 0)
-            PostThreadMessage(_guardThreadId, WM_QUIT, IntPtr.Zero, IntPtr.Zero);
-        t?.Join(500);
-        pt?.Join(500);
-        _guardThread = null;
-        _guardPollThread = null;
-        _guardThreadId = 0;
-    }
-
-    /// <summary>Re-reads the current monitor layout into <see cref="_monitorRects"/>.
-    /// Cheap (a handful of monitors) and called at most ~once a second from the poll
-    /// loop, plus once at install, so display hot-plug / rearrangement is picked up.</summary>
-    private void RefreshMonitorSnapshot()
-    {
-        var rects = new System.Collections.Generic.List<RECT>(4);
-        bool Collect(IntPtr hMon, IntPtr hdc, ref RECT lprc, IntPtr data)
-        {
-            var mi = new MONITORINFO { cbSize = Marshal.SizeOf<MONITORINFO>() };
-            if (GetMonitorInfo(hMon, ref mi))
-                rects.Add(mi.rcMonitor);
-            return true;
-        }
-        try
-        {
-            EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, Collect, IntPtr.Zero);
-            _monitorRects = rects.ToArray();
-        }
-        catch { }
-    }
-
-    /// <summary>True when another display sits directly below <paramref name="m"/>'s
-    /// bottom edge and overlaps the guarded centre band — i.e. the cursor should be
-    /// allowed to cross downward there, so no taskbar-guard wall is placed. False for
-    /// a true outer bottom edge (nothing below in the band), which IS guarded.</summary>
-    private bool HasNeighborBelow(in RECT m)
-    {
-        int w = m.Right - m.Left;
-        double bandStart = m.Left + w * 0.25;
-        double bandEnd = m.Right - w * 0.25;
-        const int tol = 2;   // tolerate a 1-2px seam between adjacent monitors
-        var rects = _monitorRects;
-        foreach (var r in rects)
-        {
-            // A monitor whose TOP meets this monitor's BOTTOM (self never matches,
-            // since its own Top != its own Bottom) and whose horizontal span covers
-            // any part of the guarded band counts as "connected below".
-            if (Math.Abs(r.Top - m.Bottom) <= tol && r.Right > bandStart && r.Left < bandEnd)
-                return true;
-        }
-        return false;
-    }
-
-    private const int WH_MOUSE_LL = 14;
-    // Pixel rows above the monitor's bottom edge that the cursor is held clear of
-    // inside the centre band, so the auto-hide taskbar's reveal tolerance never
-    // fires there. Stays below the dock's edge reach so the dock still pops.
-    private const int TaskbarGuardRows = 3;
-    private const int WM_MOUSEMOVE = 0x0200;
-    private const uint LLMHF_INJECTED = 0x00000001;
-    private const uint MONITOR_DEFAULTTONEAREST = 2;
-    private const uint MONITORINFOF_PRIMARY = 1;
     private const uint ABM_GETSTATE = 0x00000004;
     private const long ABS_AUTOHIDE = 0x0000001;
-
-    private delegate IntPtr LowLevelMouseProc(int nCode, IntPtr wParam, IntPtr lParam);
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct MSLLHOOKSTRUCT
-    {
-        public POINT pt;
-        public uint mouseData;
-        public uint flags;
-        public uint time;
-        public IntPtr dwExtraInfo;
-    }
 
     [StructLayout(LayoutKind.Sequential)]
     private struct RECT { public int Left, Top, Right, Bottom; }
@@ -829,87 +662,21 @@ public partial class App : Application
         public int lParam;
     }
 
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelMouseProc lpfn, IntPtr hMod, uint dwThreadId);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool UnhookWindowsHookEx(IntPtr hhk);
-
-    [DllImport("user32.dll")]
-    private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
-
-    [DllImport("kernel32.dll", CharSet = CharSet.Auto)]
-    private static extern IntPtr GetModuleHandle(string? lpModuleName);
-
-    [DllImport("user32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool SetCursorPos(int X, int Y);
-
-    [DllImport("user32.dll")]
-    private static extern int GetSystemMetrics(int nIndex);
-
-    [DllImport("user32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool ClipCursor(ref RECT lpRect);
-
-    [DllImport("user32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool ClipCursor(IntPtr lpRect);
-
-    [DllImport("user32.dll")]
-    private static extern IntPtr MonitorFromPoint(POINT pt, uint dwFlags);
-
     [DllImport("user32.dll", CharSet = CharSet.Auto)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFO lpmi);
 
-    private delegate bool MonitorEnumProc(IntPtr hMonitor, IntPtr hdc, ref RECT lprc, IntPtr data);
-
-    [DllImport("user32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool EnumDisplayMonitors(IntPtr hdc, IntPtr lprcClip, MonitorEnumProc lpfnEnum, IntPtr dwData);
-
     [DllImport("shell32.dll")]
     private static extern IntPtr SHAppBarMessage(uint dwMessage, ref APPBARDATA pData);
 
-    private const uint WM_QUIT = 0x0012;
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct MSG
-    {
-        public IntPtr hwnd;
-        public uint message;
-        public IntPtr wParam;
-        public IntPtr lParam;
-        public uint time;
-        public POINT pt;
-    }
-
-    [DllImport("kernel32.dll")]
-    private static extern uint GetCurrentThreadId();
-
-    [DllImport("user32.dll")]
-    private static extern int GetMessage(out MSG lpMsg, IntPtr hWnd, uint wMsgFilterMin, uint wMsgFilterMax);
-
-    [DllImport("user32.dll")]
-    private static extern bool TranslateMessage(ref MSG lpMsg);
-
-    [DllImport("user32.dll")]
-    private static extern IntPtr DispatchMessage(ref MSG lpMsg);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool PostThreadMessage(uint idThread, uint Msg, IntPtr wParam, IntPtr lParam);
-
     /// <summary>Adds the dragged main-dock entry to the left dock if the drop
     /// point lands over the left dock. Returns true when it was added there.</summary>
-    private bool TryDropToLeftDock(Point screenPoint, AppEntry entry)
+    private bool TryDropToSideDock(Point screenPoint, AppEntry entry)
     {
         // screenPoint is in DEVICE pixels (from Visual.PointToScreen). Let the
         // left dock convert it through its own PointFromScreen so the hit test is
         // DPI-correct without any manual scale math.
-        return _leftDock?.TryAcceptDrop(screenPoint, entry) == true;
+        return _sideDock?.TryAcceptDrop(screenPoint, entry) == true;
     }
 
     /// <summary>Height (DIP, measured up from the bottom screen edge) that the
@@ -918,9 +685,9 @@ public partial class App : Application
     /// side dock is on any other edge.</summary>
     private double GetBottomDockReserve()
     {
-        if (_leftDock == null || _leftDock.DockSidePosition != DockSide.Bottom)
+        if (_sideDock == null || _sideDock.DockSidePosition != DockSide.Bottom)
             return 0.0;
-        Rect b = _leftDock.GetDockScreenBounds();
+        Rect b = _sideDock.GetDockScreenBounds();
         // For a bottom dock the slab's rect HEIGHT is its thickness, which is
         // independent of which monitor it sits on. Reserve that thickness plus a
         // small gap so the glass dock lifts just clear of it. (Deriving the
@@ -1014,7 +781,7 @@ public partial class App : Application
                 (s == QUNS.RUNNING_D3D_FULL_SCREEN || s == QUNS.PRESENTATION_MODE))
                 return true;
         }
-        catch { /* fall through to the geometry test */ }
+        catch (Exception ex) { Log.Debug("Fullscreen", "shell notification-state query failed; using geometry test", ex); }
 
         // 2. "Rude window" geometry test — a BORDERLESS window that covers the
         // whole monitor. The style test (no caption, no sizing frame) is essential:
@@ -1081,7 +848,8 @@ public partial class App : Application
         // settings window only AFTER the dock's fade-out animation has fully
         // finished, so it never appears over a still-animating dock.
         _openingSettings = true;   // suppress edge re-summon during the fade
-        _leftDock?.HideAll();   // dismiss the left dock too, not just the main dock
+        _clickAway.Active = false;
+        _sideDock?.HideAll();   // dismiss the left dock too, not just the main dock
         if (_panel != null)
             _panel.HidePanel(ShowSettingsWindow);
         else
@@ -1117,7 +885,7 @@ public partial class App : Application
             // Re-anchor / re-lay the side dock FIRST so a changed dock position
             // (or any geometry-affecting setting) takes effect immediately and
             // its new bounds are available to the main dock below.
-            _leftDock?.RefreshLayout();
+            _sideDock?.RefreshLayout();
             // Then re-render the panel so theme / layout / size changes apply
             // live — and so the glass main dock reads the side dock's updated
             // bottom reserve and lifts clear of it.
@@ -1191,7 +959,8 @@ public partial class App : Application
     private void ExitApp()
     {
         FlushPersist();
-        RemoveTaskbarGuard();
+        _taskbarGuard.Stop();
+        _clickAway.Stop();
         _tray?.Dispose();
         _hook?.Dispose();
         _pinnedHook?.Dispose();
@@ -1204,7 +973,8 @@ public partial class App : Application
     {
         FpsProfiler.Stop();
         FlushPersist();
-        RemoveTaskbarGuard();
+        _taskbarGuard.Stop();
+        _clickAway.Stop();
         _tray?.Dispose();
         _hook?.Dispose();
         _pinnedHook?.Dispose();
@@ -1255,7 +1025,7 @@ public partial class App : Application
         {
             Forms.MessageBox.Show(
                 "Polaris 遇到一个错误，但仍在运行。\n" +
-                "详情已记录到日志：\n" + LogPath + "\n\n" + ex.Message,
+                "详情已记录到日志：\n" + Log.Path + "\n\n" + ex.Message,
                 "Polaris",
                 Forms.MessageBoxButtons.OK,
                 Forms.MessageBoxIcon.Warning);
@@ -1266,23 +1036,6 @@ public partial class App : Application
         }
     }
 
-    private static readonly string LogPath = System.IO.Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-        "Polaris", "errors.log");
-
     private static void LogException(string source, Exception ex)
-    {
-        try
-        {
-            var dir = System.IO.Path.GetDirectoryName(LogPath);
-            if (!string.IsNullOrEmpty(dir))
-                System.IO.Directory.CreateDirectory(dir);
-            System.IO.File.AppendAllText(LogPath,
-                $"[{DateTime.Now:o}] ({source}) {ex}\n\n");
-        }
-        catch
-        {
-            // Logging must never throw.
-        }
-    }
+        => Log.Error(source, "unhandled exception", ex);
 }

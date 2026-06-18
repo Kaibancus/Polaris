@@ -308,6 +308,11 @@ public partial class RadialWindow
             {
                 Radius = Math.Max(8, thickness * 0.6),
             }),
+            // Bake the large blur kernel to a texture. The halo is static, but the
+            // layered window re-composites every frame while the ring spins, which
+            // would otherwise re-rasterise this expensive blur each frame. Caching
+            // makes the per-frame recomposite a plain blit of the cached bitmap.
+            CacheMode = new System.Windows.Media.BitmapCache(),
         };
         Canvas.SetLeft(glow, _center.X - rMid);
         Canvas.SetTop(glow, _center.Y - rMid * _stackTiltY);

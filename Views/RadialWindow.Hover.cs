@@ -68,7 +68,7 @@ public partial class RadialWindow
     /// <summary>Must match <c>RadialIcon.HoverScale</c> — the hover zoom factor,
     /// used to place the floating label below the zoomed icon and to size its
     /// font to match the (formerly icon-scaled) built-in label.</summary>
-    private const double HoverScaleConst = 1.7;
+    private const double HoverScaleConst = DockTuning.HoverScale;
 
     private void ShowGlassHoverLabel(RadialIcon ic, int idx)
     {
@@ -99,10 +99,16 @@ public partial class RadialWindow
             {
                 Background = new SolidColorBrush(Color.FromArgb(0x05, 0x1A, 0x1A, 0x1A)),
                 CornerRadius = new CornerRadius(7),
-                Padding = new Thickness(10, 4, 10, 4),
+                Padding = new Thickness(3, 4, 3, 4),
                 IsHitTestVisible = false,
                 Child = _glassHoverLabelText,
                 Opacity = 0,
+                // The label fades in/out via an Opacity animation; cache the
+                // text + drop-shadow as one bitmap so each fade frame just blits
+                // a texture instead of re-rasterizing the blurred glyphs. The
+                // cache rebuilds once per hover when the name/font changes — a
+                // negligible cost next to the per-frame fade recomposite.
+                CacheMode = new BitmapCache(2.0),
             };
             Panel.SetZIndex(_glassHoverLabel, 4000);
             PanelCanvas.Children.Add(_glassHoverLabel);
@@ -129,7 +135,9 @@ public partial class RadialWindow
         _glassHoverLabel.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
         double lw = _glassHoverLabel.DesiredSize.Width;
         Canvas.SetLeft(_glassHoverLabel, cx - lw / 2.0);
-        Canvas.SetTop(_glassHoverLabel, cy + zoomedHalf + 6);
+        // Sit the label snug under the zoomed icon (small 1px gap, was 6px) so a
+        // magnified name rides higher and stays within the slab's bottom border.
+        Canvas.SetTop(_glassHoverLabel, cy + zoomedHalf + 1);
 
         _glassHoverLabel.BeginAnimation(OpacityProperty,
             new DoubleAnimation(1, new Duration(TimeSpan.FromMilliseconds(110))));
@@ -141,14 +149,49 @@ public partial class RadialWindow
             new DoubleAnimation(0, new Duration(TimeSpan.FromMilliseconds(110))));
     }
 
+    /// <summary>
+    /// Pushes icons near <paramref name="hovered"/> away from it, with the shift
+    /// falling off by distance, so closer neighbours move more.
+    /// </summary>
+    private void SpreadNeighbours(int hovered)
+    {
+        double iconSize = _config.Settings.IconSize;
+        double push = iconSize * DockTuning.SpreadPush;
+        double influence = iconSize * DockTuning.SpreadInfluence;
+        Point hp = _slotPositions[hovered];
+
+        for (int i = 0; i < _iconElements.Count; i++)
+        {
+            if (i == hovered)
+                continue;
+            var el = _iconElements[i];
+            if (el == null)
+                continue;
+
+            Vector v = _slotPositions[i] - hp;
+            double d = v.Length;
+            if (d > 0.01 && d < influence)
+            {
+                double amount = push * (1 - d / influence);
+                Point np = _slotPositions[i] + (v / d) * amount;
+                AnimateTo(el, np);
+            }
+            else
+            {
+                AnimateTo(el, _slotPositions[i]);
+            }
+        }
+    }
+
     /// <summary>Animates all icons back to their home ring slots.</summary>
     private void RestoreSlots()
     {
         for (int i = 0; i < _iconElements.Count && i < _slotPositions.Count; i++)
         {
-            if (_iconElements[i] == _pressedIcon)
+            var el = _iconElements[i];
+            if (el == null || el == _pressedIcon)
                 continue;
-            AnimateTo(_iconElements[i], _slotPositions[i]);
+            AnimateTo(el, _slotPositions[i]);
         }
     }
 
@@ -168,11 +211,12 @@ public partial class RadialWindow
         var positions = SlotPositionsFor(n, newR0);
         for (int i = 0; i < _iconElements.Count; i++)
         {
-            if (_iconElements[i] == _pressedIcon)
+            var el = _iconElements[i];
+            if (el == null || el == _pressedIcon)
                 continue;
             int slot = slotOfEntry[i];
             if (slot >= 0 && slot < positions.Count)
-                AnimateTo(_iconElements[i], positions[slot]);
+                AnimateTo(el, positions[slot]);
         }
     }
 
@@ -222,13 +266,17 @@ public partial class RadialWindow
             return;
         }
 
+        // Drag finished: dismiss the overlay ghost (a Rebuild below recreates the
+        // real icon on every drop path).
+        EndDragGhost(icon);
+
         // Glass theme: dropping a dragged icon onto the left-edge dock pins it
         // there (the main-dock entry stays). Checked before delete/reorder so a
         // drag toward the left edge adds rather than deletes.
-        if (_theme.ShowGlassPanel && DropToLeftDock != null)
+        if (_theme.ShowGlassPanel && DropToSideDock != null)
         {
             Point screen = PointToScreen(p);
-            if (DropToLeftDock(screen, icon.Entry))
+            if (DropToSideDock(screen, icon.Entry))
             {
                 GlassDragActiveChanged?.Invoke(false);
                 Rebuild();   // snap the main-dock icon back into its slot
@@ -327,6 +375,7 @@ public partial class RadialWindow
         {
             bool wasDragging = _dragging;
             PanelCanvas.ReleaseMouseCapture();
+            EndDragGhost(_pressedIcon);
             _pressedIcon = null;
             _dragging = false;
             _dragTargetRing = -1;

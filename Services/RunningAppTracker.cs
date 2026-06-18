@@ -160,6 +160,16 @@ public static class RunningAppTracker
         /// system tray, which hide their window). Matched by exact path only.</summary>
         public HashSet<string> PathsNoWindow { get; } =
             new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>Main-window titles of processes that own a visible window but
+        /// whose executable PATH could not be read (anti-debug protected apps such
+        /// as UU加速器, whose launcher exits and whose real process blocks path
+        /// reads). Lets a pinned entry be matched by its display name when no path
+        /// is available. ONLY protected-process titles are stored, so an ordinary
+        /// app whose title happens to equal an entry name can't cause a false
+        /// match.</summary>
+        public HashSet<string> WindowTitles { get; } =
+            new(StringComparer.OrdinalIgnoreCase);
     }
 
     /// <summary>
@@ -191,22 +201,34 @@ public static class RunningAppTracker
             {
                 bool hasWindow = p.MainWindowHandle != IntPtr.Zero;
 
-                string? modulePath = null;
-                try
-                {
-                    modulePath = p.MainModule?.FileName;
-                }
-                catch
-                {
-                    // Access denied / 32-vs-64 — fall back to a name match.
-                }
+                // Robust low-privilege image-path read (QueryFullProcessImageName,
+                // PROCESS_QUERY_LIMITED_INFORMATION) — the same query the Windows
+                // shell/taskbar uses, and the SAME one GetTaskbarApps already uses,
+                // so the running snapshot and the running strip now see processes
+                // identically. Reads anti-debug-protected and cross-bitness
+                // processes (e.g. UU加速器) that Process.MainModule.FileName (which
+                // needs PROCESS_VM_READ) cannot. Only a name match is left when even
+                // this fails.
+                string? modulePath = WindowPreviewService.TryGetProcessImagePath((uint)p.Id);
 
                 if (hasWindow)
                 {
                     if (!string.IsNullOrEmpty(modulePath))
                         snapshot.Paths.Add(Path.GetFullPath(modulePath));
                     else
+                    {
                         snapshot.NamesWithoutPath.Add(p.ProcessName);
+                        // Path-protected app with a visible window (e.g. UU加速器):
+                        // record its window title so a pinned entry can be matched
+                        // by display name when its path is unreadable.
+                        try
+                        {
+                            string t = p.MainWindowTitle;
+                            if (!string.IsNullOrWhiteSpace(t))
+                                snapshot.WindowTitles.Add(t);
+                        }
+                        catch { }
+                    }
                 }
                 else if (!string.IsNullOrEmpty(modulePath))
                 {
@@ -295,9 +317,73 @@ public static class RunningAppTracker
                 if (string.Equals(Path.GetFileName(p), name, StringComparison.OrdinalIgnoreCase))
                     return true;
             }
-            catch { /* ignore a malformed path */ }
+            catch (System.Exception ex) { Log.Debug("RunningApps", "malformed path skipped", ex); }
         }
         return false;
+    }
+
+    /// <summary>Fallback for launcher-style pins whose pinned exe (e.g. UU加速器's
+    /// uu_launcher.exe in ...\UU\) starts the real app process — which often lives
+    /// in a VERSION SUBFOLDER (...\UU\5224\uu.exe) — and then exits: true when some
+    /// process owning a VISIBLE window runs an executable in the SAME folder as
+    /// <paramref name="exePath"/>, or in a DIRECT child folder of it. Limited to one
+    /// level down so it links a launcher to its sibling/versioned main exe without
+    /// matching unrelated apps installed DEEPER under a launcher's tree (e.g. Steam
+    /// games under ...\Steam\steamapps\common\…). Window-only so background helpers
+    /// can't light it up; skipped for shared system / Program Files root dirs.</summary>
+    public static bool IsRunningInSameFolderWithWindow(string exePath, RunningSnapshot snapshot)
+    {
+        if (snapshot == null)
+            return false;
+        foreach (var p in snapshot.Paths)
+            if (IsSameOrChildInstallFolder(exePath, p))
+                return true;
+        return false;
+    }
+
+    /// <summary>True when <paramref name="candidateExe"/> sits in the SAME folder
+    /// as <paramref name="pinnedExe"/>, or in a DIRECT child folder of it (one
+    /// level) — linking a launcher (...\UU\uu_launcher.exe) to its versioned main
+    /// exe (...\UU\5224\uu.exe) without matching apps installed DEEPER under a
+    /// launcher's tree (e.g. Steam games under ...\Steam\steamapps\common\…).
+    /// Returns false for shared system / Program Files root dirs. Shared by the
+    /// pinned-running test AND the running-strip de-dup so both treat a
+    /// launcher↔main-exe pair identically.</summary>
+    public static bool IsSameOrChildInstallFolder(string pinnedExe, string candidateExe)
+    {
+        if (string.IsNullOrWhiteSpace(pinnedExe) || string.IsNullOrWhiteSpace(candidateExe))
+            return false;
+        string dir;
+        try { dir = Path.GetDirectoryName(Path.GetFullPath(pinnedExe)) ?? ""; }
+        catch { return false; }
+        if (string.IsNullOrEmpty(dir) || IsSharedSystemDir(dir))
+            return false;
+        try
+        {
+            string? cdir = Path.GetDirectoryName(Path.GetFullPath(candidateExe));
+            if (cdir == null)
+                return false;
+            return string.Equals(cdir, dir, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(Path.GetDirectoryName(cdir), dir, StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return false; }
+    }
+
+    /// <summary>True for shared directories (Windows, System32, SysWOW64, the
+    /// Program Files roots) where many unrelated apps live, so same-folder
+    /// running-detection must NOT be applied there.</summary>
+    private static bool IsSharedSystemDir(string dir)
+    {
+        string d = dir.TrimEnd('\\');
+        string Sp(Environment.SpecialFolder f)
+        {
+            try { return Environment.GetFolderPath(f).TrimEnd('\\'); } catch { return "\0"; }
+        }
+        return d.Equals(Sp(Environment.SpecialFolder.System), StringComparison.OrdinalIgnoreCase)
+            || d.Equals(Sp(Environment.SpecialFolder.SystemX86), StringComparison.OrdinalIgnoreCase)
+            || d.Equals(Sp(Environment.SpecialFolder.Windows), StringComparison.OrdinalIgnoreCase)
+            || d.Equals(Sp(Environment.SpecialFolder.ProgramFiles), StringComparison.OrdinalIgnoreCase)
+            || d.Equals(Sp(Environment.SpecialFolder.ProgramFilesX86), StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>Executables that keep persistent background processes alive with
@@ -383,11 +469,21 @@ public static class RunningAppTracker
             // Non-packaged AppsFolder launchers (VS Code, iQiyi…) carry no window
             // AUMID; match their resolved exe in the process snapshot instead.
             string? aumidExe = WindowPreviewService.TryResolveAppsFolderExe(aumid);
-            return WindowPreviewService.IsAumidInSnapshot(aumid, runningAumids)
-                || (!string.IsNullOrEmpty(aumidExe) && IsRunningInSnapshot(aumidExe, snapshot))
-                || (!string.IsNullOrEmpty(aumidExe) && IsRunningByFileNameWithWindow(aumidExe, snapshot))
-                || IsRunningInSnapshot(entry.Path, snapshot)
-                || IsShellItemRunning(entry.Name, entry.Path, explorerTitles);
+            bool byAumid = WindowPreviewService.IsAumidInSnapshot(aumid, runningAumids);
+            bool byExe = !string.IsNullOrEmpty(aumidExe) && IsRunningInSnapshot(aumidExe, snapshot);
+            bool byExeWin = !string.IsNullOrEmpty(aumidExe) && IsRunningByFileNameWithWindow(aumidExe, snapshot);
+            bool byPath = IsRunningInSnapshot(entry.Path, snapshot);
+            // Launcher-style pins (UU加速器's uu_launcher.exe starts the real app
+            // and exits) won't match by path/name; match a sibling main exe that
+            // owns a window in the same install folder.
+            bool byFolder = IsRunningInSameFolderWithWindow(entry.Path, snapshot);
+            // Anti-debug protected apps (UU加速器) expose no readable path at all,
+            // so match a visible protected-process window whose title equals the
+            // pinned display name.
+            bool byTitle = !string.IsNullOrWhiteSpace(entry.Name)
+                && snapshot.WindowTitles.Contains(entry.Name);
+            bool byShell = IsShellItemRunning(entry.Name, entry.Path, explorerTitles);
+            return byAumid || byExe || byExeWin || byPath || byFolder || byTitle || byShell;
         }
         catch
         {
@@ -646,18 +742,11 @@ public static class RunningAppTracker
                 if (p.MainWindowHandle == IntPtr.Zero)
                     continue;
 
-                // Prefer an exact path match when the module path is readable;
-                // otherwise fall back to the name-only match (access to
-                // MainModule can be denied for elevated processes).
-                string? modulePath = null;
-                try
-                {
-                    modulePath = p.MainModule?.FileName;
-                }
-                catch
-                {
-                    // Access denied / 32-vs-64 — keep as a name-only fallback.
-                }
+                // Prefer an exact path match; read the path with the robust
+                // low-privilege query (works for anti-debug-protected / cross-
+                // bitness processes that Process.MainModule can't open). Fall back
+                // to the name-only match when even that fails.
+                string? modulePath = WindowPreviewService.TryGetProcessImagePath((uint)p.Id);
 
                 if (modulePath != null &&
                     string.Equals(Path.GetFullPath(modulePath), fullTarget,

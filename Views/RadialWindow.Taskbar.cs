@@ -131,7 +131,7 @@ public partial class RadialWindow
     {
         double icon = EffectiveIconSize;
         double tile = icon * GlassIconScale;   // same footprint as a glass grid icon
-        double cellW = icon * 2.15;            // same column pitch as the grid
+        double cellW = icon * LiquidGlassTheme.ColumnPitch;   // same column pitch as the grid
 
         // The dock body is a fixed 4-row block centred on GlassDockCenter; the
         // taskbar strip is carved at its bottom (see GlassTaskbarStripHeight /
@@ -322,6 +322,12 @@ public partial class RadialWindow
             Background = idleBg,
             Padding = new Thickness(pad),
             Child = image,
+            // Bake the (HighQuality-scaled) icon to a texture so the always-on running
+            // sweep/glow — and, in glass mode, the orbit light — don't re-sample the
+            // image on every layered-window recomposite. The hover zoom is a transform
+            // on the parent (cache stays valid); cached at 2.0 like the pinned grid
+            // icons so it remains crisp when magnified to 1.7x.
+            CacheMode = new System.Windows.Media.BitmapCache(2.0),
         };
 
         // Soft, breathing glow (blurred, behind the sweep). Matches the ring
@@ -439,18 +445,32 @@ public partial class RadialWindow
             _taskbarIconCache.Remove(key);
     }
 
+    // Frozen, shared plate brushes so every taskbar tile reuses one immutable
+    // brush per theme instead of allocating fresh SolidColorBrushes on rebuild.
+    private static readonly SolidColorBrush GlassTileIdle =
+        Frozen(Color.FromArgb(0x08, 0xFF, 0xFF, 0xFF));
+    private static readonly SolidColorBrush GlassTileHover =
+        Frozen(Color.FromArgb(0x22, 0xFF, 0xFF, 0xFF));
+    private static readonly SolidColorBrush SaturnTileIdle =
+        Frozen(Color.FromArgb(0x33, 0x10, 0x12, 0x18));
+    private static readonly SolidColorBrush SaturnTileHover =
+        Frozen(Color.FromArgb(0x66, 0x2A, 0x2E, 0x3A));
+
+    private static SolidColorBrush Frozen(Color c)
+    {
+        var b = new SolidColorBrush(c);
+        b.Freeze();
+        return b;
+    }
+
     /// <summary>Idle/hover plate brushes and corner radius shared by every
     /// taskbar tile. Saturn uses a dark plate; glass matches the pinned grid
     /// icons' liquid-glass background.</summary>
     private (SolidColorBrush idle, SolidColorBrush hover, double radius) TaskbarTileChrome(double size)
     {
         bool glass = _theme.ShowGlassPanel;
-        var idle = glass
-            ? new SolidColorBrush(Color.FromArgb(0x08, 0xFF, 0xFF, 0xFF))
-            : new SolidColorBrush(Color.FromArgb(0x33, 0x10, 0x12, 0x18));
-        var hover = glass
-            ? new SolidColorBrush(Color.FromArgb(0x22, 0xFF, 0xFF, 0xFF))
-            : new SolidColorBrush(Color.FromArgb(0x66, 0x2A, 0x2E, 0x3A));
+        var idle = glass ? GlassTileIdle : SaturnTileIdle;
+        var hover = glass ? GlassTileHover : SaturnTileHover;
         double radius = glass ? 12 : size * 0.22;
         return (idle, hover, radius);
     }

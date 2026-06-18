@@ -14,7 +14,7 @@ using Polaris.Services;
 
 namespace Polaris.Views;
 
-public partial class LeftDockWindow
+public partial class SideDockWindow
 {
     // ---- Drag (reorder within column / drag out to remove) ----------------
 
@@ -160,7 +160,7 @@ public partial class LeftDockWindow
         bool outside = Math.Abs(CrossOf(p) - _colCenterCross) > _slabCrossLen * 0.85;
         if (outside)
         {
-            RemoveFromLeftDock(icon.Entry);
+            RemoveFromSideDock(icon.Entry);
             return;
         }
 
@@ -169,8 +169,8 @@ public partial class LeftDockWindow
         // region, so reorder the matching entries in the resident slice directly.
         double contentMain = MainOf(p) + _pinnedScroll;
         int tgt = (int)Math.Round((contentMain - _pinnedAreaMain - CellH / 2.0) / CellH);
-        tgt = Math.Clamp(tgt, 0, _config.LeftDockApps.Count - 1);
-        int src = _config.LeftDockApps.IndexOf(icon.Entry);
+        tgt = Math.Clamp(tgt, 0, _config.SideDockApps.Count - 1);
+        int src = _config.SideDockApps.IndexOf(icon.Entry);
         if (src >= 0 && tgt != src && src < _config.Apps.Count && tgt < _config.Apps.Count)
         {
             var e2 = _config.Apps[src];

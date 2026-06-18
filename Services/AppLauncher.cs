@@ -12,7 +12,7 @@ namespace Polaris.Services;
 /// activate decision tree — File Explorer, shell-namespace objects, packaged
 /// (UWP) apps, non-packaged AppsFolder launchers (iQiyi, VS Code…) and ordinary
 /// executables — can never drift between them. Historically this logic was
-/// duplicated in RadialWindow and LeftDockWindow, and every fix had to be made
+/// duplicated in RadialWindow and SideDockWindow, and every fix had to be made
 /// twice (and was occasionally missed); centralizing it removes that whole class
 /// of bug.
 /// </summary>
@@ -51,7 +51,7 @@ public static class AppLauncher
                 if (RunningAppTracker.ActivateExisting(entry.Path, entry.Arguments))
                     return;
             }
-            catch { /* fall through to a normal launch */ }
+            catch (System.Exception ex) { Log.Debug("AppLauncher", "activate existing window failed; launching fresh", ex); }
         }
 
         LaunchExecutable(entry);
@@ -70,7 +70,7 @@ public static class AppLauncher
                 if (RunningAppTracker.ActivateExisting(entry.Path, entry.Arguments))
                     return;
             }
-            catch { /* fall through to a fresh launch */ }
+            catch (System.Exception ex) { Log.Debug("AppLauncher", "activate existing window failed; opening fresh", ex); }
         }
 
         // Non-packaged AppsFolder launchers (iQiyi, VS Code…) resolve to a real

@@ -14,7 +14,7 @@ using Polaris.Services;
 
 namespace Polaris.Views;
 
-public partial class LeftDockWindow
+public partial class SideDockWindow
 {
     // ---- macOS-dock magnification wave (continuous + frame-smoothed) -------
 
@@ -46,6 +46,9 @@ public partial class LeftDockWindow
         else
         {
             _waveCursorY = double.NaN;   // the tick loop eases everything back to rest
+            EnsureWaveTicking();         // re-arm in case the loop had stopped while
+                                         // the cursor sat still on the dock, so the
+                                         // ease-back to rest always runs
         }
 
         // The pinned hover label is still gated on the pinned viewport only; the
@@ -211,28 +214,38 @@ public partial class LeftDockWindow
         maxDelta = Math.Max(maxDelta, UpdateDebrisWave(k));
         UpdateWaveBulge();
 
-        // Once the wave has fully settled back to rest, stop the loop.
-        if (!active && maxDelta < 0.0015)
+        // Once the wave has converged to its CURRENT target, stop the render loop.
+        // Previously it only stopped when the cursor had fully left (active=false);
+        // while the cursor sat still ON the dock the loop kept firing every vsync
+        // (re-running SetMagnify on every icon and rebuilding the flame geometry),
+        // which is what pinned the side dock at ~60% CPU during a stationary hover.
+        // A later MouseMove re-arms the loop (EnsureWaveTicking) and re-eases toward
+        // the new target, so the motion is visually identical.
+        if (maxDelta < 0.0015)
         {
-            for (int i = 0; i < n; i++)
+            if (!active)
             {
-                _pinnedIcons[i].SetMagnify(1.0, 0.0, 0.0);
-                Panel.SetZIndex(_pinnedIcons[i], 0);
+                // Settled all the way back to rest — normalise everything to 1.0.
+                for (int i = 0; i < n; i++)
+                {
+                    _pinnedIcons[i].SetMagnify(1.0, 0.0, 0.0);
+                    Panel.SetZIndex(_pinnedIcons[i], 0);
+                }
+                for (int j = 0; j < rn; j++)
+                {
+                    _runScale[j].ScaleX = _runScale[j].ScaleY = 1.0;
+                    _runTrans[j].X = _runTrans[j].Y = 0.0;
+                    _runWaveCur[j] = 1.0;
+                    Panel.SetZIndex(_runTiles[j], 60);
+                }
+                foreach (var d in _debris)
+                {
+                    d.Cur = 0.0;
+                    d.Tr.X = 0.0;
+                    d.Tr.Y = 0.0;
+                }
+                UpdateWaveBulge();   // flatten the background bulge back to rest
             }
-            for (int j = 0; j < rn; j++)
-            {
-                _runScale[j].ScaleX = _runScale[j].ScaleY = 1.0;
-                _runTrans[j].X = _runTrans[j].Y = 0.0;
-                _runWaveCur[j] = 1.0;
-                Panel.SetZIndex(_runTiles[j], 60);
-            }
-            foreach (var d in _debris)
-            {
-                d.Cur = 0.0;
-                d.Tr.X = 0.0;
-                d.Tr.Y = 0.0;
-            }
-            UpdateWaveBulge();   // flatten the background bulge back to rest
             CompositionTarget.Rendering -= OnWaveTick;
             _waveTicking = false;
         }
@@ -477,9 +490,10 @@ public partial class LeftDockWindow
 
         _hoverLabelText!.Text = name;
 
-        // Cross position of the label's near edge: just past the hover-enlarged
-        // icon, toward the screen interior.
-        double crossPos = _colCenterCross + crossExtent + 8 * _uiScale;
+        // Cross position of the label's near edge: right at the hover-enlarged
+        // icon's outer edge (no extra gap) so the name sits as close to the icon
+        // as possible without being covered by it.
+        double crossPos = _colCenterCross + crossExtent;
         double thickness = IsVertical ? WinW : WinH;
         double mainExtent = IsVertical ? WinH : WinW;
 

@@ -1,0 +1,210 @@
+# Polaris 工程日志（BUG 与优化记录）
+
+本日志记录项目所有 **BUG 及其修复方案**、**性能优化**、**功能优化**，以及重要的
+**调查结论 / 已知限制**。纯 UI 系数调节（间距、缩放、透明度、字体、颜色等视觉微调）、
+文档/README、版本号、发布脚本等不在此记录。
+
+## 维护约定
+- 后续所有 BUG（含原因与解决方法）、性能优化、功能优化都追加到本日志。
+- 每条尽量标注关联 commit（短 hash），便于回溯。
+- 新条目加到对应小节的**顶部**（时间倒序，最新在上）。
+- BUG 条目应包含：**现象 → 根因 → 修复方案**。
+- 即使实验被回滚、没有 commit，只要是有价值的调查结论或已知限制，也记录到
+  「调查结论 / 已知限制」一节，避免未来重复试错。
+
+---
+
+## ⚠️ 调查结论 / 已知限制
+
+### 液态玻璃主 Dock 帧率瓶颈 = 轨道光大面积半透明 blend（软件渲染固有成本）
+- **背景**：玻璃主 Dock 是 `AllowsTransparency=True` 的分层窗口（`UpdateLayeredWindow`
+  软件逐像素 alpha 合成，无脏矩形）。实测空闲仅 ~10 FPS、悬停 ~14 FPS。
+- **调查方法**：`POLARIS_FPS=1` 开启 `FpsProfiler`，逐项实验对比 `GlassIdle` 场景帧率。
+- **结论（经 6 次实测排除）**：瓶颈是**轨道光（`GlassOrbitLight`）那个 ~1500px 的半透明
+  渐变发光层每帧在整个 slab 面积上 alpha-blend**，这是软件渲染管线的固有成本：
+  | 实验 | 空闲 FPS | 结论 |
+  |------|---------|------|
+  | 基线（轨道光开） | ~10 | — |
+  | **禁用轨道光** | **~21** | 轨道光是瓶颈，吃掉约一半帧预算 |
+  | 缩小窗口面积 -23% | ~10 | 窗口面积无关 |
+  | lamp BitmapCache `RenderAtScale` 0.5→0.25 | ~10 | 缓存分辨率无关 |
+  | 轨道旋转帧率 30→15fps | ~10 | 旋转频率无关 |
+  | 旋转从父 Canvas 移到 lamp 自身 | ~10 | 缓存结构无关 |
+  | 移除圆角 clip | ~9（更慢） | clip 无关 |
+- **含义**：「缩窗口面积 / 拆分动画到独立窗口」对玻璃帧率**无效**；`BitmapCache`/降帧/
+  改旋转结构都无法降低 blend 成本。要提升玻璃空闲帧率**只能牺牲视觉**（缩小 glow 覆盖
+  范围、降低不透明度，或默认禁用轨道光——低性能模式已禁用它）。
+- **保留产出**：新增 `GlassIdle` profiling 场景标记（与 `SaturnIdle` 对称），便于未来用
+  `POLARIS_FPS=1` 单独读玻璃空闲帧率。(commit `c3d89d1`)
+
+---
+
+## ⚡ 性能优化 / 健壮性
+
+- **活跃态内存的真实边界 + 静止悬停去空转（轨道光/放大波）**：用户实测发现 trim 只在「被动/静止」时降内存，**实际交互（鼠标移动，或运行 App 的呼吸指示灯）会让分层窗口持续 `UpdateLayeredWindow` 整屏重传，页面立刻换回**，故活跃态内存仍高（仅侧 dock ~200MB、双 dock ~800MB）。诊断确认：①主玻璃 dock 的窗口因 `SizeToActiveContent`（IconSize 68 × 7 列 + 底部侧 dock 反向占用顶高）算出超屏高度被钳到全屏 1436×1061，是一个全屏分层软件窗口；②其**放大波 `OnMagTick` / 侧 dock `OnWaveTick` 原本只在光标离开时才停**——光标停在 dock 上不动也每帧空转重算（主 dock 60fps、侧 dock 每帧重建火焰几何）。改为**收敛到当前目标即停 tick**（光标移动经 `EnsureMagTicking`/`EnsureWaveTicking` 重启，离开分支也补重启确保回弹），视觉不变；③主 dock 的**轨道光**改为可暂停时钟（`RadialWindow.RegisterAmbientClock` + `SetAmbientPaused`，经 `GlassOrbitLight.Build` 的 `registerClock` 回调），光标静止即冻结。结论性边界：**绿色运行呼吸灯按用户要求始终呼吸不冻结**（冻结会让其停在随机相位「时亮时不亮」），而只要呼吸灯在动，整屏每帧重传不可避免——故活跃态内存的根本下降仍需改 GPU 渲染架构（去 `AllowsTransparency`，改动大、改玻璃观感），未实施。静止悬停的 CPU 因放大波/轨道光停转而显著下降。
+- **空闲判据改为「光标未在可见界面上活动」（覆盖仅侧 dock / 设置界面两态）+ 侧 dock 关闭空转**：原 idle-trim 只在两 dock 全隐藏时触发，导致「仅侧 dock」与「设置界面打开」两态全基线常驻。改为：主 dock 隐藏且光标未在可见次级界面（侧 dock / 设置窗）上**移动**即视为被动可 trim（静止窗口画面由 DWM 持有、换出不变黑，下次交互按需换回）。设置界面态 196MB→~70MB。侧 dock 的装饰星空闪烁亦改为光标静止即暂停。
+  与「常驻+运行区重复显示」两类 BUG 的共同根因是 **`Process.MainModule.FileName` 读不到
+  路径**——它需要 `PROCESS_VM_READ`，对反调试保护进程（UU加速器）、跨位（32/64）、提权进程
+  都会失败。而 Windows shell/任务栏用的是更低权限的 **`QueryFullProcessImageName`**（只需
+  `PROCESS_QUERY_LIMITED_INFORMATION`）。改进：①`WindowPreviewService` 公开
+  `TryGetProcessImagePath`（封装已有的 `QueryFullProcessImageName`）；②把 `SnapshotRunning`、
+  `FindWindowProcess`、`GetWindowsByExeName` 等所有进程路径读取点从 `MainModule.FileName`
+  统一切到它——实测能读到 UU 主程序真实路径 `…\UU\5224\uu.exe`（之前完全读不到）。这让
+  运行快照与运行区（GetTaskbarApps 早已用此 API）看进程的方式一致，大量受保护/跨位进程的
+  路径匹配得以恢复，减少对脆弱的进程名/标题 fallback 的依赖。③提取共享的
+  `IsSameOrChildInstallFolder`（同目录或一层版本子目录，带系统/共享目录与一层深度保护，避免
+  Steam steamapps 等深层误判），**绿灯检测与运行区去重共用同一套安装目录匹配**，把 launcher
+  （`UU\uu_launcher.exe`）与其版本子目录主程序（`UU\5224\uu.exe`）健壮地关联起来；窗口标题
+  匹配退化为极端兜底。
+
+## 🐛 BUG 修复
+
+- **进程保护应用（UU加速器）的常驻图标不亮绿色运行灯**：UU加速器固定的是
+  `uu_launcher.exe`（启动器，拉起主程序后自身无窗口），而真正有窗口的主进程 `uu`
+  开启了反调试保护，**`Process.MainModule.FileName` 读不到其 exe 路径**，导致
+  `SnapshotRunning` 既不把它计入 `Paths` 也无路径可匹配——所有基于路径/文件名/同目录的
+  检测（byPath/byExe/byFolder）全部失败，绿灯不亮；但运行区（窗口枚举）仍能显示它，造成
+  「有图标、无绿灯」的不一致。**修复**：`RunningSnapshot` 新增 `WindowTitles`，只收集
+  「有可见窗口但路径读不到」的受保护进程的主窗口标题；`IsEntryRunning` 增加 `byTitle`
+  fallback——当某受保护窗口标题精确等于固定项的显示名时判定为运行（UU 主窗口标题
+  「UU加速器」正好等于固定项名）。只存受保护进程标题，普通应用标题不入集合，避免误判。
+  顺带新增 `IsRunningInSameFolderWithWindow`（同安装目录有可见窗口的兄弟主程序，带
+  系统/共享目录保护）覆盖「路径可读的启动器（如 iQiyi）」场景。
+  - **后续**：同一应用还会同时出现在常驻区和运行区（运行区未排除它）。同因路径/AUMID
+    读不到，运行区的 path/aumid/fileName 排除全部落空。修复：侧 Dock running strip 增加
+    `excludeTitles`（常驻 pin 的显示名），过滤时运行窗口标题等于某常驻 pin 名则排除
+    （UU 窗口标题「UU加速器」= pin 名），避免「常驻+运行区」重复显示。
+- **侧边 Dock 隐藏时放大波循环泄漏**（`c3d89d1`）：光标停在侧边 Dock 上时关闭 Dock，
+  `OnWaveTick`（`CompositionTarget.Rendering`）不会被注销，每帧在隐藏窗口后持续空转
+  （隐藏时 CPU 泄漏）。修复：`DoHide()` 折叠后调用 `ResetWave()` 并把 `_waveCursorY`
+  置 NaN，保证渲染回调被拆除。
+- **玻璃拖拽图标飞出窗口边界后消失**（`f71134f`）：玻璃图标在被裁剪的滚动层里，拖拽时
+  重父到 PanelCanvas，但紧凑分层窗口会在窗口边缘裁掉图标。修复：用独立的无边框置顶穿透
+  覆盖窗口 `DragGhostWindow` 承载拖拽图标快照；快照用绝对 `Viewbox`+`Canvas` 偏移精确
+  采样图标本体（避免 VisualBrush 采样到溢出子元素导致缩小）。
+- **运行中 UWP 应用无法固定到常驻区**（`817b7b4`）：打包应用（计算器/商店等）的运行瓦片
+  无可读 exe 路径、只有 AUMID，导致右键菜单隐藏「固定到常驻区」。修复：新增
+  `ShellNamespace.FromAumid` 由 AUMID 构建稳定、抗更新的 AppEntry；菜单条件放宽为
+  路径或 AUMID 任一存在；`PinRunningApp` 优先用 AUMID 构建。
+- **更新检查报告陈旧版本**（`fe2a257`）：无论实际 release 如何，更新检查器都报固定旧版本。
+- **多显示器底边误判**（`db2ec04`）：仅对真正的外侧底边做任务栏触发屏蔽，按显示器排布判断。
+- **跨应用窗口预览 + 低性能模式玻璃卡顿**（`24bbbf0`）。
+- **常驻托盘应用激活失败**（腾讯视频/QQLive）（`ba48a73`）。
+- **文件资源管理器误报运行中**（`fb42757`）：同时屏蔽底部 Dock 下的系统任务栏触发。
+- **多进程启动/预览**（`0fd25ca`）。
+- **打包应用运行条图标错误 + 图标提取**（`f18de5b`）。
+- **拖出常驻图标时按预期常驻数实时重排动画**（`1ea76d4`）。
+- **侧边 Dock 与玻璃主 Dock 在底/顶边的交互冲突**（`dae641f`）。
+- **玻璃拖拽标签残留**（`f1d48a1`）：并优化侧边 Dock 与弹出性能。
+- **侧边 Dock 消失与最小化启动 bug**（`dc6ca0f`）：常驻区可自定义数量。
+- **文件资源管理器点击不开窗 / 拖拽后背景模糊丢失**（`c8a74ca`）。
+- **空 AUMID 导致所有任务栏应用合并为一个 key**（`44ce316`）：去重时只有第一个存活。
+- **裁剪图标在渲染线程 HighQuality 升采样掉帧**（`d2ebbd0`）：改为一次性升采样到 256，
+  让 UI 始终缩小大位图；预览每行最多 6 列。
+- **预览弹窗裁掉多余窗口**（隐藏滚动条后只显示 6 个中的 4 个）（`28fa90a`）：瓦片换行（最多 5 列）。
+- **打包应用（新版 Teams/Outlook）显示文件资源管理器缩略图**（`7cf7129`）：因经
+  `explorer.exe shell:AppsFolder\AUMID` 启动；改为按 AppUserModelID 匹配窗口。
+- **60Hz 面板拍频 judder**（`741e2b6`，回归自 `cf23618`）：60fps 与 59.94Hz present 拍频；
+  在 <90Hz 面板过采样 2x（60→120），高刷新率用原生率。
+- **预览弹窗水平滚动条 / 大图标裁剪**（`57529d4`）。
+- **文件资源管理器单窗口也显示悬停预览**（`cbfb3d6`，其它应用仍需 ≥2 窗口）。
+- **行星加速闪烁**（`054088d`）：去掉缓存圆盘上的 Effect 切换；Ctrl+4 切换开关面板。
+- **行星悬停加速即时响应**（`b6845b9`）：短 0.18s 加速 / 0.9s 缓降。
+- **possible-null-argument 警告**（`efec931`，`ApplyPinnedRunning`）。
+
+## ⚡ 性能优化
+
+- **空闲判据改为"光标未在可见界面上活动"（覆盖仅侧 dock / 设置界面两态）+ 侧 dock 关闭空转**：原 idle-trim 只在两 dock 全隐藏时触发，导致"仅侧 dock"(~280MB)与"设置界面打开"(~196MB)两态全基线常驻。两项改造：
+  ①**trim 判据泛化**：`App.EvaluateIdleTrim` 不再要求全隐藏，而是"主 dock 未显示 且 光标未在可见次级界面（侧 dock / 设置窗）上**移动**"即视为被动可 trim——静止窗口的画面由 DWM 持有、换出页面不会变黑，下次交互按需换回。设置界面态实测 196MB→~70MB。
+  ②**侧 dock 关闭未关注时的持续空转**：侧 dock 是 **1436×1040 的大型 `AllowsTransparency` 分层窗口**，软件合成时每次 opacity tick 重传整面；而它的运行点"呼吸"动画 + 暗色 dock 星空闪烁是 `RepeatBehavior.Forever`，加上放大波 `OnWaveTick` 原本只在光标**离开**时才停（光标停在 dock 上不动也每帧空转重建火焰几何）——导致"仅侧 dock"态空耗 **~63% CPU** 且页面持续变热使 trim 失效。修复：(a) 把这些永久动画改用可控时钟（`SideDockWindow.RegisterAmbientLoop`/`SetAmbientPaused`，经 `RadialIcon.AmbientRegistrar` 钩子覆盖钉住图标的运行点），光标不在 dock 上移动时 `Pause()` 冻结（绿点静止但仍可见，画面信息不丢），移动即 `Resume()`；(b) `OnWaveTick` 改为收敛到当前目标即停 tick（光标移动经 `EnsureWaveTicking` 重启，离开分支也补 `EnsureWaveTicking` 确保回弹），视觉完全不变；(c) 侧 dock 这些分层窗循环帧率由 `AmbientFrameRate`(60) 降到 `GlassLoopFrameRate`(30)，与主 dock 同源理由。实测"仅侧 dock 静止悬停"CPU 63%→**8.8%**、内存 280MB→**~50MB**（静止满 2s 后 trim 回收）。附带让 case 3 中光标在主 dock 时侧 dock 呼吸也暂停。
+- **空闲时归还工作集（双 dock 隐藏降内存）**：Polaris 是 WPF + `AllowsTransparency` 托盘应用，空闲态（两 dock 都隐藏）约 440MB 占用几乎全是**非托管**——WPF/MilCore 软件渲染表面、原生图形栈（Direct2D/DirectWrite/WIC）、已加载的运行时/框架镜像、两个隐藏 dock 窗口；托管堆仅 ~7MB，GC 回收不了。空闲时这些页都不会被触碰，可安全换出到待机列表（即"托盘应用最小化后内存骤降"的同款机制）。新增 `Services/MemoryTrimmer.TrimWorkingSet()`（对自身进程 `EmptyWorkingSet`），由 `App` 的 100ms 边缘轮询挂载 `EvaluateIdleTrim`：两 dock 均隐藏且无设置窗口时，空闲满 2s 触发一次 trim，之后每 30s 复 trim 一次保持低位；任一 dock 显示立即复位计时（交互期绝不 trim）。实测空闲 WS 约 440MB→稳态在 ~20–70MB 间振荡（trim 瞬间低至 ~17MB），物理 RAM 真正归还系统；下次召唤仅按需换回少量页，无可感卡顿。
+- **玻璃网格图标虚拟化（显示态深度降内存）**：液态玻璃主 Dock 的图标网格只渲染可视视口内（含上下各 1 行缓冲）的行，离屏行的 `RadialIcon` 对象被丢弃（移出滚动层、退订事件、槽位置 null），由 GC 回收其软件渲染的非托管可视子树——这是显示态占用的主体。滚回视口时按需用 `CreateIcon` 重建。关键设计：`_iconElements` 保持与 `_slotPositions`、配置条目 **1:1 全长**（离屏槽为 null），故所有按索引的代码（放大波 `Magnify`、悬停 spread、拖拽重排 `Reorder`、运行态刷新）只需各加一处 null 守卫即可照常工作，无需重写索引逻辑。配套：①每帧放大波 tick 跳过 null 槽；②重建图标时 `ResetMagnifySlot` 重置该槽放大状态、`RefreshIconState` 从 `_runStateCache`（每轮询覆盖**全部**条目，含离屏）同步套用绿色运行灯，故滚入即时点亮；③拖拽中（`_pressedIcon != null`）暂停虚拟化，drop 触发 `Rebuild` 重新裁剪；④滚动定格后 `GC.Collect(Optimized, 非阻塞, ApplicationIdle 优先级)` 促使非托管渲染资源真正归还。实测显示态约 1029MB→566MB（首次）/ 滚遍全部行后稳定 ~661MB（**-36%**，且收益持久不随使用侵蚀；仅 detach 不丢弃对象时会回升到 842MB，因 BitmapCache/MilCore 资源挂在存活对象上）。仅在网格可滚动（行数 > `VisibleRows`）时生效。
+- **隐藏时把分层窗口缩到 1×1**（接续"隐藏时释放内存"）：`AllowsTransparency=True` 会维持一块
+  约 窗口面积×4 字节的逐像素 alpha 软件合成缓冲（外加渲染暂存），是隐藏态占用的主体。`HidePanel`
+  在 `ClearVisualTree()` 之后把 `Width=Height=1`，迫使 WPF 释放这块大缓冲；下次 `ShowFaded` 的
+  `SizeToActiveContent` 会在 `Rebuild` 前恢复真实尺寸，用户全程看不到 1×1 窗口。实测隐藏态
+  553MB→509MB（再 -44MB，无任何视觉变化）。
+- **⚠️ 调查结论：显示态 ~1GB 是 `AllowsTransparency` 软件渲染的架构固有成本**。dotnet-counters 实测
+  托管堆仅 ~10–19MB，~1GB 全是非托管（WPF MilCore 软件合成）。对照实验：空 Dock 738MB、满 42 图标
+  1029MB（图标视觉子树 ≈291MB ≈7MB/个，而图标位图本身仅 256×256×4≈262KB/个，故大头不是位图而是
+  软件渲染中间缓冲）；`POLARIS_NOCACHE` 实验证明 BitmapCache 反而更省（关掉更高），非元凶。空 Dock 仍
+  738MB 说明横跨屏幕的玻璃 slab 软件渲染缓冲占很大比重。结论：要大幅压低**显示态**内存须改架构
+  （改 GPU 渲染去掉 AllowsTransparency，或图标虚拟化），二者均有视觉/行为风险，未实施。
+- **隐藏时释放内存**：Dock 隐藏时归还其占用的渲染内存。①`WindowPreviewService.TrimThumbCacheForHide`
+  在隐藏时丢弃可重新捕获的窗口缩略图（仅保留最小化窗口的 last-good 帧，其像素已无法重捕），
+  缩略图是最大的缓存位图；②`HidePanel` 折叠后调用新提取的 `ClearVisualTree()` 清空整个 Dock
+  视觉树及其 `BitmapCache` 位图（下次 `ShowFaded` 反正会 `Rebuild` 重建，故零额外成本）。实测
+  隐藏态内存约 653MB→553MB（-15%）。（注：曾试在隐藏后 `GC.Collect`，仅再降 ~12MB，收益太小
+  且有打断 GC 启发式之虞，已回滚。）
+- **缓存更多静态模糊层**（`c3d89d1`）：每次分层窗口重合成都会重栅格化的静态模糊层改用
+  `BitmapCache`（零视觉变化）：Saturn 辉光环、运行指示点光晕（侧边+主 Dock RunDotGlow）、
+  玻璃中心设置按钮。
+- **玻璃帧率：跳过空闲工作 + 缓存悬停标签**（`b5e813d`）：放大波只在缩放/偏移超过 epsilon
+  时才下发 `SetMagnify`/`SetZIndex`（静止图标每帧零写入）；玻璃悬停标签加 BitmapCache；
+  时钟 culture 缓存；任务条瓦片改用冻结共享画刷。
+- **玻璃帧率：缓存静态模糊 + 定时器生命周期**（`9dabd92`）：玻璃齿轮/时钟/常驻框发光加
+  BitmapCache；缩略图预热定时器仅在面板显示时运行；任务条瓦片图缓存。
+- **两种性能模式下优化液态玻璃帧率**（`002e9c1`）。
+- **打磨任务栏 guard、全屏检测与动画性能**（`fe58e29`）。
+- **缓存玻璃发光描边**（`35be898`）。
+- **过采样率提升常驻循环动画帧率**（`bc95b7f`）：缩短显示/展开/隐藏过渡降低延迟。
+- **隐藏时折叠画布**降低帧率开销（`1636a61`）。
+- **Saturn 轮辐改烘焙切向渐变**（`23ce6ab`）：旋转层上无每帧 BlurEffect。
+- **动画 DesiredFrameRate 匹配显示器刷新率**（`cf23618`）：原硬编码 120 浪费 60Hz 渲染预算。
+- **缩略图弹窗即时显示缓存帧 + 异步流式更新**（`3f8efa4`）。
+- **Saturn 轴对称辉光环移到静态层 + 去掉卫星光晕模糊**（`f2726a9`）：消除随放大增长的最大
+  每帧模糊。
+- **Saturn 自转圆盘缓存为位图 + 静态投影**（`6405182`）：放大后恢复帧率。
+- **优化动画帧率**（`346683d`）：透明窗口按内容缩小居中；玻璃静态层与悬停辉光改
+  BitmapCache + Opacity 动画。
+- **最小化窗口缩略图预热缓存**（`ea4826a`）。
+- ⚠️ 注：`05aca66`（缓存旋转环特征）因共享动画轨道变换导致悬停/加速闪烁，已被 `33c52eb` 回滚。
+
+## ✨ 功能优化 / 新增
+
+- **精简设置界面**：删除顶部「Polaris 设置」标题与「提示：长按呼出键…」两行（含
+  `UpdateHint` 方法及其调用），界面更紧凑。
+- **点击 Polaris 之外区域关闭双 Dock**（`b8c6de3`）：主 Dock 打开时，左键点击任意 Polaris
+  窗口之外（桌面/别的应用/空白）关闭主 Dock 与侧边 Dock；用独立线程 WH_MOUSE_LL 钩子按
+  窗口所属进程判定。
+- **主 Dock 光标距离图标放大**（`867ca53`）。
+- **Saturn 高细节环 + 刘海日期时间面板 + 默认 High 模式**（`74327d5`）。
+- **新消息提醒徽标**（镜像任务栏闪烁）（`a151193`）；后简化为圆点并显示非常驻运行应用（`8f2781d`）。
+- **液态玻璃连续磨砂效果**（`741198a`）。
+- **可配置切换热键、全局字号、性能模式设置**（`6e33088`）。
+- **原生地理定位 + 主题感知 Dock 菜单**（`8dc0b48`）；天气改用 geo-IP 提供商链、去掉 WinRT
+  依赖（`3ee35ef`）。
+- **侧边 Dock 玻璃立体边 + 右键上下文菜单**（`3bfb12b`）。
+- **液态玻璃轨道光、侧边 Dock 弹跳修复**（`3750f26`）。
+- **启动弹跳、碎屑带、Dock 天气**（`b18b00c`）。
+- **重设计设置窗口**，移除设置内图标管理（`bcc1575`）。
+- **可切换 Dock 边 + 多显示器支持**（`3776ebf`）；侧边 Dock 四方向停靠（`08a4bd0`）。
+- **AppsFolder 启动器解析为真实 exe**（`20b78a7`）。
+- **默认主题改为液态玻璃**（`73332ee`）；玻璃弹出液感动画（`3335a3d`）。
+- **双 Dock 落点拖放 / 缩略图关闭窗口**（`450c81d`）；土星侧边 Dock 黑材质内环常驻区（`55c2110`）；
+  解耦主题常驻设置（`e2728c8`）。
+- **检查更新（GitHub release 自动更新）、Dock 与任务栏合并为单块玻璃含分隔缝、桌面背景模糊**
+  （`583495c`）；玻璃 6 列网格可扩展、任务栏溢出 +N（`c8a74ca`）。
+- **接受注入的 Ctrl+key 组合**（触控板手势）（`fb15dfd`）。
+- **分辨率缩放、玻璃网格、百分比标签、环边淡出**（`e706724`）；检测托盘最小化应用为运行中（`f32bd28`）。
+- **每主题独立记忆透明度与图标大小**（`190dc2e`）。
+- **支持 Shell 命名空间对象快捷方式**（此电脑/回收站等，经 explorer 打开并提取高清图标）（`9162cb4`）。
+- **可切换主题系统**（土星环）（`4b01489`）。
+- **Saturn 真实环系**（旋转环层、行星自转、比例轨道）（`936fbb0`）。
+- **双层圆环布局、悬停放大显示名称、拟物齿轮旋转**（`067445c`）。
+- **运行应用指示器 + 防闪烁覆盖层**（`3ad619b`）。
+- **初始版本**：托盘呼出、可配置触发键、单实例、液态玻璃圆盘、拖入添加、长按固定模式（`d0cbd69`）。
+
+## 🔧 重构 / 工程质量
+
+- **重命名 LeftDock* → SideDock***（`7da1198`）：Dock 可停靠任意边，原 `Left` 命名误导；
+  重命名类型、10 个分部文件及所有相关标识符。`AppConfig.SideDockApps` 用
+  `[JsonPropertyName("LeftDockApps")]` 保留 JSON key，旧配置无损升级。
+- 关闭时取消订阅 Dock 窗口事件并停止定时器（`5c49636`）。
+- 集中重复的调参字面量以消除漂移风险（`267dd67`）。
+- 去重共享 Dock 逻辑到 helpers（`1a4c687`）。
+- 从 App 上帝对象提取 TaskbarGuard 子系统（`e88cd6a`）。
+- 新增单元测试项目，覆盖纯 Services 逻辑（42 个测试）（`ba5338b`）。
+- 新增诊断日志设施，把静默 catch 点路由过去（`2fda714`）。
+- 移除死代码（`48e6621`）。
+- 拆分 Dock 上帝类为分部类、提取共享 helper（`6007a68`、`23824cd`）。

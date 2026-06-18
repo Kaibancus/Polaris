@@ -36,6 +36,9 @@ public partial class RadialWindow
                 Opacity = 0.55,
                 Color = Color.FromRgb(0x0A, 0x10, 0x1C),
             },
+            // Static button — bake its drop shadow so the surrounding dock
+            // animations don't re-rasterise the blur on every recomposite.
+            CacheMode = new System.Windows.Media.BitmapCache(),
             Child = new TextBlock
             {
                 Text = "⚙",
@@ -64,7 +67,7 @@ public partial class RadialWindow
     private void DrawGlassPanel()
     {
         double icon = EffectiveIconSize;
-        double cellW = icon * 2.15;
+        double cellW = icon * LiquidGlassTheme.ColumnPitch;
         double gridW = (LiquidGlassTheme.Columns - 1) * cellW;
 
         double padX = icon * 1.15;
@@ -86,7 +89,13 @@ public partial class RadialWindow
         // The slab extends below the icon grid by GlassBottomReserve so the glass
         // covers down past the system taskbar while the lowest icon row stays
         // above it. (The running-app taskbar strip + its seam were removed.)
-        double totalH = h + topInset + GlassBottomReserve;
+        // PLUS 0.1 GIcon of extra bottom extension so the glass bottom border sits
+        // lower than the deepest hover-zoomed icon's name label, keeping magnified
+        // names from spilling past the slab edge. This lengthens ONLY the drawn
+        // slab — the icon layout centre (GlassDockCenter) doesn't use this value —
+        // so the icons stay put and only the glass bottom edge drops.
+        double slabBottomExtend = EffectiveIconSize * GlassIconScale * 0.1 + 2.0;
+        double totalH = h + topInset + GlassBottomReserve + slabBottomExtend;
         DrawGlassSlab(left, top, w, totalH, radius, opacity, frosted: false, frostStrength: frostStrength);
 
         // A pronounced "stereoscopic" rim around the whole slab (mirrors the
@@ -204,6 +213,17 @@ public partial class RadialWindow
                     Color = Color.FromRgb(0x2A, 0x33, 0x40),
                 },
             },
+            // Bake the bead + blurred drop-shadow to a texture once: the gear is
+            // static apart from a RenderTransform spin/press, and a transform does
+            // not invalidate a BitmapCache, so the (expensive) blur is rasterised a
+            // single time instead of on every layered-window recomposite driven by
+            // the always-on orbit light / magnify wave. The shadow already rotates
+            // with the element (the RenderTransform maps the whole visual including
+            // its effect), so caching is pixel-identical.
+            CacheMode = new System.Windows.Media.BitmapCache(Math.Max(1.0, DeviceScale))
+            {
+                SnapsToDevicePixels = true,
+            },
         };
         // Spin the gear while hovered and shrink it on press like a real
         // physical button.
@@ -293,6 +313,14 @@ public partial class RadialWindow
                 Opacity = 0.95,
                 Color = Color.FromRgb(0x03, 0x06, 0x0E),
             },
+            // Cache the glyphs + blurred halo to a texture so the always-on orbit
+            // light / magnify wave don't re-rasterise the blur on every composite.
+            // The text changes only once per second (UpdateGlassClock), which simply
+            // rebuilds the cache then; rendered at device scale to stay crisp.
+            CacheMode = new System.Windows.Media.BitmapCache(Math.Max(1.0, DeviceScale))
+            {
+                SnapsToDevicePixels = true,
+            },
         };
         Canvas.SetLeft(clockTime, left + 18);
         Canvas.SetTop(clockTime, top + 14);
@@ -312,8 +340,8 @@ public partial class RadialWindow
             return;
 
         double icon = EffectiveIconSize;
-        double cellW = icon * 2.15;
-        double cellH = icon * 2.35;
+        double cellW = icon * LiquidGlassTheme.ColumnPitch;
+        double cellH = icon * LiquidGlassTheme.RowPitch;
         double gridW = (LiquidGlassTheme.Columns - 1) * cellW;
         Point center = GlassGridCenter;
         double y0 = center.Y - (LiquidGlassTheme.VisibleRows - 1) * cellH / 2.0;  // row 0 centre
@@ -345,8 +373,9 @@ public partial class RadialWindow
         double h = bottom - top;
         double radius = icon * 0.42;   // matches the left-dock tray corner radius
 
-        // Frame fill at ~99% transparency (barely-there interior), but the edge
-        // is still drawn so the resident region reads as a framed zone.
+        // Frame fill: ~95%-transparent interior (alpha lowered by ~5% from the
+        // near-invisible 0x03 so the resident zone reads a touch more solid),
+        // with the edge drawn so the region still reads as a framed zone.
         var fill = new System.Windows.Shapes.Rectangle
         {
             Width = w,
@@ -354,7 +383,7 @@ public partial class RadialWindow
             RadiusX = radius,
             RadiusY = radius,
             IsHitTestVisible = false,
-            Fill = new SolidColorBrush(Color.FromArgb(0x03, 0xFF, 0xFF, 0xFF)),
+            Fill = new SolidColorBrush(Color.FromArgb(0x10, 0xFF, 0xFF, 0xFF)),
         };
         // A soft outer glow + a bright cool rim read as etched glass. Kept
         // thinner than the main-dock slab border so it reads as a lighter inner
@@ -369,6 +398,9 @@ public partial class RadialWindow
             Stroke = new SolidColorBrush(Color.FromArgb(0x30, 0xBF, 0xE0, 0xFF)),
             StrokeThickness = 2.0,
             Effect = new System.Windows.Media.Effects.BlurEffect { Radius = 4 },
+            // Static blurred glow: bake it once so it isn't re-rasterised on every
+            // layered-window recomposite (driven by the orbit light / magnify wave).
+            CacheMode = new System.Windows.Media.BitmapCache(),
         };
         var rim = new System.Windows.Shapes.Rectangle
         {
@@ -572,7 +604,7 @@ public partial class RadialWindow
     private void DrawGlassScrollBar()
     {
         double icon = EffectiveIconSize;
-        double cellW = icon * 2.15;
+        double cellW = icon * LiquidGlassTheme.ColumnPitch;
         double gridW = (LiquidGlassTheme.Columns - 1) * cellW;
         double barW = Math.Max(7, icon * 0.13);
 
@@ -664,6 +696,10 @@ public partial class RadialWindow
         double clamped = Math.Clamp(target, 0, GlassScrollMax);
         _glassScroll = clamped;
         SyncGlassScrollBar();
+        // Realize rows entering from the destination immediately (no detach yet)
+        // so they're present before the glide reveals them; the settle pass below
+        // detaches the rows that slid out.
+        UpdateGlassVirtualization(allowDetach: false);
 
         if (_glassScrollTransform == null)
             return;
@@ -686,6 +722,8 @@ public partial class RadialWindow
             if (token == _glassScrollAnimToken)
             {
                 EndGlassScrollProfile();
+                // Glide finished — detach the rows that scrolled out of view.
+                UpdateGlassVirtualization();
             }
         };
         // Pin the base value to the destination so the offset persists once the
@@ -706,6 +744,92 @@ public partial class RadialWindow
             _glassScrollTransform.Y = -clamped;
         }
         SyncGlassScrollBar();
+        // Instant jump — re-cull immediately (rows that left are detached, rows
+        // that entered are realized).
+        UpdateGlassVirtualization();
+    }
+
+    /// <summary>Realizes only the glass-grid icons whose row is within (or one
+    /// row of) the visible viewport, and DISCARDS off-screen icons (removes them
+    /// from the scroll layer, unsubscribes their events and nulls their slot) so
+    /// the GC can reclaim their software-rendered visual subtrees — the bulk of
+    /// the shown-state footprint. Slots stay full-length and 1:1 with the entries,
+    /// so every index-based path (magnify wave, hover, reorder, refresh) keeps
+    /// working; each just null-guards a virtualized slot. Skipped while a drag is
+    /// in progress (the dragged icon lives in PanelCanvas and a drop triggers a
+    /// full <c>Rebuild</c> that re-culls) and a no-op when the grid isn't
+    /// scrollable (every row already fits, so all icons stay realized).</summary>
+    /// <param name="allowDetach">When false, off-screen icons are kept realized
+    /// (used during a scroll glide so a row sliding out isn't discarded before it
+    /// has finished leaving the viewport); the settle pass discards them.</param>
+    private void UpdateGlassVirtualization(bool allowDetach = true)
+    {
+        if (!_theme.ShowGlassPanel || _glassScrollLayer == null ||
+            _pressedIcon != null || !GlassScrollable)
+            return;
+
+        Rect vp = GlassGridViewport;
+        // One row of slack each side so a fast scroll / reorder reflow never pops
+        // an icon in late.
+        double pad = GlassCellH;
+        double topLimit = vp.Top - pad;
+        double botLimit = vp.Bottom + pad;
+        double size = EffectiveIconSize * GlassIconScale;
+
+        int n = Math.Min(_iconElements.Count, _slotPositions.Count);
+        bool discarded = false;
+        for (int i = 0; i < n; i++)
+        {
+            double screenY = _slotPositions[i].Y - _glassScroll;
+            bool visible = screenY >= topLimit && screenY <= botLimit;
+            var icon = _iconElements[i];
+            if (visible && icon == null)
+            {
+                var ni = CreateIcon(_config.Apps[i], size);
+                PlaceCentered(ni, _slotPositions[i]);
+                _glassScrollLayer.Children.Add(ni);
+                _iconElements[i] = ni;
+                ResetMagnifySlot(i);
+                RefreshIconState(ni);
+            }
+            else if (!visible && icon != null && allowDetach)
+            {
+                _glassScrollLayer.Children.Remove(icon);
+                icon.PreviewMouseLeftButtonDown -= Icon_PreviewMouseLeftButtonDown;
+                icon.HoverStarted -= OnIconHoverStarted;
+                icon.HoverEnded -= OnIconHoverEnded;
+                icon.WindowActivated -= HidePanel;
+                if (ReferenceEquals(_hoverIcon, icon))
+                    _hoverIcon = null;
+                _iconElements[i] = null;
+                discarded = true;
+            }
+        }
+
+        // The discarded icons' unmanaged (MilCore) render data is rooted by the
+        // managed visual until it finalizes, so nudge a low-priority collection
+        // once a settle pass actually freed something. Background priority keeps
+        // it off the interactive path.
+        if (discarded && allowDetach)
+            Dispatcher.BeginInvoke(
+                () => GC.Collect(2, GCCollectionMode.Optimized, blocking: false),
+                System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+    }
+
+    /// <summary>Resets the magnify-wave bookkeeping for a single slot so a freshly
+    /// realized icon starts at rest (scale 1, no offset) and the next wave tick
+    /// re-pushes it from scratch instead of inheriting the slot's stale state.</summary>
+    private void ResetMagnifySlot(int i)
+    {
+        if (i < 0)
+            return;
+        if (_magCur.Length > i) _magCur[i] = 1.0;
+        if (_magOffX.Length > i) _magOffX[i] = 0.0;
+        if (_magOffY.Length > i) _magOffY[i] = 0.0;
+        if (_magAppScale.Length > i) _magAppScale[i] = -1.0;
+        if (_magAppX.Length > i) _magAppX[i] = double.MinValue;
+        if (_magAppY.Length > i) _magAppY[i] = double.MinValue;
+        if (_magAppZ.Length > i) _magAppZ[i] = int.MinValue;
     }
 
     /// <summary>Pushes the current scroll offset onto the scrollbar's thumb,

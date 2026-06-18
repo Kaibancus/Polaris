@@ -95,6 +95,27 @@ public sealed class LiquidGlassTheme : PanelTheme
 {
     public const int Columns = 7;
 
+    /// <summary>Column pitch as a multiple of the icon size (centre-to-centre).
+    /// Tightened from 2.15 so the glass slab is a little smaller in area while the
+    /// icons keep their size — a smaller <c>AllowsTransparency</c> window means a
+    /// smaller per-frame composited bitmap. The icon footprint is
+    /// <c>icon*GlassIconScale</c> (1.32) and the magnify wave actively spreads
+    /// neighbours apart, so this stays clear of overlap.</summary>
+    public const double ColumnPitch = 2.10;
+
+    /// <summary>Row pitch as a multiple of the icon size (centre-to-centre).
+    /// Aligned to <see cref="ColumnPitch"/> so the grid spacing is uniform in both
+    /// axes; this also trims the dock height. A hovered icon (≈2.24·icon) clears
+    /// its resting neighbours via the magnify wave, same regime as the columns.</summary>
+    public const double RowPitch = ColumnPitch;
+
+    /// <summary>Extra vertical breathing room (in icon units) inserted below the
+    /// framed resident region, so the first icon row beneath the frame can
+    /// hover-zoom (≈2.24·icon) without poking into the frame's bottom border.
+    /// Applied to every row at or below the frame and reserved in the dock body
+    /// height so the slab keeps a constant, bottom-docked footprint.</summary>
+    public const double ResidentGap = 0.35;
+
     /// <summary>Number of rows shown at once before the grid begins to scroll.</summary>
     public const int VisibleRows = 4;
 
@@ -130,8 +151,8 @@ public sealed class LiquidGlassTheme : PanelTheme
     {
         var list = new List<Point>(Math.Max(0, count));
         double icon = settings.IconSize;
-        double cellW = icon * 2.15;
-        double cellH = icon * 2.35;   // extra height leaves room for the label
+        double cellW = icon * ColumnPitch;
+        double cellH = icon * RowPitch;   // extra height leaves room for the label
 
         // The first <resident> apps are the pinned region mirrored into the left
         // dock; the rest begin on a FRESH row beneath that block so the resident
@@ -148,6 +169,18 @@ public sealed class LiquidGlassTheme : PanelTheme
         // row 0 starts at the top of that block.
         double visibleH = (VisibleRows - 1) * cellH;
         double y0 = center.Y - visibleH / 2.0;
+
+        // The resident-region frame wraps the first 1-2 rows (see
+        // DrawResidentRegionBorder, which derives the same row count). Rows at or
+        // below the frame are nudged down by ResidentGap so a hover-zoomed icon on
+        // the first row beneath the frame never overlaps its border.
+        int frameResident = Math.Min(
+            settings.Ring0Count <= 0
+                ? DockSync.MaxResidentCount
+                : Math.Clamp(settings.Ring0Count, 1, DockSync.MaxResidentCount),
+            count);
+        int frameRows = Math.Clamp((frameResident + Columns - 1) / Columns, 1, 2);
+        double residentGap = icon * ResidentGap;
 
         // Hard cap at the full grid; extra icons are never placed (the host
         // refuses to add beyond Capacity, so this is just a safety clamp).
@@ -167,11 +200,12 @@ public sealed class LiquidGlassTheme : PanelTheme
                 row = i / Columns;
                 col = i % Columns;
             }
-            list.Add(new Point(x0 + col * cellW, y0 + row * cellH));
+            double rowGap = row >= frameRows ? residentGap : 0.0;
+            list.Add(new Point(x0 + col * cellW, y0 + row * cellH + rowGap));
             totalRows = Math.Max(totalRows, row + 1);
         }
 
-        double gridH = (totalRows - 1) * cellH;
+        double gridH = (totalRows - 1) * cellH + (totalRows > frameRows ? residentGap : 0.0);
         outerReach = Math.Max(gridW, gridH) / 2.0 + icon;
         return list;
     }

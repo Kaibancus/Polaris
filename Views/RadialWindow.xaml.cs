@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -83,6 +84,7 @@ public partial class RadialWindow : Window
     {
         get
         {
+            // The slab bottom sits this far above the screen edge.
             double baseMargin = SystemTaskbarHeight + EffectiveIconSize * 0.12;
             double sideReserve = BottomDockReserve?.Invoke() ?? 0.0;
             return Math.Max(baseMargin, sideReserve);
@@ -125,7 +127,7 @@ public partial class RadialWindow : Window
                     }
                 }
             }
-            catch { /* fall through */ }
+            catch (System.Exception ex) { Polaris.Services.Log.Debug("MainDock", "border-thickness probe failed", ex); }
             return 0.0;
         }
     }
@@ -144,7 +146,7 @@ public partial class RadialWindow : Window
     /// system taskbar (see <see cref="GlassDockBottomMargin"/>), so the taskbar
     /// height is no longer added here.</summary>
     private double GlassBottomReserve =>
-        EffectiveIconSize * 0.30;
+        EffectiveIconSize * 0.22;
 
     // Current vertical scroll of the grid (device-independent px). 0 = first
     // row aligned to the top of the visible grid block; positive scrolls the
@@ -161,7 +163,7 @@ public partial class RadialWindow : Window
 
     /// <summary>Height (px) of one grid cell — the column pitch's vertical twin,
     /// also the per-row scroll step.</summary>
-    private double GlassCellH => EffectiveIconSize * 2.35;
+    private double GlassCellH => EffectiveIconSize * LiquidGlassTheme.RowPitch;
 
     /// <summary>Height of the glass dock <b>body</b> (the panel that frames the
     /// icon grid), fixed to the <see cref="LiquidGlassTheme.VisibleRows"/> visible
@@ -172,9 +174,11 @@ public partial class RadialWindow : Window
         get
         {
             double icon = EffectiveIconSize;
-            double padY = icon * 1.15;
+            double padY = icon * 0.95;
             double gridHVis = (LiquidGlassTheme.VisibleRows - 1) * GlassCellH;
-            return gridHVis + icon + padY * 2;
+            // Reserve the resident gap so the visible rows pushed down below the
+            // frame stay inside the slab and the dock keeps a constant footprint.
+            return gridHVis + icon + padY * 2 + icon * LiquidGlassTheme.ResidentGap;
         }
     }
 
@@ -253,9 +257,9 @@ public partial class RadialWindow : Window
         get
         {
             double icon = EffectiveIconSize;
-            double cellW = icon * 2.15;
+            double cellW = icon * LiquidGlassTheme.ColumnPitch;
             double gridW = (LiquidGlassTheme.Columns - 1) * cellW;
-            // Vertical slack must stay below the row pitch (icon*2.35) so that
+            // Vertical slack must stay below the row pitch (icon*RowPitch) so that
             // rows scrolled out of the visible block remain hidden above/below.
             double vMargin = icon * 1.4;
             // Horizontal slack is generous: it only widens the clip sideways (no
@@ -281,7 +285,7 @@ public partial class RadialWindow : Window
         get
         {
             double icon = EffectiveIconSize;
-            double cellW = icon * 2.15;
+            double cellW = icon * LiquidGlassTheme.ColumnPitch;
             double gridW = (LiquidGlassTheme.Columns - 1) * cellW;
             double padX = icon * 1.15;
             double topInset = icon * 0.55;
@@ -374,6 +378,9 @@ public partial class RadialWindow : Window
     private readonly System.Windows.Threading.DispatcherTimer _clockTimer;
     // Key-free weather + city shown after the clock; refreshes itself every ~20 min.
     private readonly Polaris.Services.WeatherService _weather = new();
+    // Cached once instead of resolving the culture every clock tick (1/sec).
+    private static readonly System.Globalization.CultureInfo ClockCulture =
+        System.Globalization.CultureInfo.GetCultureInfo("zh-CN");
 
     // Set while showing the window so the SizeChanged fired by Show() does not
     // trigger a premature (wrong-centre) Rebuild that would flash the ring.
@@ -398,10 +405,24 @@ public partial class RadialWindow : Window
     private RadialIcon? _pressedIcon;
     private Point _pressPoint;
     private bool _dragging;
+    // Independent overlay carrying the dragged icon so it stays visible anywhere
+    // on the desktop, past the compact (clipped) main-dock window box.
+    private DragGhostWindow? _dragGhost;
 
-    // Icons in current _config.Apps order, parallel to the entries. Used to
-    // animate the non-dragged icons aside while reordering.
-    private readonly List<RadialIcon> _iconElements = new();
+    // Icons in current _config.Apps order, parallel to the entries (and to
+    // _slotPositions). Used to animate the non-dragged icons aside while
+    // reordering. For the glass dock this list is kept FULL-LENGTH and 1:1 with
+    // the entries, but off-screen rows are VIRTUALIZED: their slot holds null
+    // (the RadialIcon object is discarded so WPF frees its software-rendered
+    // visual subtree) and is recreated on demand when scrolled back into view.
+    // Every index-based consumer therefore null-guards its slot.
+    private readonly List<RadialIcon?> _iconElements = new();
+
+    // Last-known running state per icon source, refreshed for EVERY configured
+    // entry on each running-state poll (not just realized icons). Lets a glass
+    // icon that was virtualized away show the correct green running light the
+    // instant it is recreated on scroll-in, instead of waiting for the next poll.
+    private readonly Dictionary<string, bool> _runStateCache = new();
 
     // Slot the dragged icon is currently hovering toward, expressed as a target
     // ring (0 = inner, 1 = outer, -1 = none) and angular position within it.
@@ -420,6 +441,13 @@ public partial class RadialWindow : Window
     // True while the Saturn continuous-orbit profiling scene is pushed.
     private bool _profilingSaturn;
 
+    // True while the glass-panel idle profiling scene is pushed (the orbit light
+    // + running-app sweeps that tick continuously whenever the glass dock is
+    // shown but not being hovered). Symmetric with _profilingSaturn so a
+    // POLARIS_FPS=1 session can read the glass idle frame rate as its own scene
+    // instead of it being lumped into the generic "Idle" bucket.
+    private bool _profilingGlass;
+
     /// <summary>
     /// When true the panel stays open (opened from the tray) so the user can
     /// drag desktop shortcuts onto it. Key-release will not hide it.
@@ -437,7 +465,7 @@ public partial class RadialWindow : Window
     /// the left-edge dock, this is invoked with the screen-space drop point and
     /// the entry. Returns true when the entry was pinned to the left dock (the
     /// main-dock entry is then left in place).</summary>
-    public Func<Point, AppEntry, bool>? DropToLeftDock;
+    public Func<Point, AppEntry, bool>? DropToSideDock;
 
     /// <summary>Set by the host: returns the height (DIP, measured up from the
     /// bottom screen edge) that the side dock occupies when it is docked at the
@@ -480,7 +508,9 @@ public partial class RadialWindow : Window
             Interval = TimeSpan.FromSeconds(2.5),
         };
         _previewWarmTimer.Tick += (_, _) => WarmPreviewCache();
-        _previewWarmTimer.Start();
+        // Started on ShowPanel and stopped on HidePanel — there is no reason to keep
+        // capturing window thumbnails (a BitBlt per running window) while the dock is
+        // hidden, and doing so caused occasional background hitches.
 
         // Ticks once a second to keep the glass dock clock current while shown.
         _clockTimer = new System.Windows.Threading.DispatcherTimer
@@ -494,11 +524,27 @@ public partial class RadialWindow : Window
             _ = _weather.RefreshAsync();
         };
         // Repaint the clock line as soon as fresh weather arrives.
-        _weather.Updated += () => Dispatcher.BeginInvoke(new Action(UpdateGlassClock));
+        _weather.Updated += OnWeatherUpdated;
 
         // Refresh badges promptly when an app starts/stops flashing for attention
         // (instead of waiting up to 1.5s for the next poll). Only while shown.
         AttentionService.Changed += OnAttentionChanged;
+    }
+
+    private void OnWeatherUpdated() => Dispatcher.BeginInvoke(new Action(UpdateGlassClock));
+
+    protected override void OnClosed(EventArgs e)
+    {
+        // The window lives for the whole app session, but tear its subscriptions
+        // down cleanly on close: the static AttentionService.Changed event would
+        // otherwise root this instance, and the timers have no reason to keep
+        // ticking once the dock is gone.
+        AttentionService.Changed -= OnAttentionChanged;
+        _weather.Updated -= OnWeatherUpdated;
+        _runningTimer.Stop();
+        _previewWarmTimer.Stop();
+        _clockTimer.Stop();
+        base.OnClosed(e);
     }
 
     private void OnAttentionChanged()
@@ -517,31 +563,13 @@ public partial class RadialWindow : Window
     {
         if (!_shown)
             return;
-        var icons = new List<RadialIcon>(_iconElements);
+        var icons = _iconElements.OfType<RadialIcon>().ToList();
         var flashing = AttentionService.SnapshotFlashing();
         System.Threading.Tasks.Task.Run(() =>
         {
             var attention = new Dictionary<RadialIcon, (bool flashing, int count)>();
             foreach (var icon in icons)
-            {
-                bool flash = false;
-                int count = 0;
-                try
-                {
-                    var wins = WindowPreviewService.GetWindowsForEntry(
-                        icon.Entry.Path, icon.Entry.Arguments);
-                    foreach (var w in wins)
-                    {
-                        if (flashing.Contains(w.Handle))
-                            flash = true;
-                        int c = AttentionService.ParseUnread(w.Title);
-                        if (c > count)
-                            count = c;
-                    }
-                }
-                catch { /* best effort */ }
-                attention[icon] = (flash, count);
-            }
+                attention[icon] = AttentionBadges.ForIcon(icon, flashing, "MainDock");
             Dispatcher.BeginInvoke(() =>
             {
                 foreach (var icon in icons)
@@ -573,7 +601,7 @@ public partial class RadialWindow : Window
         if (_glassClockTime == null && _glassClockDate == null)
             return;
         var now = DateTime.Now;
-        var zh = System.Globalization.CultureInfo.GetCultureInfo("zh-CN");
+        var zh = ClockCulture;
         if (_glassClockTime != null)
         {
             string text = now.ToString("yyyy年M月d日  ddd   H:mm", zh);
@@ -673,8 +701,8 @@ public partial class RadialWindow : Window
         {
             // Liquid-glass grid panel extents (mirrors DrawGlassPanel); size to
             // the largest possible 6×5 grid so the window fits when expanded.
-            double cellW = icon * 2.15;
-            double cellH = icon * 2.35;
+            double cellW = icon * LiquidGlassTheme.ColumnPitch;
+            double cellH = icon * LiquidGlassTheme.RowPitch;
             double gridW = (LiquidGlassTheme.Columns - 1) * cellW;
             double gridH = (LiquidGlassTheme.MaxRows - 1) * cellH;
             double panelHalfW = (gridW + icon + icon * 1.15 * 2) / 2.0;
@@ -702,7 +730,7 @@ public partial class RadialWindow : Window
         // the hover-zoom of the top icon row, and the rise-up summon slide.
         if (glass)
         {
-            double cellW = icon * 2.15;
+            double cellW = icon * LiquidGlassTheme.ColumnPitch;
             double dockW = (LiquidGlassTheme.Columns - 1) * cellW + icon + icon * 1.15 * 2;
             double shadowPad = 72.0 * _uiScale;        // slab drop shadow (blur 48 + depth)
             double scrollPad = icon * 1.6;             // scrollbar parked right of the grid
@@ -716,10 +744,10 @@ public partial class RadialWindow : Window
             // delete it — yet it inflates EVERY frame's upload during the common
             // hover / summon / pulse paths. Deletion only needs the dragged icon
             // to clear the slab edge (IsDeleteDrop = outside GlassSlabRect), so a
-            // tighter glass-specific headroom (still ~2 icon widths past the
+            // tighter glass-specific headroom (still ~1.8 icon widths past the
             // slab) keeps the gesture comfortable while shrinking the composited
-            // area ~30%, which lifts the real glass frame rate.
-            double glassDragHeadroom = _config.Settings.IconSize * _themeScale * 2.5;
+            // area further, which lifts the real glass frame rate.
+            double glassDragHeadroom = _config.Settings.IconSize * _themeScale * 1.8;
             // dragHeadroom is added sideways (both edges) and upward only — the
             // window's bottom stays pinned to the screen edge so the dock keeps
             // its position while drag-out clearance grows above and beside it.
@@ -799,19 +827,18 @@ public partial class RadialWindow : Window
     private Brush LabelBrush => new SolidColorBrush(ColorUtil.Parse(_config.Settings.FontColor, Colors.White));
     private Color AccentColor => ColorUtil.Parse(_config.Settings.AccentColor, Color.FromRgb(0x3D, 0x7E, 0xFF));
 
-    private void Rebuild()
+    /// <summary>Tears down the entire dock visual tree and drops every reference
+    /// into it, so the elements (and their BitmapCache bitmaps — the bulk of the
+    /// dock's render memory) can be collected. Called at the top of <see
+    /// cref="Rebuild"/> (which then recreates everything) and on hide (to release
+    /// that memory while the dock is dismissed; the next show rebuilds anyway).</summary>
+    private void ClearVisualTree()
     {
-        UpdateCenter();
-        PruneIconCache();
-
-        // Resolve the active theme from config each rebuild so switching the
-        // theme in settings takes effect on the next render.
-        _theme = ThemeRegistry.Get(_config.Settings.Theme);
-        RootGrid.Background = _theme.WindowBackground;
-
         PanelCanvas.Children.Clear();
         _iconElements.Clear();
-        // Icons are about to be recreated, so drop any in-flight magnification
+        // The orbit-light spin / running-glow clocks lived on the cleared visuals.
+        ClearAmbientLoops();
+        // Icons are about to be discarded, so drop any in-flight magnification
         // wave state (its per-icon array indexes the old icon list).
         StopMagTicking();
         _magCur = Array.Empty<double>();
@@ -819,8 +846,7 @@ public partial class RadialWindow : Window
         _hoverIcon = null;
         _glassHoverLabel = null;
         _glassHoverLabelText = null;
-        // PanelCanvas was just cleared, so the taskbar tiles are gone from the
-        // tree; drop our tracking so RefreshTaskbarApps rebuilds them.
+        // The taskbar tiles were children of the cleared canvas.
         _taskbarIcons.Clear();
         _taskbarTiles.Clear();
         _taskbarSignature = null;
@@ -832,6 +858,19 @@ public partial class RadialWindow : Window
         // The scroll layer + its transform were children of the cleared canvas.
         _glassScrollLayer = null;
         _glassScrollTransform = null;
+    }
+
+    private void Rebuild()
+    {
+        UpdateCenter();
+        PruneIconCache();
+
+        // Resolve the active theme from config each rebuild so switching the
+        // theme in settings takes effect on the next render.
+        _theme = ThemeRegistry.Get(_config.Settings.Theme);
+        RootGrid.Background = _theme.WindowBackground;
+
+        ClearVisualTree();
 
         // --- Layout (theme-driven) -------------------------------------------
         if (_theme.IsSaturn)
@@ -951,6 +990,12 @@ public partial class RadialWindow : Window
         if (_theme.ShowGlassPanel && GlassScrollable)
             DrawGlassScrollBar();
 
+        // Detach the off-screen glass rows so only the visible window of icons
+        // holds a (software-rendered) visual subtree. Runs after the full grid is
+        // built so _slotPositions / _iconElements are complete and 1:1.
+        if (_theme.ShowGlassPanel)
+            UpdateGlassVirtualization();
+
         if (_theme.IsSaturn)
         {
             DrawCenterButton();
@@ -982,7 +1027,8 @@ public partial class RadialWindow : Window
     {
         // Enumerate processes on a background thread so the (relatively slow)
         // snapshot never blocks the UI thread and stutters the light animation.
-        var icons = new List<RadialIcon>(_iconElements);
+        var icons = _iconElements.OfType<RadialIcon>().ToList();
+        var entries = new List<AppEntry>(_config.Apps);
         var flashing = AttentionService.SnapshotFlashing();
         System.Threading.Tasks.Task.Run(() =>
         {
@@ -994,6 +1040,14 @@ public partial class RadialWindow : Window
             try { runningAumids = WindowPreviewService.SnapshotRunningAumids(); }
             catch { runningAumids = new System.Collections.Generic.HashSet<string>(); }
 
+            // Running state for EVERY configured entry (cheap, entry-based) so a
+            // virtualized icon recreated on scroll-in can be lit instantly from
+            // the cache rather than appearing dark until the next poll.
+            var runMap = new Dictionary<string, bool>();
+            foreach (var entry in entries)
+                runMap[entry.EffectiveIconSource] = RunningAppTracker.IsEntryRunning(
+                    entry, running, explorerTitles, runningAumids);
+
             // Resolve each running icon's windows to derive its new-message badge:
             // flashing if any of its windows is requesting attention, with a best-
             // effort unread count parsed from the window titles. Reusing
@@ -1002,43 +1056,36 @@ public partial class RadialWindow : Window
             var attention = new Dictionary<RadialIcon, (bool flashing, int count)>();
             foreach (var icon in icons)
             {
-                bool isRunning = RunningAppTracker.IsEntryRunning(
-                    icon.Entry, running, explorerTitles, runningAumids);
+                bool isRunning = runMap.TryGetValue(icon.Entry.EffectiveIconSource, out var r) && r;
                 if (!isRunning)
                 {
                     attention[icon] = (false, 0);
                     continue;
                 }
-                bool flash = false;
-                int count = 0;
-                try
-                {
-                    var wins = WindowPreviewService.GetWindowsForEntry(
-                        icon.Entry.Path, icon.Entry.Arguments);
-                    foreach (var w in wins)
-                    {
-                        if (flashing.Contains(w.Handle))
-                            flash = true;
-                        int c = AttentionService.ParseUnread(w.Title);
-                        if (c > count)
-                            count = c;
-                    }
-                }
-                catch { /* best effort: no badge for this icon */ }
-                attention[icon] = (flash, count);
+                attention[icon] = AttentionBadges.ForIcon(icon, flashing, "MainDock");
             }
 
             Dispatcher.BeginInvoke(() =>
             {
+                foreach (var kv in runMap)
+                    _runStateCache[kv.Key] = kv.Value;
                 foreach (var icon in icons)
                 {
-                    icon.IsRunning = RunningAppTracker.IsEntryRunning(
-                        icon.Entry, running, explorerTitles, runningAumids);
+                    icon.IsRunning = runMap.TryGetValue(icon.Entry.EffectiveIconSource, out var r) && r;
                     if (attention.TryGetValue(icon, out var a))
                         icon.SetAttention(a.flashing, a.count);
                 }
             });
         });
+    }
+
+    /// <summary>Applies the cached running state to a single icon — used the
+    /// moment a virtualized glass icon is recreated on scroll-in so its green
+    /// light matches the rest of the dock without waiting for the next poll.</summary>
+    private void RefreshIconState(RadialIcon icon)
+    {
+        if (_runStateCache.TryGetValue(icon.Entry.EffectiveIconSource, out var r))
+            icon.IsRunning = r;
     }
 
     /// <summary>Starts (or restarts) the inner/outer ring revolution at periods

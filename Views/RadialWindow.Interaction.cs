@@ -132,6 +132,7 @@ public partial class RadialWindow
         _pressedIcon = (RadialIcon)sender;
         _pressPoint = e.GetPosition(PanelCanvas);
         _dragging = false;
+        EndDragGhost();
         _dragTargetRing = -1;
         _dragTargetPos = -1;
         _dragProspectiveResident = -2;
@@ -184,12 +185,24 @@ public partial class RadialWindow
             // forgiving drop target.
             if (_theme.ShowGlassPanel)
                 GlassDragActiveChanged?.Invoke(true);
+
+            // Lift the dragged icon into an independent overlay window so it stays
+            // visible even when dragged past the compact (clipped) main-dock box.
+            StartDragGhost(_pressedIcon);
         }
 
         PlaceCentered(_pressedIcon, p);
 
         bool deleteZone = IsDeleteDrop(p);
-        _pressedIcon.Opacity = deleteZone ? 0.4 : 1.0;
+        _pressedIcon.Opacity = _dragGhost != null ? 0.0 : (deleteZone ? 0.4 : 1.0);
+        if (_dragGhost != null)
+        {
+            // Screen-DIP position of the cursor: the borderless window's client
+            // origin is its Left/Top (DIPs) and PanelCanvas fills it, so a canvas
+            // point maps to the desktop by simple addition (DPI-agnostic).
+            _dragGhost.MoveCenterTo(Left + p.X, Top + p.Y);
+            _dragGhost.GhostOpacity = deleteZone ? 0.4 : 1.0;
+        }
 
         // Push other icons aside to reveal the slot the dragged icon is over.
         // Skip while the icon is dragged out into the delete zone.
@@ -248,13 +261,124 @@ public partial class RadialWindow
     {
         double cellH = GlassCellH;
         double y0 = GlassDockCenterY - (LiquidGlassTheme.VisibleRows - 1) * cellH / 2.0;
-        return (int)Math.Round((contentP.Y - y0) / cellH);
+        int row = (int)Math.Round((contentP.Y - y0) / cellH);
+        // Rows at or below the resident frame are laid out ResidentGap lower (see
+        // LiquidGlassTheme.ComputeSlots); undo that offset before snapping so the
+        // resident/non-resident classification matches the icon positions.
+        int resident = Math.Min(DockSync.ResidentCount(_config), _config.Apps.Count);
+        int frameRows = Math.Clamp(
+            (resident + LiquidGlassTheme.Columns - 1) / LiquidGlassTheme.Columns, 1, 2);
+        if (row >= frameRows)
+        {
+            double gap = EffectiveIconSize * LiquidGlassTheme.ResidentGap;
+            row = Math.Max(frameRows, (int)Math.Round((contentP.Y - y0 - gap) / cellH));
+        }
+        return row;
     }
 
     protected override void OnMouseWheel(MouseWheelEventArgs e)
     {
         base.OnMouseWheel(e);
         OnGlassMouseWheel(this, e);
+    }
+
+    // ---- Drag ghost overlay ----------------------------------------------
+
+    /// <summary>Snapshots the dragged icon and shows it in an independent overlay
+    /// window pinned to the cursor, then hides the real (clipped) dock icon. The
+    /// overlay roams the whole desktop so the icon never disappears mid-drag.</summary>
+    private void StartDragGhost(RadialIcon icon)
+    {
+        EndDragGhost();
+
+        var snap = SnapshotIcon(icon, out double w, out double h);
+        if (snap == null)
+            return;
+
+        _dragGhost = new DragGhostWindow(snap, w, h);
+        // Position it at the icon's current spot before the first paint so it does
+        // not flash in at the screen origin.
+        double lx = Canvas.GetLeft(icon);
+        double ty = Canvas.GetTop(icon);
+        if (!double.IsNaN(lx) && !double.IsNaN(ty))
+            _dragGhost.MoveCenterTo(Left + lx + w / 2.0, Top + ty + h / 2.0);
+        _dragGhost.Show();
+    }
+
+    /// <summary>Tears down the drag ghost and restores the real icon's visibility
+    /// (a Rebuild on drop normally replaces it, but this is a safe fallback).</summary>
+    private void EndDragGhost(RadialIcon? restore = null)
+    {
+        if (_dragGhost != null)
+        {
+            _dragGhost.Close();
+            _dragGhost = null;
+        }
+        if (restore != null)
+            restore.Opacity = 1.0;
+    }
+
+    /// <summary>Renders the icon's glyph to a crisp bitmap at its true on-screen
+    /// (resting, un-zoomed) size. The hover name label is hidden during the capture so
+    /// the VisualBrush's sampled bounds shrink to the glyph itself (otherwise the
+    /// overflowing label enlarges the bounds and Stretch=Uniform shrinks the glyph). The
+    /// live hover/magnify scale transform is neutralised so the capture is the base glyph.</summary>
+    /// <summary>Renders the icon's glyph to a crisp bitmap at its true on-screen
+    /// (resting, un-zoomed) size. Uses a VisualBrush with an ABSOLUTE viewbox pinned to
+    /// the icon's glyph box (offset by the icon's Canvas position), which: (a) ignores the
+    /// overflowing hover-name label / blurred glow layers that would otherwise enlarge the
+    /// default (descendant-bounds) viewbox and shrink the glyph under Stretch=Uniform, and
+    /// (b) stays correct even though the icon sits at a Canvas.Left/Top offset (a plain
+    /// RenderTargetBitmap.Render would honour that offset and capture blank). The live
+    /// hover/magnify scale transform is neutralised so the capture is the base glyph.
+    /// Verified empirically: default-viewbox Uniform shrinks to ~60%; absolute viewbox
+    /// shifted by the Canvas offset renders the full-size glyph.</summary>
+    private ImageSource? SnapshotIcon(RadialIcon icon, out double dipW, out double dipH)
+    {
+        double box = icon.IconSize > 0 ? icon.IconSize
+                   : (icon.ActualWidth > 0 ? icon.ActualWidth : 0);
+        dipW = box;
+        dipH = box;
+        if (box <= 0)
+            return null;
+
+        // The absolute viewbox is read in the icon's outer coordinate space, which
+        // includes its Canvas.Left/Top layout offset; shift the viewbox to match so the
+        // glyph box is the region actually sampled (an unshifted box samples empty space).
+        double ox = Canvas.GetLeft(icon); if (double.IsNaN(ox)) ox = 0;
+        double oy = Canvas.GetTop(icon);  if (double.IsNaN(oy)) oy = 0;
+
+        var savedTransform = icon.RenderTransform;
+        try
+        {
+            icon.RenderTransform = Transform.Identity;   // capture at base scale
+            var vb = new VisualBrush(icon)
+            {
+                Stretch = Stretch.Fill,
+                ViewboxUnits = BrushMappingMode.Absolute,
+                Viewbox = new Rect(ox, oy, box, box),
+            };
+            var dv = new DrawingVisual();
+            using (var dc = dv.RenderOpen())
+                dc.DrawRectangle(vb, null, new Rect(0, 0, dipW, dipH));
+
+            double scale = DeviceScale <= 0 ? 1.0 : DeviceScale;
+            var rtb = new RenderTargetBitmap(
+                Math.Max(1, (int)Math.Ceiling(dipW * scale)),
+                Math.Max(1, (int)Math.Ceiling(dipH * scale)),
+                96.0 * scale, 96.0 * scale, PixelFormats.Pbgra32);
+            rtb.Render(dv);
+            rtb.Freeze();
+            return rtb;
+        }
+        catch
+        {
+            return null;
+        }
+        finally
+        {
+            icon.RenderTransform = savedTransform;
+        }
     }
 
 }

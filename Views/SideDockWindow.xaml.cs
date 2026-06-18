@@ -21,7 +21,7 @@ namespace Polaris.Views;
 /// apps strip at the bottom. Summoned by moving the mouse to the left-centre
 /// edge, or together with the main dock via the global hotkey.
 /// </summary>
-public partial class LeftDockWindow : Window
+public partial class SideDockWindow : Window
 {
     private const double GlassIconScale = 1.32;   // match the main dock's grid icon size
     private const double HoverScale = 1.5;
@@ -33,7 +33,7 @@ public partial class LeftDockWindow : Window
     // which made its side-dock spacing differ from the glass theme's).
     // Sized so the rendered glyph (GIcon = EffectiveIconSize * GlassIconScale)
     // lands at exactly 0.70 * IconSize * _uiScale for both themes.
-    private const double LeftDockScale = 0.70 / GlassIconScale;
+    private const double SideDockScale = 0.70 / GlassIconScale;
 
     private readonly AppConfig _config;
     private readonly Action _persist;
@@ -225,10 +225,10 @@ public partial class LeftDockWindow : Window
                                      // (pinned column + running strip, so the wave
                                      // is continuous across the seam)
 
-    private double EffectiveIconSize => _config.Settings.IconSize * _uiScale * LeftDockScale;
+    private double EffectiveIconSize => _config.Settings.IconSize * _uiScale * SideDockScale;
     private double GIcon => EffectiveIconSize * GlassIconScale;
     // Cell pitch along the column. Tightened from 1.58 so icons sit closer
-    // together (smaller gaps); identical for every theme via LeftDockScale.
+    // together (smaller gaps); identical for every theme via SideDockScale.
     private double DefaultCellH => EffectiveIconSize * 1.46;
     private double CellH => _cellH > 0 ? _cellH : DefaultCellH;
     // Running-strip tiles use the SAME vertical step as the pinned cells so the
@@ -249,7 +249,7 @@ public partial class LeftDockWindow : Window
     /// strip. Wired by App to toggle the pinned docks (equivalent to Ctrl+4).</summary>
     public Action? ToggleDocks { get; set; }
 
-    public LeftDockWindow(AppConfig config, Action persist)
+    public SideDockWindow(AppConfig config, Action persist)
     {
         _config = config;
         _persist = persist;
@@ -262,12 +262,23 @@ public partial class LeftDockWindow : Window
         _runningTimer.Tick += (_, _) => RefreshRunning();
 
         // Refresh badges promptly when an app starts/stops flashing for attention.
-        AttentionService.Changed += () =>
-        {
-            if (!_shown)
-                return;
-            Dispatcher.BeginInvoke(new Action(RefreshAttentionOnly));
-        };
+        AttentionService.Changed += OnAttentionChanged;
+    }
+
+    private void OnAttentionChanged()
+    {
+        if (!_shown)
+            return;
+        Dispatcher.BeginInvoke(new Action(RefreshAttentionOnly));
+    }
+
+    protected override void OnClosed(EventArgs e)
+    {
+        // Lives for the whole app session, but drop the static-event subscription
+        // (which would otherwise root this instance) and stop the timer on close.
+        AttentionService.Changed -= OnAttentionChanged;
+        _runningTimer.Stop();
+        base.OnClosed(e);
     }
 
     /// <summary>Lightweight badge-only refresh for the prompt flash event: resolves
@@ -283,25 +294,7 @@ public partial class LeftDockWindow : Window
         {
             var attention = new Dictionary<RadialIcon, (bool flashing, int count)>();
             foreach (var icon in pinnedIcons)
-            {
-                bool flash = false;
-                int count = 0;
-                try
-                {
-                    var wins = WindowPreviewService.GetWindowsForEntry(
-                        icon.Entry.Path, icon.Entry.Arguments);
-                    foreach (var w in wins)
-                    {
-                        if (flashing.Contains(w.Handle))
-                            flash = true;
-                        int c = AttentionService.ParseUnread(w.Title);
-                        if (c > count)
-                            count = c;
-                    }
-                }
-                catch { /* best effort */ }
-                attention[icon] = (flash, count);
-            }
+                attention[icon] = AttentionBadges.ForIcon(icon, flashing, "SideDock");
             Dispatcher.BeginInvoke(() =>
             {
                 if (!_shown)
@@ -461,7 +454,7 @@ public partial class LeftDockWindow : Window
         double cell = DefaultCellH;
         double pad = icon * 0.7;                              // startPad / endPad
         double seam = icon * 0.55;                            // running area always present
-        int pinned = _config.LeftDockApps.Count;
+        int pinned = _config.SideDockApps.Count;
         const int maxRunSlots = 1 + RunningMaxComplete + 1;   // Polaris + full tiles + overflow
         double reserve = 12 * _uiScale;                       // horizontal: symmetric end reserves
         return reserve + pad + pinned * cell + seam + maxRunSlots * cell + pad + reserve;
@@ -561,6 +554,10 @@ public partial class LeftDockWindow : Window
         _runningTimer.Stop();
         _pinnedScroll = 0;
         HideHoverLabel();
+        // Let the magnification wave ease back to rest during the fade instead of
+        // holding the last cursor position (which it would, since a collapsed
+        // window receives no more mouse moves to clear it).
+        _waveCursorY = double.NaN;
 
         double from = RootGrid.Opacity;
         var fade = new DoubleAnimation(from, 0, TimeSpan.FromMilliseconds(160));
@@ -570,6 +567,11 @@ public partial class LeftDockWindow : Window
             {
                 PanelCanvas.Visibility = Visibility.Collapsed;
                 _dismissing = false;
+                // Guarantee the per-frame wave loop is torn down once hidden: if
+                // the dock was dismissed while the cursor sat over it (launch /
+                // click-away), OnWaveTick would otherwise keep ticking every vsync
+                // forever behind the invisible window.
+                ResetWave();
             }
         };
         RootGrid.BeginAnimation(OpacityProperty, fade);

@@ -14,7 +14,7 @@ using Polaris.Services;
 
 namespace Polaris.Views;
 
-public partial class LeftDockWindow
+public partial class SideDockWindow
 {
     // ---- Layout + build --------------------------------------------------
 
@@ -61,7 +61,7 @@ public partial class LeftDockWindow
         // divider. Size that shared cell from the comfortable default and, only
         // if the combined column would overflow the usable band, shrink it just
         // enough to fit every row (down to a snug floor so icons never overlap).
-        int pinnedCount = _config.LeftDockApps.Count;
+        int pinnedCount = _config.SideDockApps.Count;
         int runSlots = _hasRunningArea ? CurrentRunSlots() : 0;
         int totalCells = pinnedCount + runSlots;
         double fixedChrome = startPad + endPad + (_hasRunningArea ? seam : 0);
@@ -153,7 +153,7 @@ public partial class LeftDockWindow
     private int CurrentRunSlots() => _runSlotsCached;
 
     private double PinnedScrollMax =>
-        Math.Max(0, (_config.LeftDockApps.Count - _pinnedVisible)) * CellH;
+        Math.Max(0, (_config.SideDockApps.Count - _pinnedVisible)) * CellH;
 
     private bool PinnedScrollable => PinnedScrollMax > 0.5;
 
@@ -168,6 +168,7 @@ public partial class LeftDockWindow
         PanelCanvas.Children.Clear();
         _pinnedIcons.Clear();
         _pinnedSlots.Clear();
+        ClearAmbientLoops();
         _scrollLayer = null;
         _scrollTransform = null;
         _hoverLabel = null;
@@ -188,9 +189,9 @@ public partial class LeftDockWindow
 
         double opacity = 1.0 - Math.Clamp(_config.Settings.PanelTransparency, 0.0, 1.0);
         // Corner radius matches the main dock's resident-region border
-        // (main-icon * 0.42); EffectiveIconSize / LeftDockScale recovers the
+        // (main-icon * 0.42); EffectiveIconSize / SideDockScale recovers the
         // main dock's icon size from this scaled-down tray.
-        double trayRadius = EffectiveIconSize / LeftDockScale * 0.42;
+        double trayRadius = EffectiveIconSize / SideDockScale * 0.42;
         // The Saturn theme uses a black smoked-glass side dock; every other
         // theme keeps the clear "liquid glass" body.
         bool darkSlab = ThemeRegistry.Get(_config.Settings.Theme).IsSaturn;
@@ -201,7 +202,7 @@ public partial class LeftDockWindow
             // Draw the black tray snug around the icon column, bleeding its
             // edge-side feather off-screen so the solid black sits flush against
             // the screen edge.
-            double darkPad = GIcon * 0.55;
+            double darkPad = GIcon * 0.5;
             double darkBleed = GIcon * 0.4;
             _bodyCross = _slabCross - darkBleed;
             _bodyCrossLen = (_colCenterCross - _bodyCross) + GIcon / 2.0 + darkPad;
@@ -304,7 +305,7 @@ public partial class LeftDockWindow
         clip.Children.Add(_scrollLayer);
         PanelCanvas.Children.Add(clip);
 
-        var apps = _config.LeftDockApps;
+        var apps = _config.SideDockApps;
         for (int i = 0; i < apps.Count; i++)
         {
             double mainC = _pinnedAreaMain + i * CellH + CellH / 2.0;
@@ -334,7 +335,7 @@ public partial class LeftDockWindow
     private RadialIcon CreateIcon(AppEntry entry, double size)
     {
         var bmp = IconExtractor.GetCached(entry.EffectiveIconSource, _iconCache);
-        var icon = new RadialIcon(entry, bmp, size, AccentColor, LabelBrush, dropletHover: true, leftDockStyle: true);
+        var icon = new RadialIcon(entry, bmp, size, AccentColor, LabelBrush, dropletHover: true, sideDockStyle: true);
         icon.ApplyDockEdge(_side);
         icon.ExternalMagnify = true;   // the dock drives a coordinated macOS-style wave
         icon.PreviewMouseLeftButtonDown += Icon_PreviewMouseLeftButtonDown;
@@ -347,7 +348,7 @@ public partial class LeftDockWindow
     }
 
     private void PruneIconCache()
-        => IconExtractor.PruneCache(_iconCache, _config.LeftDockApps);
+        => IconExtractor.PruneCache(_iconCache, _config.SideDockApps);
 
     private void DrawSeam(double seamMain, double opacity)
     {

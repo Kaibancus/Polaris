@@ -229,7 +229,7 @@ public static class UpdateService
         catch
         {
             // Best-effort cleanup; the helper script (if launched) owns workDir.
-            try { Directory.Delete(workDir, recursive: true); } catch { }
+            try { Directory.Delete(workDir, recursive: true); } catch (System.Exception cleanupEx) { Log.Debug("Update", "temp cleanup failed", cleanupEx); }
             throw;
         }
     }

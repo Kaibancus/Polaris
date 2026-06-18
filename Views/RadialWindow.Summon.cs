@@ -84,7 +84,14 @@ public partial class RadialWindow
         // The liquid-glass dock no longer frosts the desktop behind it — the
         // panel sits on the clear wallpaper. (Desktop-blur capture removed.)
         if (_theme.ShowGlassPanel)
+        {
             AnimateGlassRise();         // slide the dock up from the screen bottom
+            // The glass dock runs the orbit light + running-app sweeps
+            // continuously while shown; mark it the base profiling scene until
+            // the panel hides (mirrors SaturnIdle).
+            Polaris.Services.FpsProfiler.Push("GlassIdle");
+            _profilingGlass = true;
+        }
         else
         {
             PanelCanvas.RenderTransform = Transform.Identity;  // clear any glass rise
@@ -100,6 +107,8 @@ public partial class RadialWindow
         UpdateGlassClock();
         ShowNotchIfSaturn();
         _clockTimer.Start();
+        WarmPreviewCache();             // prime previews for this show, then poll
+        _previewWarmTimer.Start();
         _ = _weather.RefreshAsync();   // fetch weather promptly on show
 
         var fade = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(160))
@@ -226,6 +235,10 @@ public partial class RadialWindow
         CancelDrag();
         _runningTimer.Stop();
         _clockTimer.Stop();
+        _previewWarmTimer.Stop();       // no thumbnail polling needed while hidden
+        // Free the (large) window-thumbnail bitmaps that can be re-captured next
+        // show; keeps only minimized windows' last-good frames. Cuts idle memory.
+        Polaris.Services.WindowPreviewService.TrimThumbCacheForHide();
         _notch?.HideNotch();
         ResetMagnify();
         // Stop watching the live frame rate so an idle app pays nothing.
@@ -241,6 +254,12 @@ public partial class RadialWindow
             _profilingSaturn = false;
             Polaris.Services.FpsProfiler.Pop("SaturnIdle");
         }
+        // End the glass idle profiling scene if it was active.
+        if (_profilingGlass)
+        {
+            _profilingGlass = false;
+            Polaris.Services.FpsProfiler.Pop("GlassIdle");
+        }
 
         // Reset the glass grid scroll so the next summon starts at the top row.
         StopGlassScrollAnimation();
@@ -248,7 +267,7 @@ public partial class RadialWindow
 
         // Dismiss any open window-preview popups so they don't linger on screen.
         foreach (var ic in _iconElements)
-            ic.ClosePreview();
+            ic?.ClosePreview();
 
         // Fade the content out, then collapse it so the fully-transparent
         // layered window passes clicks straight through to the desktop (a
@@ -261,7 +280,30 @@ public partial class RadialWindow
         {
             // Only collapse if still hidden (a fast re-show may have intervened).
             if (!_shown)
+            {
                 PanelCanvas.Visibility = Visibility.Collapsed;
+                // Release the whole dock visual tree (and its BitmapCache bitmaps,
+                // the bulk of the dock's render memory) now that it's hidden. The
+                // next ShowFaded calls Rebuild() which recreates everything, so
+                // this is free apart from that rebuild we'd do on show anyway. Big
+                // idle (hidden-dock) memory saving. Deferred to a Background pass
+                // so it never blocks the final collapsed frame from presenting.
+                Dispatcher.BeginInvoke(() =>
+                {
+                    if (!_shown)
+                    {
+                        ClearVisualTree();
+                        // Shrink the layered window to 1x1 while hidden so WPF frees
+                        // the large software-composited surface (AllowsTransparency
+                        // keeps a per-pixel-alpha buffer ~ window-area×4 bytes plus
+                        // render scratch — the bulk of the idle footprint). The next
+                        // ShowFaded's SizeToActiveContent restores the real size
+                        // before Rebuild, so the user never sees the 1x1 window.
+                        Width = 1;
+                        Height = 1;
+                    }
+                }, System.Windows.Threading.DispatcherPriority.Background);
+            }
             // Defer the callback to a LATER dispatcher pass (Background) instead
             // of running it inline on the fade's final frame. The callback may
             // build a heavy window (the settings UI), and doing that synchronously

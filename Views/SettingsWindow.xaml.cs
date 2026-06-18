@@ -121,8 +121,6 @@ public partial class SettingsWindow : Window
         DockPositionCombo.Items.Add(new ComboBoxItem { Content = "底部", Tag = DockSide.Bottom });
         SelectDockPosition(s.DockPosition);
         MultiMonitorCheck.IsChecked = s.DockOnAllMonitors;
-
-        UpdateHint();
     }
 
     private void SelectDockPosition(DockSide side)
@@ -192,12 +190,6 @@ public partial class SettingsWindow : Window
             ToggleKeyCombo.SelectedIndex = 0;
     }
 
-    private void UpdateHint()
-    {
-        if (TriggerKeyCombo.SelectedItem is ComboBoxItem item)
-            HintText.Text = $"提示：长按 {item.Content} 在屏幕中心呼出圆盘";
-    }
-
     private void CommitSettings()
     {
         var s = _config.Settings;
@@ -257,7 +249,6 @@ public partial class SettingsWindow : Window
         {
             _config.Settings.TriggerKey = vk;
             _persist();
-            UpdateHint();
             TriggerKeyChanged?.Invoke();
         }
     }

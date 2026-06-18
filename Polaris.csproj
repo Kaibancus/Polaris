@@ -10,7 +10,7 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <AssemblyName>Polaris</AssemblyName>
     <RootNamespace>Polaris</RootNamespace>
-    <Version>1.8.7</Version>
+    <Version>2.0.1</Version>
     <NoWarn>WFO0003</NoWarn>
     <ApplicationIcon>Assets\app.ico</ApplicationIcon>
   </PropertyGroup>
@@ -23,6 +23,14 @@
 
   <ItemGroup>
     <Resource Include="Assets\app.ico" />
+  </ItemGroup>
+
+  <!-- The unit-test project lives in Tests\ beneath this project root. The WPF
+       SDK globs **/*.cs, so exclude it here or the app would try to compile the
+       xUnit-dependent test sources. -->
+  <ItemGroup>
+    <Compile Remove="Tests\**\*.cs" />
+    <None Remove="Tests\**" />
   </ItemGroup>
 
 </Project>

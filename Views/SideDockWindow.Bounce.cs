@@ -14,7 +14,7 @@ using Polaris.Services;
 
 namespace Polaris.Views;
 
-public partial class LeftDockWindow
+public partial class SideDockWindow
 {
     // ---- Launch -----------------------------------------------------------
 
@@ -238,8 +238,8 @@ public partial class LeftDockWindow
                     RepeatBehavior = RepeatBehavior.Forever,
                     BeginTime = TimeSpan.FromSeconds(2.2 * rng.NextDouble()),
                 };
-                Timeline.SetDesiredFrameRate(tw, App.AmbientFrameRate);
-                star.BeginAnimation(OpacityProperty, tw);
+                Timeline.SetDesiredFrameRate(tw, App.GlassLoopFrameRate);
+                RegisterAmbientLoop(star, OpacityProperty, tw);
             }
         }
     }

@@ -14,7 +14,7 @@ using Polaris.Services;
 
 namespace Polaris.Views;
 
-public partial class LeftDockWindow
+public partial class SideDockWindow
 {
     // ---- Running-but-unpinned strip --------------------------------------
 
@@ -76,15 +76,21 @@ public partial class LeftDockWindow
             }
         }
         // The running strip lists apps that are running but NOT in the resident
-        // region (the side dock's pinned column = _config.LeftDockApps, which
+        // region (the side dock's pinned column = _config.SideDockApps, which
         // mirrors the main dock's first ResidentCount entries). Non-resident
         // pinned apps are intentionally NOT excluded, so they surface in the
         // running strip while running (they don't otherwise appear on the side
         // dock). Only the resident apps — already shown as pinned tiles here — are
         // excluded to avoid duplicating them.
-        var pinned = new List<AppEntry>(_config.LeftDockApps);
+        var excludeTitles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var pinned = new List<AppEntry>(_config.SideDockApps);
         foreach (var a in pinned)
         {
+            // Path-protected apps (UU加速器) expose no usable path/AUMID for their
+            // running window, so also exclude any running window whose TITLE equals
+            // a resident pin's display name (UU's window title equals its pin name).
+            if (!string.IsNullOrWhiteSpace(a.Name))
+                excludeTitles.Add(a.Name);
             if (string.IsNullOrWhiteSpace(a.Path))
                 continue;
             string? aumid = WindowPreviewService.TryGetLauncherAumid(a.Path, a.Arguments);
@@ -106,7 +112,7 @@ public partial class LeftDockWindow
                         if (!string.IsNullOrWhiteSpace(fn))
                             excludeFileNames.Add(fn);
                     }
-                    catch { /* ignore */ }
+                    catch (System.Exception ex) { Polaris.Services.Log.Debug("SideDock", "self-exe filename resolve failed", ex); }
                     AddLauncherHelpers(exe);
                 }
             }
@@ -120,7 +126,7 @@ public partial class LeftDockWindow
                     if (!string.IsNullOrWhiteSpace(fn))
                         excludeFileNames.Add(fn);
                 }
-                catch { /* ignore */ }
+                catch (System.Exception ex) { Polaris.Services.Log.Debug("SideDock", "pinned-entry filename resolve failed", ex); }
                 AddLauncherHelpers(a.Path);
             }
         }
@@ -178,7 +184,31 @@ public partial class LeftDockWindow
                     if (!string.IsNullOrWhiteSpace(fn) && excludeFileNames.Contains(fn))
                         continue;
                 }
-                catch { /* ignore */ }
+                catch (System.Exception ex) { Polaris.Services.Log.Debug("SideDock", "running-app exclude filter failed", ex); }
+                // Folder de-dup for launcher pins whose running main exe lives in a
+                // (version) subfolder, e.g. resident UU\uu_launcher.exe vs the
+                // running UU\5224\uu.exe — both robustly read via QueryFullProcess-
+                // ImageName now. Mirrors the green-light IsSameOrChildInstallFolder.
+                bool inPinnedFolder = false;
+                if (!string.IsNullOrWhiteSpace(ta.Path))
+                {
+                    foreach (var a in pinned)
+                    {
+                        if (!string.IsNullOrWhiteSpace(a.Path)
+                            && RunningAppTracker.IsSameOrChildInstallFolder(a.Path, ta.Path))
+                        {
+                            inPinnedFolder = true;
+                            break;
+                        }
+                    }
+                }
+                if (inPinnedFolder)
+                    continue;
+                // Title fallback for path-protected apps (UU加速器): its running
+                // window carries no usable path/AUMID, so exclude it when its title
+                // matches a resident pin's display name.
+                if (!string.IsNullOrWhiteSpace(ta.Title) && excludeTitles.Contains(ta.Title))
+                    continue;
                 filtered.Add(ta);
             }
 
@@ -195,23 +225,7 @@ public partial class LeftDockWindow
                     attention[icon] = (false, 0);
                     continue;
                 }
-                bool flash = false;
-                int count = 0;
-                try
-                {
-                    var wins = WindowPreviewService.GetWindowsForEntry(
-                        icon.Entry.Path, icon.Entry.Arguments);
-                    foreach (var w in wins)
-                    {
-                        if (flashing.Contains(w.Handle))
-                            flash = true;
-                        int c = AttentionService.ParseUnread(w.Title);
-                        if (c > count)
-                            count = c;
-                    }
-                }
-                catch { /* best effort */ }
-                attention[icon] = (flash, count);
+                attention[icon] = AttentionBadges.ForIcon(icon, flashing, "SideDock");
             }
 
             Dispatcher.BeginInvoke(() =>
@@ -347,7 +361,7 @@ public partial class LeftDockWindow
         if (!string.IsNullOrEmpty(exe) && !_runIconCache.TryGetValue(exe, out _))
         {
             try { _runIconCache[exe] = IconExtractor.GetIcon(exe); }
-            catch { /* fall through to no icon */ }
+            catch (System.Exception ex) { Polaris.Services.Log.Debug("SideDock", "self run-tile icon extraction failed", ex); }
         }
         _runIconCache.TryGetValue(exe, out var bmp);
 
@@ -566,6 +580,10 @@ public partial class LeftDockWindow
             Effect = new System.Windows.Media.Effects.BlurEffect { Radius = 6 },
             IsHitTestVisible = false,
             Opacity = 0,
+            // The glow only pulses its Opacity (a cheap composite), so bake the
+            // blurred ellipse once instead of re-rasterising the blur every frame
+            // the breathing animation ticks — one cached texture per running tile.
+            CacheMode = new System.Windows.Media.BitmapCache(),
         };
         Canvas.SetLeft(glowEllipse, cx - glow / 2.0);
         Canvas.SetTop(glowEllipse, cy - glow / 2.0);
@@ -597,7 +615,7 @@ public partial class LeftDockWindow
         canvas.Children.Add(glowEllipse);
         canvas.Children.Add(core);
 
-        int loopFps = App.AmbientFrameRate;
+        int loopFps = App.GlassLoopFrameRate;
         var pulse = new DoubleAnimation(0.55, 1.0, new Duration(TimeSpan.FromSeconds(2.0)))
         {
             AutoReverse = true,

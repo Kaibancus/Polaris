@@ -131,7 +131,8 @@ public partial class RadialWindow
                 : _slotPositions;
         for (int i = 0; i < _iconElements.Count; i++)
         {
-            if (_iconElements[i] == _pressedIcon)
+            var el = _iconElements[i];
+            if (el == null || el == _pressedIcon)
                 continue;
             int slot = slotOfEntry[i];
             if (slot >= 0 && slot < slots.Count)
@@ -139,7 +140,7 @@ public partial class RadialWindow
                 // Icons live in the scroll layer at true positions, so reflow to
                 // the plain slot centre — the layer transform + clip handle the
                 // scroll and viewport masking automatically.
-                AnimateTo(_iconElements[i], slots[slot]);
+                AnimateTo(el, slots[slot]);
             }
         }
     }
