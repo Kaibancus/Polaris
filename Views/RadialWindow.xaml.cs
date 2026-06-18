@@ -395,7 +395,12 @@ public partial class RadialWindow : Window
 
     // Phone-"notch"-style date/time panel shown at the screen top (or bottom when
     // the side dock is on the top edge) while the Saturn dock is summoned.
-    private NotchClockWindow? _notch;
+    private INotchClock? _notch;
+
+    // Per-window GPU migration toggle: POLARIS_GPU_NOTCH=1 renders the Saturn notch
+    // clock through DirectComposition + Direct2D instead of a WPF layered window.
+    private static readonly bool UseGpuNotch =
+        Environment.GetEnvironmentVariable("POLARIS_GPU_NOTCH") == "1";
 
     private Point _center;
     private double _outerRadius;
@@ -597,7 +602,9 @@ public partial class RadialWindow : Window
             _notch?.HideNotch();
             return;
         }
-        _notch ??= new NotchClockWindow { Owner = this };
+        _notch ??= UseGpuNotch
+            ? new NotchClockWindowGpu()
+            : new NotchClockWindow { Owner = this };
         bool atBottom = _config.Settings.DockPosition == Models.DockSide.Top;
         _notch.ShowNotch(atBottom);
     }

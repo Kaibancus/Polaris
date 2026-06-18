@@ -115,4 +115,15 @@ WPF 的硬件加速（Tier-2）只对**普通不透明窗口**生效。`AllowsTr
 **③ 玻璃材质 + 文本视觉回调（`GlassPrototypeWindow`，`POLARIS_GLASS_PROTO=1`）**
 按建议②做了视觉回调原型：用 Direct2D 复刻液态玻璃 slab 的整套图层（投影、清玻璃径向体、磨砂乳白层、边缘暗角、中心高光、明亮 rim），用 **DirectWrite** 画时钟（Segoe UI + 微软雅黑）。与真实 WPF 玻璃 dock 重叠对比、按真实公式（slab 整体 `opacity = 1 - PanelTransparency`、`frostStrength = 1 - PanelTransparency`、各层 ARGB 与渐变半径逐一对齐）调校后，用户确认 **D2D 能复刻玻璃质感 + 清晰文本**（半透明通透感、磨砂、圆角、rim、文字渲染均到位）。要点经验：① 必须用与真实 slab 相同的**比例**（高大宽条）才能让径向渐变 falloff 一致（薄条会显著偏不均匀）；② 整块要乘 slab 透明度（~0.40），磨砂是**集中而非铺满**的乳白层，真实 dock 以通透为主；③ WPF `Pbgra32` ↔ D2D 预乘 BGRA 直接对应，色彩无明显偏差。**剩余像素级色彩/亮度精调属正式移植时同位置同几何的常规调校**，非 D2D 能力限制。
 
-**下一步建议**：① 把 §3-A 的逐窗迁移正式排期（DragGhost 已完成 → NotchClock → SideDock → 主 dock）；② 主 dock 重写复用本 spike 的 `CompositionHost` + 玻璃绘制原型作为起点；生产投影建议用真正的 D2D `Shadow` 效果（本原型用低透明叠加近似以保稳健）；③ 文本用 DirectWrite，注意字体回退（Segoe UI + 微软雅黑）与 DPI。
+**下一步建议**：① 把 §3-A 的逐窗迁移正式排期（DragGhost ✅、NotchClock ✅ → SideDock → 主 dock）；② 主 dock 重写复用本 spike 的 `CompositionHost` + 玻璃绘制原型作为起点；生产投影/模糊用真正的 D2D `Shadow`/`GaussianBlur` 效果（已在 NotchClock 迁移中验证 GaussianBlur 经命令列表渲染正常、平滑无分层）；③ 文本用 DirectWrite，注意字体回退（Segoe UI + 微软雅黑 / 华文新魏）与 DPI。
+
+## 8. 逐窗迁移进度（代码重构分支）
+
+| 窗口 | 状态 | 说明 |
+|---|---|---|
+| `DragGhostWindow` | ✅ GPU 版可用（`POLARIS_GPU_GHOST=1`） | 视觉验证通过 |
+| `NotchClockWindow` | ✅ GPU 版可用（`POLARIS_GPU_NOTCH=1`） | 梯形板 + 真 **GaussianBlur** 暗光晕 + DirectWrite 立体金字，用户确认与原版一致、平滑无分层 |
+| `SideDockWindow` | ⬜ 待迁移 | |
+| 主 dock `RadialWindow` | ⬜ 待迁移（收益最大） | |
+
+迁移采用 `IDragGhost` / `INotchClock` 接口 + 环境变量做 A/B，默认仍走 WPF（零生产影响），验证满意后再翻默认。**NotchClock 迁移额外验证了 D2D 真高斯模糊管线**（主 dock 的 19 处 BlurEffect / 15 处 DropShadow 移植所需的关键能力）。
