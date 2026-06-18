@@ -4,49 +4,71 @@ using System.Numerics;
 using System.Runtime.InteropServices;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using System.Windows.Threading;
 using Polaris.Models;
 using Polaris.Services;
 using Polaris.Services.Gpu;
 using Vortice.Direct2D1;
+using Vortice.DirectWrite;
 using Vortice.Mathematics;
+using FontStyle = Vortice.DirectWrite.FontStyle;
 
 namespace Polaris.Views;
 
-/// <summary>GPU side dock — STAGE A (static renderer): draws the liquid-glass slab
-/// and the pinned icon column (faint plate + icon bitmap + green running dot) for a
-/// LEFT vertical dock entirely in Direct2D under DirectComposition, reusing the real
-/// dock's layout formulas. Shown for visual validation behind POLARIS_GPU_SIDEDOCK=1.
-/// Interaction (hit-test, magnify wave, running strip, drag) comes in later stages.
-/// Assumes 100% DPI (matching the other GPU spikes).</summary>
+/// <summary>GPU side dock — STAGE A (static render) + STAGE B (hover hit-test + a
+/// floating name label). Draws the liquid-glass slab and the pinned icon column in
+/// Direct2D under DirectComposition; a cursor poll hit-tests the icons so a hovered
+/// one shows its name on a small label (the window stays click-through — launch/drag
+/// come in later stages). Shown behind POLARIS_GPU_SIDEDOCK=1. Assumes 100% DPI.</summary>
 internal sealed class SideDockWindowGpu : IDisposable
 {
     private const float GlassIconScale = 1.32f;
-    private const float SideDockScaleK = 0.70f;          // EffectiveIconSize*GlassIconScale = IconSize*uiScale*0.70
+    private const float SideDockScaleK = 0.70f;
     private const float HoverScale = 1.5f;
+
+    private readonly struct Slot
+    {
+        public readonly Vector2 Center;
+        public readonly float G;
+        public readonly string Name;
+        public readonly AppEntry Entry;
+        public readonly bool Running;
+        public Slot(Vector2 c, float g, string name, AppEntry e, bool run)
+        { Center = c; G = g; Name = name; Entry = e; Running = run; }
+    }
 
     private readonly AppConfig _config;
     private IntPtr _hwnd;
     private CompositionHost? _host;
+    private IDWriteFactory? _dwrite;
+    private IDWriteTextFormat? _labelFormat;
     private readonly Dictionary<string, ID2D1Bitmap?> _bmpCache = new();
     private readonly Dictionary<string, BitmapSource?> _iconCache = new();
+    private DispatcherTimer? _timer;
+
+    private readonly List<Slot> _slots = new();
+    private DockSide _side;
+    private int _winX, _winY, _winW, _winH;
+    private int _hover = -1;
+    private float _sx, _sy, _sw, _sh, _trayRadius, _opacity, _frost;
 
     public SideDockWindowGpu(AppConfig config) => _config = config;
 
     public void Show()
     {
         try { Build(); }
-        catch (Exception ex) { Log.Warn("SideDockGpu", "stage-A failed: " + ex); }
+        catch (Exception ex) { Log.Warn("SideDockGpu", "failed: " + ex); }
     }
 
     private void Build()
     {
         var wa = MonitorLayout.ActiveWorkArea;
-        var side = _config.Settings.DockPosition;
-        bool vertical = side is DockSide.Left or DockSide.Right;
+        _side = _config.Settings.DockPosition;
+        bool vertical = _side is DockSide.Left or DockSide.Right;
         double uiScale = Math.Clamp(MonitorLayout.ActiveBounds.Height / 1080.0, 1.0, 2.0);
         double iconSize = _config.Settings.IconSize;
         double effIcon = iconSize * uiScale * (SideDockScaleK / GlassIconScale);
-        double gIcon = effIcon * GlassIconScale;                 // = iconSize*uiScale*0.70
+        double gIcon = effIcon * GlassIconScale;
         double cellH = effIcon * 1.46;
 
         double crossGap = 1 * uiScale;
@@ -57,9 +79,9 @@ internal sealed class SideDockWindowGpu : IDisposable
         double colCenterCross = slabCross + slabCrossLen / 2.0 - edgeBias;
 
         double startPad = effIcon * 0.7, endPad = effIcon * 0.7;
-        double thickness = (vertical ? gIcon * HoverScale + 240 * uiScale : gIcon * HoverScale + 130 * uiScale);
-        int winW = (int)Math.Ceiling(vertical ? thickness : wa.Width);
-        int winH = (int)Math.Ceiling(vertical ? wa.Height : thickness);
+        double thickness = vertical ? gIcon * HoverScale + 240 * uiScale : gIcon * HoverScale + 130 * uiScale;
+        _winW = (int)Math.Ceiling(vertical ? thickness : wa.Width);
+        _winH = (int)Math.Ceiling(vertical ? wa.Height : thickness);
         double mainExtent = vertical ? wa.Height : wa.Width;
 
         double startReserve = 12 * uiScale, endReserve = vertical ? 56 * uiScale : 12 * uiScale;
@@ -84,93 +106,109 @@ internal sealed class SideDockWindowGpu : IDisposable
         double glassPad = gIcon * 0.30;
         double bodyCross = slabCross;
         double bodyCrossLen = (colCenterCross - bodyCross) + gIcon / 2.0 + glassPad;
-        double trayRadius = iconSize * uiScale * 0.42;
-        double opacity = 1.0 - Math.Clamp(_config.Settings.PanelTransparency, 0.0, 1.0);
-        double frost = GlassChrome.FrostStrengthFor(_config.Settings.PanelTransparency);
+        _trayRadius = (float)(iconSize * uiScale * 0.42);
+        _opacity = (float)(1.0 - Math.Clamp(_config.Settings.PanelTransparency, 0.0, 1.0));
+        _frost = (float)GlassChrome.FrostStrengthFor(_config.Settings.PanelTransparency);
 
-        int px = side switch
-        {
-            DockSide.Left => (int)wa.Left,
-            DockSide.Right => (int)(wa.Right - winW),
-            DockSide.Top => (int)wa.Left,
-            _ => (int)wa.Left,
-        };
-        int py = side switch
-        {
-            DockSide.Top => (int)wa.Top,
-            DockSide.Bottom => (int)(wa.Bottom - winH),
-            _ => (int)wa.Top,
-        };
-        if (side == DockSide.Bottom) py = (int)(wa.Bottom - winH);
+        _winX = _side switch { DockSide.Right => (int)(wa.Right - _winW), _ => (int)wa.Left };
+        _winY = _side switch { DockSide.Bottom => (int)(wa.Bottom - _winH), _ => (int)wa.Top };
 
-        _hwnd = CreateWindow(winW, winH);
-        SetWindowPos(_hwnd, HWND_TOPMOST, px, py, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
-        ShowWindow(_hwnd, SW_SHOWNOACTIVATE);
-        _host = new CompositionHost(_hwnd, winW, winH);
-
-        // Slab rect from LogicalRect(slabMain, bodyCross, slabMainLen, bodyCrossLen).
-        (float sx, float sy, float sw, float sh) = side switch
+        (_sx, _sy, _sw, _sh) = _side switch
         {
             DockSide.Left => ((float)bodyCross, (float)slabMain, (float)bodyCrossLen, (float)slabMainLen),
-            DockSide.Right => ((float)(winW - bodyCross - bodyCrossLen), (float)slabMain, (float)bodyCrossLen, (float)slabMainLen),
+            DockSide.Right => ((float)(_winW - bodyCross - bodyCrossLen), (float)slabMain, (float)bodyCrossLen, (float)slabMainLen),
             DockSide.Top => ((float)slabMain, (float)bodyCross, (float)slabMainLen, (float)bodyCrossLen),
-            _ => ((float)slabMain, (float)(winH - bodyCross - bodyCrossLen), (float)slabMainLen, (float)bodyCrossLen),
+            _ => ((float)slabMain, (float)(_winH - bodyCross - bodyCrossLen), (float)slabMainLen, (float)bodyCrossLen),
         };
-
-        var ctx = _host.Context;
-        ctx.BeginDraw();
-        ctx.Clear(new Color4(0, 0, 0, 0));
-        GlassSlab.DrawGlass(ctx, sx, sy, sw, sh, (float)trayRadius, (float)opacity, (float)frost);
 
         var running = RunningAppTracker.SnapshotRunning();
         for (int i = 0; i < pinnedVisible && i < apps.Count; i++)
         {
             var entry = apps[i];
             double mainC = pinnedAreaMain + i * cellH + cellH / 2.0;
-            (float cx, float cy) = ToLocal(side, mainC, colCenterCross, winW, winH);
-            DrawIcon(ctx, entry, cx, cy, (float)gIcon, side,
-                RunningAppTracker.IsEntryRunning(entry, running, new List<string>(), new HashSet<string>()));
+            (float cx, float cy) = ToLocal(_side, mainC, colCenterCross, _winW, _winH);
+            bool run = RunningAppTracker.IsEntryRunning(entry, running, new List<string>(), new HashSet<string>());
+            _slots.Add(new Slot(new Vector2(cx, cy), (float)gIcon, entry.Name, entry, run));
         }
 
+        _hwnd = CreateWindow(_winW, _winH);
+        SetWindowPos(_hwnd, HWND_TOPMOST, _winX, _winY, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
+        ShowWindow(_hwnd, SW_SHOWNOACTIVATE);
+        _host = new CompositionHost(_hwnd, _winW, _winH);
+        _dwrite = DWrite.DWriteCreateFactory<IDWriteFactory>();
+        _labelFormat = _dwrite.CreateTextFormat("Microsoft YaHei UI", null, FontWeight.Normal,
+            FontStyle.Normal, FontStretch.Normal, 13f, "zh-cn");
+        _labelFormat.TextAlignment = TextAlignment.Center;
+        _labelFormat.ParagraphAlignment = ParagraphAlignment.Center;
+
+        Render();
+
+        _timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(30) };
+        _timer.Tick += (_, _) => Tick();
+        _timer.Start();
+    }
+
+    private void Tick()
+    {
+        if (!GetCursorPos(out POINT p))
+            return;
+        float lx = p.X - _winX, ly = p.Y - _winY;
+        int hit = -1;
+        for (int i = 0; i < _slots.Count; i++)
+        {
+            var s = _slots[i];
+            float half = s.G / 2f;
+            if (lx >= s.Center.X - half && lx <= s.Center.X + half &&
+                ly >= s.Center.Y - half && ly <= s.Center.Y + half)
+            { hit = i; break; }
+        }
+        if (hit != _hover)
+        {
+            _hover = hit;
+            Render();
+        }
+    }
+
+    private static Color4 Col(byte a, byte r, byte g, byte b) => new(r / 255f, g / 255f, b / 255f, a / 255f);
+
+    private void Render()
+    {
+        if (_host == null)
+            return;
+        var ctx = _host.Context;
+        ctx.BeginDraw();
+        ctx.Clear(Col(0, 0, 0, 0));
+        GlassSlab.DrawGlass(ctx, _sx, _sy, _sw, _sh, _trayRadius, _opacity, _frost);
+        for (int i = 0; i < _slots.Count; i++)
+            DrawIcon(ctx, _slots[i]);
+        if (_hover >= 0 && _hover < _slots.Count)
+            DrawHoverLabel(ctx, _slots[_hover]);
         ctx.EndDraw();
         _host.Present();
     }
 
-    private static (float x, float y) ToLocal(DockSide side, double main, double cross, int winW, int winH) => side switch
+    private void DrawIcon(ID2D1DeviceContext ctx, in Slot s)
     {
-        DockSide.Left => ((float)cross, (float)main),
-        DockSide.Right => ((float)(winW - cross), (float)main),
-        DockSide.Top => ((float)main, (float)cross),
-        _ => ((float)main, (float)(winH - cross)),
-    };
-
-    private void DrawIcon(ID2D1DeviceContext ctx, AppEntry entry, float cx, float cy, float g, DockSide side, bool isRunning)
-    {
-        float half = g / 2f;
-        // Faint icon plate (#08FFFFFF, rounded 12 — matches RadialIcon IconPlate).
-        var plate = new RoundedRectangle { Rect = new Rect(cx - half, cy - half, g, g), RadiusX = 12f, RadiusY = 12f };
+        float g = s.G, half = g / 2f, cx = s.Center.X, cy = s.Center.Y;
+        var plate = new Rect(cx - half, cy - half, g, g);
         using (var pb = ctx.CreateSolidColorBrush(new Color4(1f, 1f, 1f, 0x08 / 255f)))
-            ctx.FillRoundedRectangle(plate, pb);
+            ctx.FillRoundedRectangle(new RoundedRectangle { Rect = plate, RadiusX = 12f, RadiusY = 12f }, pb);
 
-        // Icon bitmap (padding ~8 like the WPF IconPlate).
-        var bmp = GetBitmap(ctx, entry);
+        var bmp = GetBitmap(ctx, s.Entry);
         if (bmp != null)
         {
-            float pad = g * 0.14f;
-            float dstX = cx - half + pad, dstY = cy - half + pad, dstSz = g - pad * 2;
+            float pad = g * 0.14f, dstX = cx - half + pad, dstY = cy - half + pad, dstSz = g - pad * 2;
             var bs = bmp.Size;
-            float sx = dstSz / Math.Max(1f, bs.Width), sy = dstSz / Math.Max(1f, bs.Height);
-            ctx.Transform = Matrix3x2.CreateScale(sx, sy) * Matrix3x2.CreateTranslation(dstX, dstY);
+            ctx.Transform = Matrix3x2.CreateScale(dstSz / Math.Max(1f, bs.Width), dstSz / Math.Max(1f, bs.Height))
+                          * Matrix3x2.CreateTranslation(dstX, dstY);
             ctx.DrawBitmap(bmp, 1f, InterpolationMode.HighQualityCubic);
             ctx.Transform = Matrix3x2.Identity;
         }
 
-        // Green running dot hugging the screen-edge side of the tile.
-        if (isRunning)
+        if (s.Running)
         {
-            float dot = Math.Max(2.6f, g * 0.07f);
-            float glow = dot * 2.3f;
-            (float dx, float dy) = side switch
+            float dot = Math.Max(2.6f, g * 0.07f), glow = dot * 2.3f;
+            (float dx, float dy) = _side switch
             {
                 DockSide.Left => (cx - half + dot * 0.05f, cy),
                 DockSide.Right => (cx + half - dot * 0.05f, cy),
@@ -182,6 +220,28 @@ internal sealed class SideDockWindowGpu : IDisposable
             using (var co = ctx.CreateSolidColorBrush(new Color4(0x4C / 255f, 0xE0 / 255f, 0x6B / 255f, 1f)))
                 ctx.FillEllipse(new Ellipse(new Vector2(dx, dy), dot / 2f, dot / 2f), co);
         }
+    }
+
+    private void DrawHoverLabel(ID2D1DeviceContext ctx, in Slot s)
+    {
+        if (_labelFormat == null || string.IsNullOrEmpty(s.Name))
+            return;
+        float half = s.G / 2f;
+        float w = Math.Max(40f, s.Name.Length * 13f * 0.95f + 18f), h = 24f, gap = 8f;
+        (float lx, float ly) = _side switch
+        {
+            DockSide.Left => (s.Center.X + half + gap + w / 2f, s.Center.Y),
+            DockSide.Right => (s.Center.X - half - gap - w / 2f, s.Center.Y),
+            DockSide.Top => (s.Center.X, s.Center.Y + half + gap + h / 2f),
+            _ => (s.Center.X, s.Center.Y - half - gap - h / 2f),
+        };
+        var rect = new Rect(lx - w / 2f, ly - h / 2f, w, h);
+        // The real hover label is just floating text on a barely-there dark tint
+        // (ARGB 0x05,1A1A1A) — no visible plate.
+        using (var bg = ctx.CreateSolidColorBrush(Col(0x05, 0x1A, 0x1A, 0x1A)))
+            ctx.FillRoundedRectangle(new RoundedRectangle { Rect = rect, RadiusX = 7f, RadiusY = 7f }, bg);
+        using (var ink = ctx.CreateSolidColorBrush(Col(0xE6, 0xFF, 0xFF, 0xFF)))
+            ctx.DrawText(s.Name, _labelFormat, rect, ink);
     }
 
     private ID2D1Bitmap? GetBitmap(ID2D1DeviceContext ctx, AppEntry entry)
@@ -200,7 +260,7 @@ internal sealed class SideDockWindowGpu : IDisposable
                 int w = src.PixelWidth, h = src.PixelHeight, stride = w * 4;
                 var px = new byte[stride * h];
                 src.CopyPixels(px, stride, 0);
-                d2d = ((CompositionHost)_host!).CreateBitmap(w, h, px, stride);
+                d2d = _host!.CreateBitmap(w, h, px, stride);
             }
         }
         catch { d2d = null; }
@@ -210,13 +270,22 @@ internal sealed class SideDockWindowGpu : IDisposable
 
     public void Dispose()
     {
+        _timer?.Stop();
         foreach (var b in _bmpCache.Values) b?.Dispose();
         _bmpCache.Clear();
         _host?.Dispose();
         if (_hwnd != IntPtr.Zero) DestroyWindow(_hwnd);
     }
 
-    // ---- Raw Win32 NOREDIRECTIONBITMAP window --------------------------------
+    private static (float x, float y) ToLocal(DockSide side, double main, double cross, int winW, int winH) => side switch
+    {
+        DockSide.Left => ((float)cross, (float)main),
+        DockSide.Right => ((float)(winW - cross), (float)main),
+        DockSide.Top => ((float)main, (float)cross),
+        _ => ((float)main, (float)(winH - cross)),
+    };
+
+    // ---- Raw Win32 NOREDIRECTIONBITMAP window (click-through) -----------------
 
     private static readonly WndProc s_wndProc = DefWindowProcW;
     private static ushort s_atom;
@@ -252,6 +321,8 @@ internal sealed class SideDockWindowGpu : IDisposable
     private static readonly IntPtr HWND_TOPMOST = new(-1);
     private const uint SWP_NOSIZE = 0x0001, SWP_NOACTIVATE = 0x0010;
 
+    [StructLayout(LayoutKind.Sequential)] private struct POINT { public int X, Y; }
+
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct WNDCLASSEXW
     {
@@ -272,5 +343,6 @@ internal sealed class SideDockWindowGpu : IDisposable
     [DllImport("user32.dll")] private static extern bool DestroyWindow(IntPtr h);
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+    [DllImport("user32.dll")] private static extern bool GetCursorPos(out POINT p);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr GetModuleHandleW(string? n);
 }
