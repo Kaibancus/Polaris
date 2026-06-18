@@ -127,3 +127,49 @@ WPF 的硬件加速（Tier-2）只对**普通不透明窗口**生效。`AllowsTr
 | 主 dock `RadialWindow` | ⬜ 待迁移（收益最大） | |
 
 迁移采用 `IDragGhost` / `INotchClock` 接口 + 环境变量做 A/B，默认仍走 WPF（零生产影响），验证满意后再翻默认。**NotchClock 迁移额外验证了 D2D 真高斯模糊管线**（主 dock 的 19 处 BlurEffect / 15 处 DropShadow 移植所需的关键能力）。**侧 dock Stage A** 抽出了可复用的 `Services/Gpu/GlassSlab.cs`（玻璃/暗色 slab 的 D2D 绘制，主 dock 也将复用）。
+
+## 9. 踩坑清单 / 经验（迁移主 dock `RadialWindow` 前必读）
+
+ghost / notch / 侧 dock 三轮迁移踩过的坑，按主题归类。主 dock 迁移直接套用即可少走弯路。
+
+### 9.1 DPI（最容易翻车，务必先搭对）
+- **`_d2d.SetDpi(96×scale)` 是头号坑**。设置目标位图（`BitmapProperties1`）的 DPI **不会**设置 D2D 设备上下文的 DPI——后者默认 96 且独立。不设会令所有 DIP 空间的绘制按 1.0x 出图：内容偏小、贴窗口左上、命中测试（1.5x）与绘制错位。修复点在 `CompositionHost`（绑定 target 后调用一次）。诊断：`_host.Context.Dpi` 应为 `(144,144)`。
+- **单位纪律**：布局全程用 DIP；Win32 窗口 + DComp 交换链用**物理像素**（DIP×scale）；窗口位置 = `布局DIP × _dpi`。每个字段心里要清楚是 DIP 还是物理。侧 dock 曾因把已是 DIP 的 `_winX` 又除一次 `_dpi` 导致弹窗错位。屏幕物理点 → 窗口本地 DIP：`physical/_dpi - _winX(DIP)`。
+- **DpiScale 取值用 `EnumDisplaySettings`**（物理分辨率 ÷ `SystemParameters.PrimaryScreenWidth`），与调用方 DPI 感知无关、窗口未实现时也可靠；`GetDpiForWindow/GetDpiForMonitor` 会在早期 race 回落到 96。
+- `_host.Context.Dpi` 返回的是 `Size`，用 `.Width/.Height`（**不是** `.X/.Y`）。
+
+### 9.2 Vortice / 命名冲突
+- `GradientStop` 在多个命名空间存在 → 全限定 `Vortice.Direct2D1.GradientStop`。
+- 同时用 WPF 与 Vortice 时，`Color` / `Colors` 在 `System.Windows.Media` 与 `Vortice.Mathematics` 间二义 → 在 WPF 代码处全限定 `System.Windows.Media.Color(s)`。
+
+### 9.3 WPF 弹出物挂到纯 Win32 GPU 窗口上
+- GPU dock 没有每图标的 WPF 视觉，无法直接作为 `PlacementTarget`。两种已验证套路：
+  - **右键菜单**：用 `Popup` + `PlacementMode.Absolute` + 屏幕 DIP 偏移（Absolute 偏移就是屏幕 DIP）；先 `shell.Measure(infinity)` 拿 `DesiredSize` 再算居中。
+  - **悬浮缩略图**：在悬浮图标上空泊一个**透明、点击穿透**（`WS_EX_TRANSPARENT|TOOLWINDOW|NOACTIVATE`）的 1×_gIcon 锚 WPF 窗口，作为现成 `WindowPreviewPopup` 的 `PlacementTarget`，**整套复用**（实时捕获/缓存/关闭按钮/最小化回退全白送）。GPU dock 用自己的 hover 检测驱动其 `OnPointerEnter/Leave`。
+
+### 9.4 输入 / Win32 消息
+- `WM_DROPFILES` 的 HDROP 在 **wParam**（不是 lParam）；消息处理签名要能拿到 wParam。经典 `WM_DROPFILES` 只收 `CF_HDROP`（桌面快捷方式/exe），收不到虚拟 shell item。
+- 命中测试外区返回 `HTTRANSPARENT` 让空 reserve 区点击穿透；`WS_EX_NOACTIVATE` 防止点击抢焦点。
+
+### 9.5 运行应用 图标/名称
+- profile 专属 AUMID（Edge 的 `MSEdge.UserData.Profile1`）的 AppsFolder 查询会返回**非空的通用空白文档图标**，null 回退永不触发 → 对非 `\WindowsApps\` 的 Win32 路径**先取真实 exe 图标**，再退 AUMID。`packaged = 路径含 "\WindowsApps\"`。
+- 运行条名称用 exe 的 `FileVersionInfo.FileDescription`（→ 文件名 → 窗口标题），别直接用窗口标题（浏览器是整页标题、终端是 tab 名）。
+
+### 9.6 渲染节流 / 可见性
+- 关键优化：dock 仅在「放大波活跃 / 弹跳中 / hover」时渲染，静止即停。**别加持续呼吸脉冲**，会破坏 idle 节流（运行点改用静态径向渐变而非脉冲）。
+- 隐藏时 `Tick` 顶部 `!_shown` 早退，停止光标轮询与渲染。
+
+### 9.7 窗口生命周期 / host 集成
+- GPU 窗口在 `Rebuild` 时**销毁重建**（含每次召唤 DoShow→Rebuild）。可行但偏重；在同一同步调用里「建好再显示」可避免可见闪烁。**外部别缓存 hwnd**（Rebuild 会销毁它）——通过对象/接口驱动，靠 `s_instances` 映射回查。
+- host 集成沿用 `IDragGhost/INotchClock/ISideDock` 接口 + env flag 的 A/B 模式。侧 dock 的可见性是**多原因状态机**（main/edge/drag/pinned + bounceHold/menuHold），主 dock 同理需复刻其显隐原因。给 host 的几何（如 `GetDockScreenBounds`）要返回 **DIP**（edge poll 在 DIP 下工作）。
+
+### 9.8 开发/调试环境
+- 运行中的 `Polaris.exe` 会锁定输出 exe，构建前须先停进程；**不能** `Stop-Process -Name`，须先取 PID 再 `Stop-Process -Id`。错误日志在 `%AppData%\Polaris\errors.log`。
+- 截图脚本须 `SetProcessDPIAware()` 才能拿到真实物理分辨率；用 `Start-Process -WindowStyle Hidden -File`（执行策略 + 隐藏避免截图进程自己进运行条）。
+- **坑**：`IsWindowVisible` 查一个已被 Rebuild 销毁的旧句柄会假阴性——验证显隐要重新 `FindWindow` 或直接看截图。
+- 拖拽测试须用非提权 shell 启动（或经 explorer.exe），否则 UIPI 完整性不匹配导致拖入失败。
+
+### 9.9 主 dock `RadialWindow` 迁移特有提示
+- 体量最大（19 BlurEffect + 15 DropShadow），常为全屏 layered 窗口——D2D 真高斯模糊管线（NotchClock 已验证）+ `GlassSlab.cs` 可复用。
+- 其 notch（`POLARIS_GPU_NOTCH`）与拖拽 ghost（`POLARIS_GPU_GHOST`）已迁移；剩径向图标环本体、轨道光、运行光晕。
+- 主 dock 同样要走接口 + env flag + 多原因显隐状态机；几何返回 DIP；沿用本清单全部 DPI/弹窗/节流经验。
