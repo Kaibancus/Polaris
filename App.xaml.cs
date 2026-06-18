@@ -207,6 +207,13 @@ public partial class App : Application
         // Keep registry startup state in sync with config on launch.
         StartupManager.SetEnabled(_config.Settings.RunAtStartup);
 
+        // GPU side dock — STAGE A static-render validation (POLARIS_GPU_SIDEDOCK=1):
+        // shows the D2D slab + pinned icon column at the left edge for eyeballing.
+        if (Environment.GetEnvironmentVariable("POLARIS_GPU_SIDEDOCK") == "1")
+            Dispatcher.BeginInvoke(new Action(() =>
+                new Polaris.Views.SideDockWindowGpu(_config).Show()),
+                DispatcherPriority.ApplicationIdle);
+
         // One-time migration: the resident / inner-ring count used to be a single
         // shared value. Seed the currently-active theme's per-theme count from
         // the legacy shared value so it isn't lost; the other theme starts at
