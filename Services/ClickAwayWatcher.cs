@@ -31,6 +31,14 @@ internal sealed class ClickAwayWatcher
     private volatile bool _active;
     private readonly uint _ownPid;
 
+    // A left-press outside Polaris is only acted on when the button is RELEASED
+    // without travelling (a click). If the press turns into a drag — e.g. dragging
+    // a desktop shortcut onto the dock to add it — the dock must stay so it remains
+    // a valid drop target. These are touched only on the hook thread.
+    private bool _pendingDismiss;
+    private int _downX, _downY;
+    private readonly int _dragThreshold;
+
     /// <summary>Raised (on the hook thread) when a left button-down lands on a
     /// window that does not belong to this process while <see cref="Active"/> is
     /// set. Handlers must marshal to the UI thread before touching WPF.</summary>
@@ -39,6 +47,9 @@ internal sealed class ClickAwayWatcher
     public ClickAwayWatcher()
     {
         _ownPid = GetCurrentProcessId();
+        // The OS drag threshold (a press that travels further than this is a drag,
+        // not a click); a small floor guards against a 0 metric.
+        _dragThreshold = Math.Max(4, Math.Max(GetSystemMetrics(SM_CXDRAG), GetSystemMetrics(SM_CYDRAG)));
     }
 
     /// <summary>Set by the owner: true only while the main dock is open. The hot
@@ -102,26 +113,39 @@ internal sealed class ClickAwayWatcher
 
     private IntPtr HookProc(int nCode, IntPtr wParam, IntPtr lParam)
     {
-        if (nCode >= 0 && (int)wParam == WM_LBUTTONDOWN && _active)
+        if (nCode >= 0 && _active)
         {
+            int msg = (int)wParam;
             try
             {
-                // MSLLHOOKSTRUCT: pt.x@0, pt.y@4, mouseData@8, flags@12.
-                int px = Marshal.ReadInt32(lParam, 0);
-                int py = Marshal.ReadInt32(lParam, 4);
-                uint flags = (uint)Marshal.ReadInt32(lParam, 12);
-                // Ignore programmatically-injected clicks (e.g. our own).
-                if ((flags & LLMHF_INJECTED) == 0)
+                if (msg == WM_LBUTTONDOWN)
                 {
-                    var pt = new POINT { X = px, Y = py };
-                    IntPtr hwnd = WindowFromPoint(pt);
-                    IntPtr root = hwnd == IntPtr.Zero ? IntPtr.Zero : GetAncestor(hwnd, GA_ROOT);
-                    uint pid = 0;
-                    if (root != IntPtr.Zero)
-                        GetWindowThreadProcessId(root, out pid);
-                    // A click resolving to no window, or to a window owned by
-                    // another process, is outside every Polaris surface.
-                    if (root == IntPtr.Zero || pid != _ownPid)
+                    // MSLLHOOKSTRUCT: pt.x@0, pt.y@4, mouseData@8, flags@12.
+                    int px = Marshal.ReadInt32(lParam, 0);
+                    int py = Marshal.ReadInt32(lParam, 4);
+                    uint flags = (uint)Marshal.ReadInt32(lParam, 12);
+                    _pendingDismiss = false;
+                    // Ignore programmatically-injected clicks (e.g. our own).
+                    if ((flags & LLMHF_INJECTED) == 0 && IsOutsidePolaris(px, py))
+                    {
+                        // Defer the decision to button-up: a press that becomes a
+                        // drag (dragging a shortcut onto the dock to add it) must
+                        // NOT dismiss the dock, or its drop target disappears.
+                        _pendingDismiss = true;
+                        _downX = px;
+                        _downY = py;
+                    }
+                }
+                else if (msg == WM_LBUTTONUP && _pendingDismiss)
+                {
+                    _pendingDismiss = false;
+                    int px = Marshal.ReadInt32(lParam, 0);
+                    int py = Marshal.ReadInt32(lParam, 4);
+                    // Only a click (negligible travel) dismisses; a drag — which
+                    // travels past the OS drag threshold — leaves the dock open so
+                    // it stays a valid drop target.
+                    if (Math.Abs(px - _downX) <= _dragThreshold &&
+                        Math.Abs(py - _downY) <= _dragThreshold)
                         ClickedOutside?.Invoke();   // non-blocking: handler marshals to UI
                 }
             }
@@ -132,11 +156,29 @@ internal sealed class ClickAwayWatcher
         return CallNextHookEx(IntPtr.Zero, nCode, wParam, lParam);
     }
 
+    /// <summary>True when the point (screen pixels) resolves to no window or to a
+    /// window owned by another process — i.e. outside every Polaris surface. A
+    /// click on a transparent region of a layered dock passes through to the window
+    /// behind it (another process), so empty space around the slab counts too.</summary>
+    private bool IsOutsidePolaris(int x, int y)
+    {
+        var pt = new POINT { X = x, Y = y };
+        IntPtr hwnd = WindowFromPoint(pt);
+        IntPtr root = hwnd == IntPtr.Zero ? IntPtr.Zero : GetAncestor(hwnd, GA_ROOT);
+        uint pid = 0;
+        if (root != IntPtr.Zero)
+            GetWindowThreadProcessId(root, out pid);
+        return root == IntPtr.Zero || pid != _ownPid;
+    }
+
     private const int WH_MOUSE_LL = 14;
     private const int WM_LBUTTONDOWN = 0x0201;
+    private const int WM_LBUTTONUP = 0x0202;
     private const uint LLMHF_INJECTED = 0x00000001;
     private const uint WM_QUIT = 0x0012;
     private const uint GA_ROOT = 2;
+    private const int SM_CXDRAG = 68;
+    private const int SM_CYDRAG = 69;
 
     private delegate IntPtr LowLevelMouseProc(int nCode, IntPtr wParam, IntPtr lParam);
 
@@ -175,6 +217,9 @@ internal sealed class ClickAwayWatcher
 
     [DllImport("kernel32.dll")]
     private static extern uint GetCurrentProcessId();
+
+    [DllImport("user32.dll")]
+    private static extern int GetSystemMetrics(int nIndex);
 
     [DllImport("kernel32.dll", CharSet = CharSet.Auto)]
     private static extern IntPtr GetModuleHandle(string? lpModuleName);

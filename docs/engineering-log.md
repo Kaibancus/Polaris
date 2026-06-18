@@ -59,6 +59,8 @@
 
 ## 🐛 BUG 修复
 
+- **拖拽桌面图标到主 dock 添加时，dock 被点击外部关闭导致放置目标消失**：`ClickAwayWatcher` 原本在 `WM_LBUTTONDOWN` 落在 Polaris 之外时立即触发关闭。而"从桌面/资源管理器拖快捷方式到主 dock 添加"（`RadialWindow.Interaction.cs` 的 `OnDropPanel`，外部 OLE 拖放）的**起始按下就在 Polaris 之外**，于是双 dock 在拖放还没完成时就被关闭，放置目标消失、无法添加。修复：把关闭判定从"按下"**推迟到"抬起"**，且**仅当按下到抬起的位移在系统拖拽阈值（`SM_CXDRAG/SM_CYDRAG`）以内（即一次点击）才关闭**；位移超过阈值（即拖拽）则不关闭，使 dock 在整个拖拽过程中保持为有效放置目标。普通空白处单击仍正常关闭；dock 内部图标拖拽（按下在 Polaris 上）本就不触发，不受影响。
+
 - **进程保护应用（UU加速器）的常驻图标不亮绿色运行灯**：UU加速器固定的是
   `uu_launcher.exe`（启动器，拉起主程序后自身无窗口），而真正有窗口的主进程 `uu`
   开启了反调试保护，**`Process.MainModule.FileName` 读不到其 exe 路径**，导致
