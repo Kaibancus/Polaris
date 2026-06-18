@@ -142,6 +142,9 @@ public static class WindowPreviewService
     [DllImport("user32.dll")]
     private static extern bool IsIconic(IntPtr hWnd);
 
+    [DllImport("user32.dll")]
+    private static extern bool IsWindow(IntPtr hWnd);
+
     [DllImport("dwmapi.dll")]
     private static extern int DwmGetWindowAttribute(IntPtr hwnd, int dwAttribute, out int pvAttribute, int cbAttribute);
 
@@ -1056,6 +1059,21 @@ public static class WindowPreviewService
 
         foreach (var key in _thumbCache.Keys)
             if (!live.Contains(key))
+                _thumbCache.TryRemove(key, out _);
+    }
+
+    /// <summary>Frees thumbnail bitmaps that are no longer needed while the docks
+    /// are hidden. Window thumbnails are the largest cached bitmaps; when the
+    /// panel is dismissed we can drop every one that can simply be re-captured on
+    /// the next show — i.e. closed windows (handle gone) and ordinary visible
+    /// windows. Only MINIMIZED windows are kept: a minimized window is not
+    /// rendered, so PrintWindow can't re-capture it, and its last-good frame is
+    /// the only preview we can ever show. This keeps idle (hidden-dock) memory
+    /// low without losing any preview the user can still see.</summary>
+    public static void TrimThumbCacheForHide()
+    {
+        foreach (var key in _thumbCache.Keys)
+            if (!IsWindow(key) || !IsIconic(key))
                 _thumbCache.TryRemove(key, out _);
     }
 

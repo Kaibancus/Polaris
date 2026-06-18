@@ -81,6 +81,12 @@
 
 ## ⚡ 性能优化
 
+- **隐藏时释放内存**：Dock 隐藏时归还其占用的渲染内存。①`WindowPreviewService.TrimThumbCacheForHide`
+  在隐藏时丢弃可重新捕获的窗口缩略图（仅保留最小化窗口的 last-good 帧，其像素已无法重捕），
+  缩略图是最大的缓存位图；②`HidePanel` 折叠后调用新提取的 `ClearVisualTree()` 清空整个 Dock
+  视觉树及其 `BitmapCache` 位图（下次 `ShowFaded` 反正会 `Rebuild` 重建，故零额外成本）。实测
+  隐藏态内存约 653MB→553MB（-15%）。（注：曾试在隐藏后 `GC.Collect`，仅再降 ~12MB，收益太小
+  且有打断 GC 启发式之虞，已回滚。）
 - **缓存更多静态模糊层**（`c3d89d1`）：每次分层窗口重合成都会重栅格化的静态模糊层改用
   `BitmapCache`（零视觉变化）：Saturn 辉光环、运行指示点光晕（侧边+主 Dock RunDotGlow）、
   玻璃中心设置按钮。
@@ -107,6 +113,8 @@
 
 ## ✨ 功能优化 / 新增
 
+- **精简设置界面**：删除顶部「Polaris 设置」标题与「提示：长按呼出键…」两行（含
+  `UpdateHint` 方法及其调用），界面更紧凑。
 - **点击 Polaris 之外区域关闭双 Dock**（`b8c6de3`）：主 Dock 打开时，左键点击任意 Polaris
   窗口之外（桌面/别的应用/空白）关闭主 Dock 与侧边 Dock；用独立线程 WH_MOUSE_LL 钩子按
   窗口所属进程判定。

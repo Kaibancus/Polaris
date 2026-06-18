@@ -48,7 +48,7 @@ public partial class RadialWindow
 
     /// <summary>Influence radius of the wave in DIPs; icons further than this from
     /// the cursor stay at rest. A raised cosine falls off smoothly to the edge.</summary>
-    private double MagnifySupport => EffectiveIconSize * 2.0;
+    private double MagnifySupport => EffectiveIconSize * 1.3;
 
     private double MagnifyScaleAt(double dist)
     {

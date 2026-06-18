@@ -814,19 +814,16 @@ public partial class RadialWindow : Window
     private Brush LabelBrush => new SolidColorBrush(ColorUtil.Parse(_config.Settings.FontColor, Colors.White));
     private Color AccentColor => ColorUtil.Parse(_config.Settings.AccentColor, Color.FromRgb(0x3D, 0x7E, 0xFF));
 
-    private void Rebuild()
+    /// <summary>Tears down the entire dock visual tree and drops every reference
+    /// into it, so the elements (and their BitmapCache bitmaps — the bulk of the
+    /// dock's render memory) can be collected. Called at the top of <see
+    /// cref="Rebuild"/> (which then recreates everything) and on hide (to release
+    /// that memory while the dock is dismissed; the next show rebuilds anyway).</summary>
+    private void ClearVisualTree()
     {
-        UpdateCenter();
-        PruneIconCache();
-
-        // Resolve the active theme from config each rebuild so switching the
-        // theme in settings takes effect on the next render.
-        _theme = ThemeRegistry.Get(_config.Settings.Theme);
-        RootGrid.Background = _theme.WindowBackground;
-
         PanelCanvas.Children.Clear();
         _iconElements.Clear();
-        // Icons are about to be recreated, so drop any in-flight magnification
+        // Icons are about to be discarded, so drop any in-flight magnification
         // wave state (its per-icon array indexes the old icon list).
         StopMagTicking();
         _magCur = Array.Empty<double>();
@@ -834,8 +831,7 @@ public partial class RadialWindow : Window
         _hoverIcon = null;
         _glassHoverLabel = null;
         _glassHoverLabelText = null;
-        // PanelCanvas was just cleared, so the taskbar tiles are gone from the
-        // tree; drop our tracking so RefreshTaskbarApps rebuilds them.
+        // The taskbar tiles were children of the cleared canvas.
         _taskbarIcons.Clear();
         _taskbarTiles.Clear();
         _taskbarSignature = null;
@@ -847,6 +843,19 @@ public partial class RadialWindow : Window
         // The scroll layer + its transform were children of the cleared canvas.
         _glassScrollLayer = null;
         _glassScrollTransform = null;
+    }
+
+    private void Rebuild()
+    {
+        UpdateCenter();
+        PruneIconCache();
+
+        // Resolve the active theme from config each rebuild so switching the
+        // theme in settings takes effect on the next render.
+        _theme = ThemeRegistry.Get(_config.Settings.Theme);
+        RootGrid.Background = _theme.WindowBackground;
+
+        ClearVisualTree();
 
         // --- Layout (theme-driven) -------------------------------------------
         if (_theme.IsSaturn)

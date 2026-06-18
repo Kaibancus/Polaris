@@ -109,7 +109,7 @@ public partial class RadialWindow
             {
                 Background = new SolidColorBrush(Color.FromArgb(0x05, 0x1A, 0x1A, 0x1A)),
                 CornerRadius = new CornerRadius(7),
-                Padding = new Thickness(10, 4, 10, 4),
+                Padding = new Thickness(3, 4, 3, 4),
                 IsHitTestVisible = false,
                 Child = _glassHoverLabelText,
                 Opacity = 0,

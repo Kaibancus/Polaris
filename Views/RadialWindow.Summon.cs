@@ -227,6 +227,9 @@ public partial class RadialWindow
         _runningTimer.Stop();
         _clockTimer.Stop();
         _previewWarmTimer.Stop();       // no thumbnail polling needed while hidden
+        // Free the (large) window-thumbnail bitmaps that can be re-captured next
+        // show; keeps only minimized windows' last-good frames. Cuts idle memory.
+        Polaris.Services.WindowPreviewService.TrimThumbCacheForHide();
         _notch?.HideNotch();
         ResetMagnify();
 
@@ -266,7 +269,17 @@ public partial class RadialWindow
         {
             // Only collapse if still hidden (a fast re-show may have intervened).
             if (!_shown)
+            {
                 PanelCanvas.Visibility = Visibility.Collapsed;
+                // Release the whole dock visual tree (and its BitmapCache bitmaps,
+                // the bulk of the dock's render memory) now that it's hidden. The
+                // next ShowFaded calls Rebuild() which recreates everything, so
+                // this is free apart from that rebuild we'd do on show anyway. Big
+                // idle (hidden-dock) memory saving. Deferred to a Background pass
+                // so it never blocks the final collapsed frame from presenting.
+                Dispatcher.BeginInvoke(() => { if (!_shown) ClearVisualTree(); },
+                    System.Windows.Threading.DispatcherPriority.Background);
+            }
             // Defer the callback to a LATER dispatcher pass (Background) instead
             // of running it inline on the fade's final frame. The callback may
             // build a heavy window (the settings UI), and doing that synchronously

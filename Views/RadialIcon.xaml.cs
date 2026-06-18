@@ -19,7 +19,7 @@ public partial class RadialIcon : UserControl
 {
     private static readonly Duration Anim = new(TimeSpan.FromMilliseconds(110));
     private const double HoverScale = DockTuning.HoverScale;
-    private const double LabelWidth = 150;
+    private const double LabelWidth = 90;
 
     // The icon plate's decorative brushes / shadow are identical for every icon
     // of a theme and are never mutated or animated (animations target element
