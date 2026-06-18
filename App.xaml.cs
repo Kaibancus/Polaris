@@ -109,6 +109,17 @@ public partial class App : Application
     private SideDockWindow? _sideDock;
     private DispatcherTimer? _edgePollTimer;
 
+    // Idle working-set trimming. While both docks are hidden, Polaris's (almost
+    // entirely unmanaged) footprint can be evicted to the standby list so the
+    // physical RAM is returned to the system until the next summon. Tracked off
+    // the existing 100&#160;ms edge poll: trim once the app has been idle for a
+    // short grace period, then re-trim periodically so the figure stays low
+    // across a long idle (background timers slowly fault a few pages back).
+    private DateTime _idleSince = DateTime.MaxValue;
+    private DateTime _lastIdleTrim = DateTime.MinValue;
+    private static readonly TimeSpan IdleTrimDelay = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan IdleTrimInterval = TimeSpan.FromSeconds(30);
+
     // Masks the system auto-hide taskbar's reveal trigger under the bottom
     // side-dock's centre-50% activation band. Self-contained subsystem (own hook
     // thread + message loop + poll thread); the edge poll only toggles its
@@ -522,8 +533,37 @@ public partial class App : Application
             }
 
             _sideDock.SetEdgeShown(inTrigger || inDock);
+            EvaluateIdleTrim();
         };
         _edgePollTimer.Start();
+    }
+
+    /// <summary>Called every edge-poll tick: once both docks have been hidden for
+    /// <see cref="IdleTrimDelay"/>, evict the process working set (and re-trim
+    /// every <see cref="IdleTrimInterval"/> while still idle) so Polaris's idle
+    /// RAM is returned to the system. Any dock becoming visible resets the timer,
+    /// so an interactive session is never trimmed.</summary>
+    private void EvaluateIdleTrim()
+    {
+        bool idle = _panel?.IsShown != true
+                    && _sideDock?.DockVisible != true
+                    && _settings == null && !_openingSettings;
+        if (!idle)
+        {
+            _idleSince = DateTime.MaxValue;
+            return;
+        }
+
+        var now = DateTime.UtcNow;
+        if (_idleSince == DateTime.MaxValue)
+            _idleSince = now;
+        if (now - _idleSince < IdleTrimDelay)
+            return;
+        if (now - _lastIdleTrim < IdleTrimInterval)
+            return;
+
+        MemoryTrimmer.TrimWorkingSet();
+        _lastIdleTrim = now;
     }
 
     private const uint ABM_GETSTATE = 0x00000004;
