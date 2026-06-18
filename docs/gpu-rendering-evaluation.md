@@ -123,7 +123,7 @@ WPF 的硬件加速（Tier-2）只对**普通不透明窗口**生效。`AllowsTr
 |---|---|---|
 | `DragGhostWindow` | ✅ GPU 版可用（`POLARIS_GPU_GHOST=1`） | 视觉验证通过 |
 | `NotchClockWindow` | ✅ GPU 版可用（`POLARIS_GPU_NOTCH=1`） | 梯形板 + 真 **GaussianBlur** 暗光晕 + DirectWrite 立体金字，用户确认与原版一致、平滑无分层 |
-| `SideDockWindow` | 🔶 进行中 — Stage A-D 完成（`POLARIS_GPU_SIDEDOCK=1`） | D2D 玻璃 slab + 钉住列 + 命中测试/悬停标签 + macOS 放大波 + **运行应用条**（Polaris 居首、绿色运行点、`+N` 溢出、钉住列与运行条间的发光分隔线，放大波横跨两段；按 AUMID/路径排除已钉住应用避免重复）。每显示器 DPI 感知（布局 DIP，窗口/交换链物理像素，D2D 目标 DPI=96×scale）。剩余 Stage E：拖拽重排/点击启动 |
+| `SideDockWindow` | 🔶 进行中 — Stage A-E 完成（`POLARIS_GPU_SIDEDOCK=1`） | D2D 玻璃 slab + 钉住列 + 命中测试/悬停标签 + macOS 放大波 + **运行应用条**（Polaris 居首、绿色运行点、`+N` 溢出、钉住列与运行条间的发光分隔线，放大波横跨两段；按 AUMID/路径排除已钉住应用避免重复）+ **交互**（点击启动钉住/运行项、拖拽重排、拖出删除，经 `ConfigStore.Save` 持久化）。每显示器 DPI 感知：布局 DIP，窗口/交换链物理像素，D2D 目标 DPI=96×scale；DPI 比例改用 `EnumDisplaySettings`（物理分辨率 ÷ WPF DIP 宽，与调用方 DPI 感知无关）以避免 `GetDpiForWindow/GetDpiForMonitor` 在窗口未实现时回落到 96 导致的指针/放大错位。剩余：接入真实侧 dock 显隐逻辑、翻默认 |
 | 主 dock `RadialWindow` | ⬜ 待迁移（收益最大） | |
 
 迁移采用 `IDragGhost` / `INotchClock` 接口 + 环境变量做 A/B，默认仍走 WPF（零生产影响），验证满意后再翻默认。**NotchClock 迁移额外验证了 D2D 真高斯模糊管线**（主 dock 的 19 处 BlurEffect / 15 处 DropShadow 移植所需的关键能力）。**侧 dock Stage A** 抽出了可复用的 `Services/Gpu/GlassSlab.cs`（玻璃/暗色 slab 的 D2D 绘制，主 dock 也将复用）。

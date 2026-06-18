@@ -36,6 +36,8 @@ internal sealed class CompositionHost : IDisposable
     public int Height { get; }
 
     [DllImport("user32.dll")] private static extern uint GetDpiForWindow(IntPtr hwnd);
+    [DllImport("user32.dll")] private static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint flags);
+    [DllImport("Shcore.dll")] private static extern int GetDpiForMonitor(IntPtr hmon, int dpiType, out uint dpiX, out uint dpiY);
 
     /// <summary>Device pixels per DIP for the monitor hosting <paramref name="hwnd"/>
     /// (1.0 at 100%, 1.5 at 150%). Layout math is in DIPs but the Win32 window and
@@ -43,6 +45,18 @@ internal sealed class CompositionHost : IDisposable
     /// this and pass <c>96 * scale</c> as the host DPI so DIP-space drawing maps 1:1.</summary>
     public static double DpiScale(IntPtr hwnd)
     {
+        // GetDpiForWindow is unreliable before the window is realized on a monitor
+        // (it can return the 96-DPI system default), so query the monitor's effective
+        // DPI directly — stable from the moment the window exists.
+        try
+        {
+            const uint MONITOR_DEFAULTTONEAREST = 2;
+            const int MDT_EFFECTIVE_DPI = 0;
+            IntPtr mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+            if (mon != IntPtr.Zero && GetDpiForMonitor(mon, MDT_EFFECTIVE_DPI, out uint mx, out _) == 0 && mx >= 48)
+                return mx / 96.0;
+        }
+        catch { /* Shcore unavailable — fall through */ }
         uint dpi = GetDpiForWindow(hwnd);
         return dpi >= 48 ? dpi / 96.0 : 1.0;
     }

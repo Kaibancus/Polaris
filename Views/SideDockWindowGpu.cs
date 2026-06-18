@@ -40,8 +40,11 @@ internal sealed class SideDockWindowGpu : IDisposable
         public readonly SlotKind Kind;
         public readonly string IconKey;   // D2D bitmap cache key
         public readonly BitmapSource? Image;
-        public Slot(Vector2 c, float g, string name, bool run, SlotKind kind, string iconKey, BitmapSource? img)
-        { Center = c; G = g; Name = name; Running = run; Kind = kind; IconKey = iconKey; Image = img; }
+        public readonly AppEntry? Entry;  // pinned: the app to launch
+        public readonly IntPtr Window;    // running: the window to activate
+        public Slot(Vector2 c, float g, string name, bool run, SlotKind kind, string iconKey,
+            BitmapSource? img, AppEntry? entry, IntPtr window)
+        { Center = c; G = g; Name = name; Running = run; Kind = kind; IconKey = iconKey; Image = img; Entry = entry; Window = window; }
     }
 
     private readonly AppConfig _config;
@@ -61,9 +64,17 @@ internal sealed class SideDockWindowGpu : IDisposable
     private float _sx, _sy, _sw, _sh, _trayRadius, _opacity, _frost;
     private float _gIcon, _cellH;
     private float _seamMain, _bodyCross, _bodyCrossLen;
+    private float _colCenterCross, _slabCrossLen, _pinnedAreaMain, _cellMain;
     private int _pinnedVisible;
     private float[] _waveCur = Array.Empty<float>();
     private const float WaveSupport = 2.3f;
+
+    // ---- Interaction (Stage E) -------------------------------------------
+    private static readonly Dictionary<IntPtr, SideDockWindowGpu> s_instances = new();
+    private int _pressIdx = -1;        // slot under the mouse-down, or -1
+    private bool _dragging;            // press has crossed the drag threshold
+    private float _pressMain, _pressCross;   // mouse-down point (window-local DIP)
+    private float _dragMain, _dragCross;     // current drag point (window-local DIP)
 
     public SideDockWindowGpu(AppConfig config) => _config = config;
 
@@ -75,6 +86,7 @@ internal sealed class SideDockWindowGpu : IDisposable
 
     private void Build()
     {
+        _slots.Clear();
         var wa = MonitorLayout.ActiveWorkArea;
         _side = _config.Settings.DockPosition;
         bool vertical = _side is DockSide.Left or DockSide.Right;
@@ -183,7 +195,7 @@ internal sealed class SideDockWindowGpu : IDisposable
             bool run = RunningAppTracker.IsEntryRunning(entry, running, noTitles, noAumids);
             var img = IconExtractor.GetCached(entry.EffectiveIconSource, _iconCache);
             _slots.Add(new Slot(new Vector2(cx, cy), (float)gIcon, entry.Name, run,
-                SlotKind.Pinned, entry.EffectiveIconSource, img));
+                SlotKind.Pinned, entry.EffectiveIconSource, img, entry, IntPtr.Zero));
         }
         for (int k = 0; k < runSlots; k++)
         {
@@ -193,31 +205,36 @@ internal sealed class SideDockWindowGpu : IDisposable
             {
                 string exe = Environment.ProcessPath ?? "";
                 _slots.Add(new Slot(new Vector2(cx, cy), (float)gIcon, "Polaris", true,
-                    SlotKind.Run, "polaris:" + exe, SafeIcon(exe)));
+                    SlotKind.Run, "polaris:" + exe, SafeIcon(exe), null, IntPtr.Zero));
             }
             else if (overflow > 0 && k == runSlots - 1)
             {
                 _slots.Add(new Slot(new Vector2(cx, cy), (float)gIcon, "+" + overflow, false,
-                    SlotKind.Overflow, "", null));
+                    SlotKind.Overflow, "", null, null, IntPtr.Zero));
             }
             else
             {
                 var it = runItems[k - 1];
                 _slots.Add(new Slot(new Vector2(cx, cy), (float)gIcon, it.Name, true,
-                    SlotKind.Run, it.IconKey, it.Image));
+                    SlotKind.Run, it.IconKey, it.Image, null, it.Window));
             }
         }
         _seamMain = (float)seamMain;
         _bodyCross = (float)bodyCross;
         _bodyCrossLen = (float)bodyCrossLen;
         _pinnedVisible = pinnedVisible;
+        _colCenterCross = (float)colCenterCross;
+        _slabCrossLen = (float)slabCrossLen;
+        _pinnedAreaMain = (float)pinnedAreaMain;
+        _cellMain = (float)cellH;
         _gIcon = (float)gIcon;
         _cellH = (float)cellH;
         _waveCur = new float[_slots.Count];
         Array.Fill(_waveCur, 1f);
 
         _hwnd = CreateWindow(_winW, _winH);
-        _dpi = CompositionHost.DpiScale(_hwnd);
+        s_instances[_hwnd] = this;
+        _dpi = DpiScale();
         // Layout is computed in DIPs (MonitorLayout returns DIPs); the Win32 window
         // + DComp swap chain live in PHYSICAL pixels. Size the window to physical px
         // and tell D2D the target DPI so all DIP-space drawing scales up 1:1.
@@ -263,7 +280,7 @@ internal sealed class SideDockWindowGpu : IDisposable
         bool vertical = _side is DockSide.Left or DockSide.Right;
         bool active = false;
         float curMain = 0;
-        if (GetCursorPos(out POINT p))
+        if (!_dragging && GetCursorPos(out POINT p))
         {
             float lx = (float)(p.X / _dpi - _winX), ly = (float)(p.Y / _dpi - _winY);
             float m = _gIcon * 0.6f;
@@ -311,18 +328,30 @@ internal sealed class SideDockWindowGpu : IDisposable
         if (_pinnedVisible > 0)
             DrawSeam(ctx);
 
-        // Draw smallest-first so the magnified (focal) icon sits on top.
+        // Draw smallest-first so the magnified (focal) icon sits on top. The icon
+        // being dragged is skipped here and drawn last at the cursor.
         var order = new int[_slots.Count];
         for (int i = 0; i < order.Length; i++) order[i] = i;
         Array.Sort(order, (a, b) => _waveCur[a].CompareTo(_waveCur[b]));
+        int dragIdx = _dragging ? _pressIdx : -1;
         foreach (int i in order)
         {
+            if (i == dragIdx)
+                continue;
             float scale = _waveCur[i];
             Vector2 pop = PopOffset((scale - 1f) * _gIcon * 1.18f);
             DrawIcon(ctx, _slots[i], scale, pop);
         }
 
-        if (_hover >= 0 && _hover < _slots.Count)
+        if (dragIdx >= 0 && dragIdx < _slots.Count)
+        {
+            // The dragged icon follows the cursor, lifted 1.12x with no pop.
+            var s = _slots[dragIdx];
+            var moved = new Slot(new Vector2(_dragMain, _dragCross), s.G, s.Name, s.Running,
+                s.Kind, s.IconKey, s.Image, s.Entry, s.Window);
+            DrawIcon(ctx, moved, 1.12f, Vector2.Zero);
+        }
+        else if (_hover >= 0 && _hover < _slots.Count)
             DrawHoverLabel(ctx, _slots[_hover], _waveCur[_hover]);
         ctx.EndDraw();
         _host.Present();
@@ -447,7 +476,8 @@ internal sealed class SideDockWindowGpu : IDisposable
     {
         public readonly string Name, IconKey;
         public readonly BitmapSource? Image;
-        public RunItem(string name, string key, BitmapSource? img) { Name = name; IconKey = key; Image = img; }
+        public readonly IntPtr Window;
+        public RunItem(string name, string key, BitmapSource? img, IntPtr window) { Name = name; IconKey = key; Image = img; Window = window; }
     }
 
     /// <summary>Collects running-but-unpinned taskbar apps for the running strip.
@@ -524,7 +554,7 @@ internal sealed class SideDockWindowGpu : IDisposable
                            : (pathless ? "win:" + ta.Window : ta.Path);
                 string name = !string.IsNullOrWhiteSpace(ta.Title) ? ta.Title!
                             : (pathless ? "" : System.IO.Path.GetFileNameWithoutExtension(ta.Path));
-                result.Add(new RunItem(name, key, ResolveRunIcon(ta, pathless)));
+                result.Add(new RunItem(name, key, ResolveRunIcon(ta, pathless), ta.Window));
             }
         }
         catch (Exception ex) { Log.Warn("SideDockGpu", "running collect failed: " + ex.Message); }
@@ -562,8 +592,236 @@ internal sealed class SideDockWindowGpu : IDisposable
         foreach (var b in _bmpCache.Values) b?.Dispose();
         _bmpCache.Clear();
         _host?.Dispose();
-        if (_hwnd != IntPtr.Zero) DestroyWindow(_hwnd);
+        if (_hwnd != IntPtr.Zero) { s_instances.Remove(_hwnd); DestroyWindow(_hwnd); }
     }
+
+    // ---- Interaction (Stage E): click-launch, drag-reorder, drag-out-unpin ----
+
+    private const uint WM_MOUSEMOVE = 0x0200, WM_LBUTTONDOWN = 0x0201, WM_LBUTTONUP = 0x0202, WM_NCHITTEST = 0x0084;
+    private const int HTTRANSPARENT = -1, HTCLIENT = 1;
+
+    /// <summary>Routes the raw window messages this instance cares about. Returns
+    /// true (with <paramref name="result"/>) when handled; false defers to DefWindowProc.</summary>
+    private bool HandleMessage(uint msg, IntPtr lParam, out IntPtr result)
+    {
+        result = IntPtr.Zero;
+        switch (msg)
+        {
+            case WM_NCHITTEST:
+            {
+                // lParam = SCREEN coords. Inside the glass slab → grab the click;
+                // elsewhere → HTTRANSPARENT so the empty reserve passes through.
+                int sx = unchecked((short)((long)lParam & 0xFFFF));
+                int sy = unchecked((short)(((long)lParam >> 16) & 0xFFFF));
+                float lx = (float)(sx / _dpi - _winX), ly = (float)(sy / _dpi - _winY);
+                float m = _gIcon * 0.5f;
+                bool inside = lx >= _sx - m && lx <= _sx + _sw + m && ly >= _sy - m && ly <= _sy + _sh + m;
+                result = inside ? HTCLIENT : HTTRANSPARENT;
+                return true;
+            }
+            case WM_LBUTTONDOWN:
+            {
+                (float lx, float ly) = ClientDip(lParam);
+                _pressMain = lx; _pressCross = ly;
+                _dragMain = lx; _dragCross = ly;
+                _pressIdx = HitSlot(lx, ly);
+                _dragging = false;
+                if (_pressIdx >= 0)
+                    SetCapture(_hwnd);
+                return true;
+            }
+            case WM_MOUSEMOVE:
+            {
+                if (_pressIdx < 0)
+                    return false;
+                (float lx, float ly) = ClientDip(lParam);
+                _dragMain = lx; _dragCross = ly;
+                if (!_dragging && (MathF.Abs(lx - _pressMain) + MathF.Abs(ly - _pressCross)) > _gIcon * 0.35f)
+                    _dragging = true;
+                if (_dragging)
+                    Render();
+                return true;
+            }
+            case WM_LBUTTONUP:
+            {
+                ReleaseCapture();
+                int idx = _pressIdx;
+                bool wasDrag = _dragging;
+                (float lx, float ly) = ClientDip(lParam);
+                _pressIdx = -1;
+                _dragging = false;
+                if (idx >= 0 && idx < _slots.Count)
+                {
+                    if (!wasDrag) ClickSlot(idx);
+                    else DropSlot(idx, lx, ly);
+                }
+                if (_hwnd != IntPtr.Zero)
+                    Render();
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private (float lx, float ly) ClientDip(IntPtr lParam)
+    {
+        int cx = unchecked((short)((long)lParam & 0xFFFF));
+        int cy = unchecked((short)(((long)lParam >> 16) & 0xFFFF));
+        return ((float)(cx / _dpi), (float)(cy / _dpi));
+    }
+
+    /// <summary>Index of the slot whose icon is under the (window-local DIP) point,
+    /// or -1.</summary>
+    private int HitSlot(float lx, float ly)
+    {
+        int best = -1; float bestD = _gIcon * 0.75f;
+        for (int i = 0; i < _slots.Count; i++)
+        {
+            var c = _slots[i].Center;
+            float d = MathF.Abs(lx - c.X) + MathF.Abs(ly - c.Y);
+            if (d < bestD) { bestD = d; best = i; }
+        }
+        return best;
+    }
+
+    private void ClickSlot(int idx)
+    {
+        var s = _slots[idx];
+        try
+        {
+            if (s.Kind == SlotKind.Pinned && s.Entry != null)
+                AppLauncher.Launch(s.Entry, null);
+            else if (s.Kind == SlotKind.Run && s.Window != IntPtr.Zero)
+                WindowPreviewService.Activate(s.Window);
+        }
+        catch (Exception ex) { Log.Warn("SideDockGpu", "launch failed: " + ex.Message); }
+    }
+
+    private void DropSlot(int idx, float lx, float ly)
+    {
+        var s = _slots[idx];
+        if (s.Kind != SlotKind.Pinned || s.Entry == null)
+            return;   // only pinned icons reorder / unpin
+
+        // Dragged clear of the icon column (across the body) → unpin.
+        float cross = _side switch
+        {
+            DockSide.Left => lx,
+            DockSide.Right => _winW - lx,
+            DockSide.Top => ly,
+            _ => _winH - ly,
+        };
+        if (MathF.Abs(cross - _colCenterCross) > _slabCrossLen * 0.85f)
+        {
+            UnpinPinned(s.Entry);
+            return;
+        }
+
+        // Otherwise reorder to the slot nearest the drop's main-axis position.
+        float main = _side is DockSide.Left or DockSide.Right ? ly : lx;
+        int tgt = (int)Math.Round((main - _pinnedAreaMain - _cellMain / 2.0) / _cellMain);
+        tgt = Math.Clamp(tgt, 0, _config.SideDockApps.Count - 1);
+        int src = idx;   // pinned slots are laid out in SideDockApps order
+        if (src >= 0 && tgt != src && src < _config.Apps.Count && tgt < _config.Apps.Count)
+        {
+            var e = _config.Apps[src];
+            _config.Apps.RemoveAt(src);
+            _config.Apps.Insert(tgt, e);
+            PersistAndRebuild();
+        }
+        else
+        {
+            Render();
+        }
+    }
+
+    private void UnpinPinned(AppEntry entry)
+    {
+        int idx = _config.Apps.FindIndex(e => DockSync.Matches(e, entry));
+        if (idx >= 0)
+        {
+            int resident = Math.Min(DockSync.ResidentCount(_config), _config.Apps.Count);
+            bool wasResident = idx < resident;
+            _config.Apps.RemoveAt(idx);
+            if (wasResident)
+                _config.Settings.Ring0Count = Math.Max(0, resident - 1);
+        }
+        PersistAndRebuild();
+    }
+
+    /// <summary>Mirrors the resident region into the side-dock list, saves the config
+    /// and rebuilds the GPU dock. (The WPF dock picks the change up on next launch —
+    /// the spike isn't wired into the host's live-sync callbacks.)</summary>
+    private void PersistAndRebuild()
+    {
+        try
+        {
+            DockSync.MirrorResidentToLeft(_config);
+            ConfigStore.Save(_config);
+        }
+        catch (Exception ex) { Log.Warn("SideDockGpu", "persist failed: " + ex.Message); }
+        Rebuild();
+    }
+
+    private void Rebuild()
+    {
+        _timer?.Stop();
+        if (_hwnd != IntPtr.Zero) s_instances.Remove(_hwnd);
+        _host?.Dispose(); _host = null;
+        if (_hwnd != IntPtr.Zero) { DestroyWindow(_hwnd); _hwnd = IntPtr.Zero; }
+        foreach (var b in _bmpCache.Values) b?.Dispose();
+        _bmpCache.Clear();
+        _hover = -1; _pressIdx = -1; _dragging = false;
+        try { Build(); }
+        catch (Exception ex) { Log.Warn("SideDockGpu", "rebuild failed: " + ex); }
+    }
+
+    [DllImport("user32.dll")] private static extern IntPtr SetCapture(IntPtr h);
+    [DllImport("user32.dll")] private static extern bool ReleaseCapture();
+
+    /// <summary>Device pixels per DIP for the active monitor. Computed from the
+    /// physical mode (EnumDisplaySettings, which is independent of the caller's DPI
+    /// awareness) over the WPF DIP width — reliable even before the GPU window is
+    /// realized, unlike GetDpiForWindow/GetDpiForMonitor which can race to 96.</summary>
+    private static double DpiScale()
+    {
+        try
+        {
+            var dm = new DEVMODE { dmSize = (ushort)Marshal.SizeOf<DEVMODE>() };
+            if (EnumDisplaySettings(null, ENUM_CURRENT_SETTINGS, ref dm) && dm.dmPelsWidth > 0)
+            {
+                double dipW = System.Windows.SystemParameters.PrimaryScreenWidth;
+                if (dipW > 0)
+                {
+                    double s = dm.dmPelsWidth / dipW;
+                    if (s >= 0.5 && s <= 4.0) return s;
+                }
+            }
+        }
+        catch { /* fall through to 1.0 */ }
+        return 1.0;
+    }
+
+    private const int ENUM_CURRENT_SETTINGS = -1;
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern bool EnumDisplaySettings(string? deviceName, int modeNum, ref DEVMODE dm);
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct DEVMODE
+    {
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmDeviceName;
+        public ushort dmSpecVersion, dmDriverVersion, dmSize, dmDriverExtra;
+        public uint dmFields;
+        public int dmPositionX, dmPositionY;
+        public uint dmDisplayOrientation, dmDisplayFixedOutput;
+        public short dmColor, dmDuplex, dmYResolution, dmTTOption, dmCollate;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmFormName;
+        public ushort dmLogPixels;
+        public uint dmBitsPerPel, dmPelsWidth, dmPelsHeight, dmDisplayFlags, dmDisplayFrequency;
+        public uint dmICMMethod, dmICMIntent, dmMediaType, dmDitherType, dmReserved1, dmReserved2,
+            dmPanningWidth, dmPanningHeight;
+    }
+
 
     private static (float x, float y) ToLocal(DockSide side, double main, double cross, int winW, int winH) => side switch
     {
@@ -573,10 +831,17 @@ internal sealed class SideDockWindowGpu : IDisposable
         _ => ((float)main, (float)(winH - cross)),
     };
 
-    // ---- Raw Win32 NOREDIRECTIONBITMAP window (click-through) -----------------
+    // ---- Raw Win32 NOREDIRECTIONBITMAP window --------------------------------
 
-    private static readonly WndProc s_wndProc = DefWindowProcW;
+    private static readonly WndProc s_wndProc = WndProcImpl;
     private static ushort s_atom;
+
+    private static IntPtr WndProcImpl(IntPtr h, uint m, IntPtr w, IntPtr l)
+    {
+        if (s_instances.TryGetValue(h, out var inst) && inst.HandleMessage(m, l, out IntPtr r))
+            return r;
+        return DefWindowProcW(h, m, w, l);
+    }
 
     private static IntPtr CreateWindow(int w, int h)
     {
@@ -591,8 +856,12 @@ internal sealed class SideDockWindowGpu : IDisposable
             };
             s_atom = RegisterClassExW(ref wc);
         }
+        // Interactive (Stage E): NO WS_EX_TRANSPARENT — the window receives mouse
+        // input. WM_NCHITTEST returns HTTRANSPARENT outside the glass slab so clicks
+        // on the empty reserved area still pass through. WS_EX_NOACTIVATE keeps it
+        // from stealing focus on click.
         return CreateWindowExW(
-            WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOPMOST | WS_EX_TRANSPARENT |
+            WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOPMOST |
             WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
             "PolarisSideDockGpu", string.Empty, WS_POPUP,
             0, 0, w, h, IntPtr.Zero, IntPtr.Zero, GetModuleHandleW(null), IntPtr.Zero);
