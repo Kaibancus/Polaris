@@ -91,3 +91,25 @@ WPF 的硬件加速（Tier-2）只对**普通不透明窗口**生效。`AllowsTr
 
 ---
 *结论：GPU 渲染能根治帧率瓶颈并显著降低系统内存，但代价是重写整套绘制层（或迁移 WinUI）。建议先用单窗口 spike 实测收益与视觉差异，再决定是否推进主 dock。*
+
+## 7. Spike 实测结果（已执行，代码重构分支）
+
+按建议执行了单窗口 spike：用 **Vortice.Windows**（D3D11/DXGI/Direct2D/DirectComposition 的 C# 封装；比 Win2D 更适合 WPF，无需 Windows App SDK）实现了 `WS_EX_NOREDIRECTIONBITMAP + DirectComposition + Direct2D` 的 GPU 逐像素 alpha 窗口。
+
+**① 可行性 / 视觉保真（`DragGhostWindowGpu`，`POLARIS_GPU_GHOST=1`）**
+把拖拽残影从 WPF 分层窗口换成 GPU 渲染（WPF `Pbgra32` 快照 → D2D 预乘位图）。实测：残影**清晰跟随光标、背景透明正常、拖到删除区正常变淡、点击穿透、无偏移/闪烁/崩溃**。→ **GPU 逐像素 alpha 管线在目标机上工作正常，视觉无损**，主 dock 重写的核心架构风险已排除。
+
+**② CPU / 内存量化（`GpuBenchmark`，`POLARIS_GPU_BENCH=gpu|wpf`）**
+拖拽残影太小（合成成本随窗口**面积**增长），故另建公平基准：**同一动画**（移动的径向渐变光斑）在 **1440×900** 逐像素 alpha 大窗口里、由同一 `CompositionTarget.Rendering` 时钟驱动、跑 6 秒，分别走 WPF(AllowsTransparency) 与 GPU(DComp+D2D) 两条合成路径，采样本进程 CPU 与工作集（3 轮均值）：
+
+| 模式 | CPU（单核%） | 工作集 |
+|---|---|---|
+| WPF 软件分层（`UpdateLayeredWindow` 整屏上传） | **19.2%** | **236 MB** |
+| GPU DComp + Direct2D（DWM 在 GPU 合成） | **7.5%** | **98 MB** |
+| **改善** | **↓ ~61%** | **↓ ~58%（-138 MB）** |
+
+**结论（实测支撑）**：单个大型动画透明窗口，GPU 合成把 **CPU 降约 6 成、系统内存降约 6 成**（后备缓冲移到 VRAM、消除每帧 CPU 整屏上传）。主 dock 面积更大、永久动画更多（轨道光 + 运行辉光 + 放大波），收益只会更大——这正对应它实测的 60–112% CPU 与数百 MB 占用。**GPU 渲染方向已被实测验证，值得推进主 dock 重写**；代价仍是重写整套 D2D 绘制层（见 §3-A 工作量）。
+
+**Spike 产物（均在本分支，默认关闭、零生产影响）**：`Services/Gpu/CompositionHost.cs`、`Views/DragGhostWindowGpu.cs`（`IDragGhost` 接口 A/B 切换）、`Services/Gpu/GpuBenchmark.cs`；Vortice 包仅在本分支引入。
+
+**下一步建议**：① 把 §3-A 的逐窗迁移正式排期（DragGhost 已完成 → NotchClock → SideDock → 主 dock）；② 主 dock 重写时先做 D2D 版玻璃 slab（高斯模糊/阴影/渐变）与文本（DirectWrite）的视觉回调原型，确认观感一致后再整体替换。

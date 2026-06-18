@@ -407,7 +407,13 @@ public partial class RadialWindow : Window
     private bool _dragging;
     // Independent overlay carrying the dragged icon so it stays visible anywhere
     // on the desktop, past the compact (clipped) main-dock window box.
-    private DragGhostWindow? _dragGhost;
+    private IDragGhost? _dragGhost;
+
+    // GPU-rendering spike toggle: when POLARIS_GPU_GHOST=1 the drag ghost is
+    // rendered through DirectComposition + Direct2D (GPU) instead of a WPF
+    // AllowsTransparency layered window, so the two can be A/B compared.
+    private static readonly bool UseGpuGhost =
+        Environment.GetEnvironmentVariable("POLARIS_GPU_GHOST") == "1";
 
     // Icons in current _config.Apps order, parallel to the entries (and to
     // _slotPositions). Used to animate the non-dragged icons aside while

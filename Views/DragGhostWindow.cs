@@ -14,7 +14,7 @@ namespace Polaris.Views;
 ///
 /// It only ever <i>follows the cursor</i> by moving its (icon-sized) window, so the
 /// per-frame composited area stays tiny no matter where on the desktop it goes.</summary>
-public sealed class DragGhostWindow : Window
+public sealed class DragGhostWindow : Window, IDragGhost
 {
     private readonly Image _image;
 

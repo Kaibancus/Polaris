@@ -134,6 +134,16 @@ public partial class App : Application
     {
         base.OnStartup(e);
 
+        // GPU-rendering spike benchmark: POLARIS_GPU_BENCH=gpu|wpf runs a large
+        // animated per-pixel-alpha window in the chosen compositing path, samples
+        // CPU to gpu-bench.csv, then exits — skipping normal tray startup.
+        string? bench = Environment.GetEnvironmentVariable("POLARIS_GPU_BENCH");
+        if (!string.IsNullOrEmpty(bench))
+        {
+            Polaris.Services.Gpu.GpuBenchmark.Run(bench);
+            return;
+        }
+
         // Global safety net: a tray-resident app must survive an unexpected
         // exception on the UI thread instead of vanishing silently. Log the
         // fault, tell the user, and keep running where it is safe to do so.
