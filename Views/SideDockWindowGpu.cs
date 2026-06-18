@@ -310,10 +310,35 @@ internal sealed class SideDockWindowGpu : IDisposable
         }
         _hover = active && focal >= 0 && best <= _cellH ? focal : -1;
 
-        // Render every frame while the wave is live; once settled at rest, render
-        // one final frame and idle (the timer keeps polling for re-entry).
-        if (active || maxDelta > 0.001f)
+        // Render every frame while the wave is live or a launch bounce is playing;
+        // once settled at rest, render one final frame and idle (the timer keeps
+        // polling for re-entry).
+        bool bouncing = _bounceIdx >= 0 && (Environment.TickCount64 - _bounceStart) <= BounceDurMs;
+        if (!bouncing) _bounceIdx = -1;
+        if (active || bouncing || maxDelta > 0.001f)
             Render();
+    }
+
+    private const long BounceDurMs = 480;
+    private int _bounceIdx = -1;
+    private long _bounceStart;
+
+    /// <summary>Extra outward "pop" (in the dock's pop direction) for the launch
+    /// bounce: the clicked icon leaps off the dock surface and falls back over
+    /// <see cref="BounceDurMs"/> ms — a single damped hop (sin half-cycle with a
+    /// gentle settle), mirroring the WPF dock's macOS-style launch hop.</summary>
+    private float BounceOffset(int i)
+    {
+        if (i != _bounceIdx)
+            return 0f;
+        long el = Environment.TickCount64 - _bounceStart;
+        if (el < 0 || el > BounceDurMs)
+            return 0f;
+        float t = el / (float)BounceDurMs;
+        // Up fast, fall back with a small overshoot for a springy settle.
+        float hop = MathF.Sin(MathF.PI * t);
+        float settle = -0.12f * MathF.Sin(MathF.PI * 2f * t) * (1f - t);
+        return _gIcon * 0.6f * (hop + settle);
     }
 
     private static Color4 Col(byte a, byte r, byte g, byte b) => new(r / 255f, g / 255f, b / 255f, a / 255f);
@@ -340,7 +365,7 @@ internal sealed class SideDockWindowGpu : IDisposable
             if (i == dragIdx)
                 continue;
             float scale = _waveCur[i];
-            Vector2 pop = PopOffset((scale - 1f) * _gIcon * 1.18f);
+            Vector2 pop = PopOffset((scale - 1f) * _gIcon * 1.18f + BounceOffset(i));
             DrawIcon(ctx, _slots[i], scale, pop);
         }
 
@@ -365,8 +390,6 @@ internal sealed class SideDockWindowGpu : IDisposable
 
         ctx.Transform = wave;
         var plate = new Rect(cx - half, cy - half, g, g);
-        using (var pb = ctx.CreateSolidColorBrush(new Color4(1f, 1f, 1f, 0x08 / 255f)))
-            ctx.FillRoundedRectangle(new RoundedRectangle { Rect = plate, RadiusX = 12f, RadiusY = 12f }, pb);
 
         if (s.Kind == SlotKind.Overflow)
         {
@@ -399,10 +422,22 @@ internal sealed class SideDockWindowGpu : IDisposable
                 DockSide.Top => (cx, cy - half + dot * 0.05f),
                 _ => (cx, cy + half - dot * 0.05f),
             };
-            using (var gl = ctx.CreateSolidColorBrush(new Color4(0x5C / 255f, 1f, 0x7A / 255f, 0.5f)))
-                ctx.FillEllipse(new Ellipse(new Vector2(dx, dy), glow / 2f, glow / 2f), gl);
+            // Soft halo via a radial gradient (green core → transparent) instead of a
+            // hard-edged disc, so it reads as the same subtle breathing glow as the
+            // WPF dock's blurred ellipse rather than an oversized solid blob.
+            var center = new Vector2(dx, dy);
+            using (var stops = ctx.CreateGradientStopCollection(new[]
+            {
+                new Vortice.Direct2D1.GradientStop { Position = 0f, Color = new Color4(0x5C / 255f, 1f, 0x7A / 255f, 0.45f) },
+                new Vortice.Direct2D1.GradientStop { Position = 0.5f, Color = new Color4(0x5C / 255f, 1f, 0x7A / 255f, 0.18f) },
+                new Vortice.Direct2D1.GradientStop { Position = 1f, Color = new Color4(0x5C / 255f, 1f, 0x7A / 255f, 0f) },
+            }))
+            using (var gl = ctx.CreateRadialGradientBrush(
+                new RadialGradientBrushProperties { Center = center, GradientOriginOffset = Vector2.Zero, RadiusX = glow / 2f, RadiusY = glow / 2f },
+                stops))
+                ctx.FillEllipse(new Ellipse(center, glow / 2f, glow / 2f), gl);
             using (var co = ctx.CreateSolidColorBrush(new Color4(0x4C / 255f, 0xE0 / 255f, 0x6B / 255f, 1f)))
-                ctx.FillEllipse(new Ellipse(new Vector2(dx, dy), dot / 2f, dot / 2f), co);
+                ctx.FillEllipse(new Ellipse(center, dot / 2f, dot / 2f), co);
         }
         ctx.Transform = Matrix3x2.Identity;
     }
@@ -750,7 +785,10 @@ internal sealed class SideDockWindowGpu : IDisposable
         try
         {
             if (s.Kind == SlotKind.Pinned && s.Entry != null)
+            {
+                _bounceIdx = idx; _bounceStart = Environment.TickCount64;   // launch hop
                 AppLauncher.Launch(s.Entry, null);
+            }
             else if (s.Kind == SlotKind.Run && s.Window != IntPtr.Zero)
                 WindowPreviewService.Activate(s.Window);
         }
