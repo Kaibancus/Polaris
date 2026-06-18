@@ -477,9 +477,10 @@ public partial class SideDockWindow
 
         _hoverLabelText!.Text = name;
 
-        // Cross position of the label's near edge: just past the hover-enlarged
-        // icon, toward the screen interior.
-        double crossPos = _colCenterCross + crossExtent + 8 * _uiScale;
+        // Cross position of the label's near edge: right at the hover-enlarged
+        // icon's outer edge (no extra gap) so the name sits as close to the icon
+        // as possible without being covered by it.
+        double crossPos = _colCenterCross + crossExtent;
         double thickness = IsVertical ? WinW : WinH;
         double mainExtent = IsVertical ? WinH : WinW;
 

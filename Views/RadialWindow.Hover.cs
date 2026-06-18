@@ -145,7 +145,9 @@ public partial class RadialWindow
         _glassHoverLabel.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
         double lw = _glassHoverLabel.DesiredSize.Width;
         Canvas.SetLeft(_glassHoverLabel, cx - lw / 2.0);
-        Canvas.SetTop(_glassHoverLabel, cy + zoomedHalf + 6);
+        // Sit the label snug under the zoomed icon (small 1px gap, was 6px) so a
+        // magnified name rides higher and stays within the slab's bottom border.
+        Canvas.SetTop(_glassHoverLabel, cy + zoomedHalf + 1);
 
         _glassHoverLabel.BeginAnimation(OpacityProperty,
             new DoubleAnimation(1, new Duration(TimeSpan.FromMilliseconds(110))));

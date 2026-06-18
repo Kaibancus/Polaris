@@ -15,7 +15,7 @@ namespace Polaris.Views;
 // re-raster), clipped to the slab and capped at the glass loop's frame rate.
 internal static class GlassOrbitLight
 {
-    private const double OrbitSeconds = 60.0;
+    private const double OrbitSeconds = 36.0;
 
     /// <summary>Adds the orbiting cool light over a glass slab.</summary>
     /// <param name="panel">Canvas the light layer is added to (slab coords).</param>
@@ -42,9 +42,9 @@ internal static class GlassOrbitLight
             {
                 GradientStops =
                 {
-                    new GradientStop(Color.FromArgb(0x32, 0xCF, 0xEC, 0xFF), 0.0),   // cool-white core
-                    new GradientStop(Color.FromArgb(0x1A, 0x76, 0xC4, 0xFF), 0.34),  // cyan-blue body
-                    new GradientStop(Color.FromArgb(0x07, 0x4C, 0x9E, 0xF0), 0.62),
+                    new GradientStop(Color.FromArgb(0x3C, 0xCF, 0xEC, 0xFF), 0.0),   // cool-white core
+                    new GradientStop(Color.FromArgb(0x22, 0x76, 0xC4, 0xFF), 0.34),  // cyan-blue body
+                    new GradientStop(Color.FromArgb(0x0A, 0x4C, 0x9E, 0xF0), 0.62),
                     new GradientStop(Color.FromArgb(0x00, 0x3A, 0x86, 0xE0), 1.0),
                 },
             },

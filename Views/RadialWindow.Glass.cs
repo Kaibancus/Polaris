@@ -89,7 +89,13 @@ public partial class RadialWindow
         // The slab extends below the icon grid by GlassBottomReserve so the glass
         // covers down past the system taskbar while the lowest icon row stays
         // above it. (The running-app taskbar strip + its seam were removed.)
-        double totalH = h + topInset + GlassBottomReserve;
+        // PLUS 0.1 GIcon of extra bottom extension so the glass bottom border sits
+        // lower than the deepest hover-zoomed icon's name label, keeping magnified
+        // names from spilling past the slab edge. This lengthens ONLY the drawn
+        // slab — the icon layout centre (GlassDockCenter) doesn't use this value —
+        // so the icons stay put and only the glass bottom edge drops.
+        double slabBottomExtend = EffectiveIconSize * GlassIconScale * 0.1 + 2.0;
+        double totalH = h + topInset + GlassBottomReserve + slabBottomExtend;
         DrawGlassSlab(left, top, w, totalH, radius, opacity, frosted: false, frostStrength: frostStrength);
 
         // A pronounced "stereoscopic" rim around the whole slab (mirrors the
@@ -368,8 +374,9 @@ public partial class RadialWindow
         double h = bottom - top;
         double radius = icon * 0.42;   // matches the left-dock tray corner radius
 
-        // Frame fill at ~99% transparency (barely-there interior), but the edge
-        // is still drawn so the resident region reads as a framed zone.
+        // Frame fill: ~95%-transparent interior (alpha lowered by ~5% from the
+        // near-invisible 0x03 so the resident zone reads a touch more solid),
+        // with the edge drawn so the region still reads as a framed zone.
         var fill = new System.Windows.Shapes.Rectangle
         {
             Width = w,
@@ -377,7 +384,7 @@ public partial class RadialWindow
             RadiusX = radius,
             RadiusY = radius,
             IsHitTestVisible = false,
-            Fill = new SolidColorBrush(Color.FromArgb(0x03, 0xFF, 0xFF, 0xFF)),
+            Fill = new SolidColorBrush(Color.FromArgb(0x10, 0xFF, 0xFF, 0xFF)),
         };
         // A soft outer glow + a bright cool rim read as etched glass. Kept
         // thinner than the main-dock slab border so it reads as a lighter inner

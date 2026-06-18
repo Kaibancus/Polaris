@@ -83,6 +83,7 @@ public partial class RadialWindow : Window
     {
         get
         {
+            // The slab bottom sits this far above the screen edge.
             double baseMargin = SystemTaskbarHeight + EffectiveIconSize * 0.12;
             double sideReserve = BottomDockReserve?.Invoke() ?? 0.0;
             return Math.Max(baseMargin, sideReserve);
