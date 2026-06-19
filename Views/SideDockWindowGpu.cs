@@ -545,6 +545,30 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         _ => new Vector2(0, -pop),
     };
 
+    /// <summary>True when a window-local DIP point lies on the dock's interactive
+    /// surface — the glass slab plus each icon's outward magnify-pop headroom. The
+    /// pop-side margin is generous enough to cover a fully hover-zoomed icon, so a
+    /// press anywhere on a (possibly popped) icon hit-tests as ours. Without this the
+    /// upper, popped-out part of an icon falls in the slab's transparent headroom,
+    /// and the global click-away watcher mistakes the press for a click outside the
+    /// dock and dismisses BOTH docks the instant the button goes down.</summary>
+    private bool InsideHitRegion(float lx, float ly)
+    {
+        float m = _gIcon * 0.5f;
+        // Outward reach of a fully magnified icon: scale growth + pop offset, with
+        // headroom so a press on the popped-up upper half of an icon still hits us.
+        float mPop = (HoverScale - 1f) * _gIcon * 1.18f + _gIcon * 1.2f;
+        float l = _sx - m, r = _sx + _sw + m, t = _sy - m, b = _sy + _sh + m;
+        switch (_side)
+        {
+            case DockSide.Left: r = _sx + _sw + mPop; break;   // pops right
+            case DockSide.Right: l = _sx - mPop; break;        // pops left
+            case DockSide.Top: b = _sy + _sh + mPop; break;    // pops down
+            default: t = _sy - mPop; break;                    // Bottom: pops up
+        }
+        return lx >= l && lx <= r && ly >= t && ly <= b;
+    }
+
     private void Tick()
     {
         if (_host == null)
@@ -1446,9 +1470,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
                 int sx = unchecked((short)((long)lParam & 0xFFFF));
                 int sy = unchecked((short)(((long)lParam >> 16) & 0xFFFF));
                 float lx = (float)(sx / _dpi - _winX), ly = (float)(sy / _dpi - _winY);
-                float m = _gIcon * 0.5f;
-                bool inside = lx >= _sx - m && lx <= _sx + _sw + m && ly >= _sy - m && ly <= _sy + _sh + m;
-                result = inside ? HTCLIENT : HTTRANSPARENT;
+                result = InsideHitRegion(lx, ly) ? HTCLIENT : HTTRANSPARENT;
                 return true;
             }
             case WM_LBUTTONDOWN:
