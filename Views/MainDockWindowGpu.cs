@@ -80,6 +80,19 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     private const long BounceDurMs = 480;
     private System.Windows.Controls.Primitives.Popup? _slotMenu;
 
+    // ---- Glass grid scrolling state (liquid-glass theme, >VisibleRows rows) ----
+    private double _glassScroll;          // committed vertical scroll offset (DIP, >=0 scrolls content up)
+    private double _glassScrollTarget;    // wheel/bar target the offset eases toward
+    private double _glassScrollMax;       // max offset = overflow-row height (0 = everything fits)
+    private double _glassCellH;           // grid row pitch (raw IconSize * RowPitch), matches ComputeSlots
+    private float _gridCenterY;           // window-local DIP centre of the visible row block
+    private float _gvX, _gvY, _gvW, _gvH; // grid clip viewport (window-local DIP)
+    private bool _scrollable;             // _glassScrollMax > 0.5
+    private float _barX, _barTop, _barW, _barTrackH; // scrollbar track (window-local DIP)
+    private bool _barDrag;                // a scrollbar-thumb drag is in progress
+    private float _barGrabDy;             // pointer offset within the thumb at grab time
+    private const uint WM_MOUSEWHEEL = 0x020A;
+
     // ---- Saturn theme state ----
     private bool _saturn;                 // active theme is the Saturn ring system
     private SaturnScene.Geom _sg;         // Saturn ring/planet geometry (window-local DIP)
@@ -150,6 +163,8 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     private void Build(bool visible)
     {
         _slots.Clear();
+        // Reset scroll state; the glass branch recomputes it, Saturn leaves it off.
+        _scrollable = false; _glassScrollMax = 0; _barTrackH = 0;
         var mon = MonitorLayout.ActiveBounds;
         var wa = MonitorLayout.ActiveWorkArea;
         double sw = mon.Width, sh = mon.Height;
@@ -242,6 +257,41 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             bool run = RunningAppTracker.IsEntryRunning(entry, running, noTitles, noAumids);
             _slots.Add(new IconSlot(new Vector2((float)slots[i].X, (float)slots[i].Y),
                 entry.EffectiveIconSource, entry.Name, run, img, entry));
+        }
+
+        // ---- Grid scrolling geometry (rows beyond VisibleRows scroll vertically) --
+        // ComputeSlots positions rows on the RAW IconSize pitch, so the scroll step
+        // and viewport must use the same units (not the *ThemeScale draw size).
+        _gridCenterY = (float)dockCenterY;
+        _glassCellH = _config.Settings.IconSize * LiquidGlassTheme.RowPitch;
+        int resCount = Math.Min(DockSync.ResidentCount(_config), count);
+        int resRows = resCount > 0 ? (resCount + LiquidGlassTheme.Columns - 1) / LiquidGlassTheme.Columns : 0;
+        int restRows = (Math.Max(0, count - resCount) + LiquidGlassTheme.Columns - 1) / LiquidGlassTheme.Columns;
+        int totalRows = Math.Max(1, resRows + restRows);
+        _glassScrollMax = Math.Max(0.0, totalRows - LiquidGlassTheme.VisibleRows) * _glassCellH;
+        _scrollable = _glassScrollMax > 0.5;
+        _glassScroll = Math.Clamp(_glassScroll, 0, _glassScrollMax);
+        _glassScrollTarget = Math.Clamp(_glassScrollTarget, 0, _glassScrollMax);
+
+        // Clip the grid to the visible block (raw-pitch rows), with a margin under
+        // the row pitch so the adjacent scrolled-out rows stay hidden.
+        double rawIcon = _config.Settings.IconSize;
+        double visBlockH = (LiquidGlassTheme.VisibleRows - 1) * _glassCellH;
+        double vMargin = rawIcon * 1.4;
+        double hMargin = rawIcon * 1.9;
+        _gvX = (float)(_slabX - hMargin);
+        _gvW = (float)(_slabW + hMargin * 2.0);
+        _gvY = (float)(dockCenterY - visBlockH / 2.0 - vMargin);
+        _gvH = (float)(visBlockH + vMargin * 2.0);
+
+        // Scrollbar track: a slim rounded rail just inside the slab's right edge,
+        // spanning the visible block (only drawn / interactive when scrollable).
+        if (_scrollable)
+        {
+            _barW = (float)(rawIcon * 0.12);
+            _barX = _slabX + _slabW - _barW - (float)(rawIcon * 0.30);
+            _barTop = (float)(dockCenterY - visBlockH / 2.0 - rawIcon * 0.3);
+            _barTrackH = (float)(visBlockH + rawIcon * 0.6);
         }
 
         }
@@ -479,15 +529,20 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         bool active = false;
         bool planetHover = false;
         Vector2 cur = default;
+        float scrollY = _scrollable ? (float)_glassScroll : 0f;
         if (!_dragging && GetCursorPos(out POINT p))
         {
             cur = new Vector2((float)(p.X / _dpi - _winX), (float)(p.Y / _dpi - _winY));
+            // Compare against grid-space slot centres (icons draw at Center.Y - scroll).
+            Vector2 curGrid = new Vector2(cur.X, cur.Y + scrollY);
+            bool inViewport = !_scrollable || (cur.Y >= _gvY && cur.Y <= _gvY + _gvH);
             float nearest = float.MaxValue;
             for (int i = 0; i < _slots.Count; i++)
-                nearest = Math.Min(nearest, Vector2.Distance(_slots[i].Center, cur));
-            active = nearest <= _effIcon * 1.3f;
+                nearest = Math.Min(nearest, Vector2.Distance(_slots[i].Center, curGrid));
+            active = inViewport && nearest <= _effIcon * 1.3f;
             if (_saturn)
                 planetHover = Vector2.Distance(cur, _gearC) <= _planetHitR;
+            cur = curGrid;
         }
 
         // Focal icon = nearest to the cursor; it stays anchored while neighbours
@@ -543,6 +598,17 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         bool bouncing = _bounceIdx >= 0 && (Environment.TickCount64 - _bounceStart) <= BounceDurMs;
         if (!bouncing) _bounceIdx = -1;
 
+        // Ease the grid scroll toward its wheel/scrollbar target (tau ~70ms) so the
+        // whole grid glides rather than jumping a row at a time.
+        bool scrolling = false;
+        if (_scrollable && Math.Abs(_glassScrollTarget - _glassScroll) > 0.05)
+        {
+            _glassScroll += (_glassScrollTarget - _glassScroll) * (1.0 - Math.Exp(-0.016 / 0.07));
+            scrolling = true;
+        }
+        else if (_scrollable)
+            _glassScroll = _glassScrollTarget;
+
         // Saturn ambient: advance the planet spin, ring revolutions and twinkle
         // clock and re-render every tick while shown (matches the WPF perpetual
         // idle spin/orbit). The scene is GPU-drawn so the per-frame cost is cheap.
@@ -561,7 +627,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             _outerAngle = (_outerAngle + dt * 360.0 / (PlanetSpinSeconds * OuterOrbitRatio)) % 360.0;
         }
 
-        if (_saturn || animating || active || _dragging || bouncing || maxDelta > 0.001f)
+        if (_saturn || animating || active || _dragging || bouncing || scrolling || _barDrag || maxDelta > 0.001f)
             Render();
     }
 
@@ -658,14 +724,18 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         // Draw smallest-first so the magnified (focal) icon sits on top of its neighbours.
         // The dragged icon is skipped here and drawn last, lifted under the cursor.
         int dragIdx = _dragging ? _pressIdx : -1;
+        float scrollY = _scrollable ? (float)_glassScroll : 0f;
         var order = new int[_slots.Count];
         for (int i = 0; i < order.Length; i++) order[i] = i;
         Array.Sort(order, (a, b) => _waveCur[a].CompareTo(_waveCur[b]));
+        bool clip = _scrollable;
+        if (clip)
+            ctx.PushAxisAlignedClip(new Vortice.Mathematics.Rect(_gvX, _gvY, _gvW, _gvH), AntialiasMode.Aliased);
         foreach (int i in order)
         {
             if (i == dragIdx)
                 continue;
-            var off = new Vector2(_waveOffX[i], _waveOffY[i] - BounceOffset(i));
+            var off = new Vector2(_waveOffX[i], _waveOffY[i] - BounceOffset(i) - scrollY);
             float gi = _saturn && i < _slotG.Length ? _slotG[i] : 0f;
             if (_saturn && satScl != 1f)
             {
@@ -678,6 +748,8 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             else
                 DrawIcon(ctx, _slots[i], _waveCur[i], off, gi);
         }
+        if (clip)
+            ctx.PopAxisAlignedClip();
 
         if (dragIdx >= 0 && dragIdx < _slots.Count)
         {
@@ -687,7 +759,16 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             DrawIcon(ctx, moved, 1.12f, Vector2.Zero, _saturn && dragIdx < _slotG.Length ? _slotG[dragIdx] : 0f);
         }
         else if (_hover >= 0 && _hover < _slots.Count)
-            DrawHoverLabel(ctx, _slots[_hover], _waveCur[_hover]);
+        {
+            var hs = _slots[_hover];
+            var hsv = scrollY != 0f
+                ? new IconSlot(new Vector2(hs.Center.X, hs.Center.Y - scrollY), hs.IconKey, hs.Name, hs.Running, hs.Image, hs.Entry)
+                : hs;
+            DrawHoverLabel(ctx, hsv, _waveCur[_hover]);
+        }
+
+        if (!_saturn && _scrollable)
+            DrawScrollBar(ctx);
 
         if (slid)
             ctx.Transform = System.Numerics.Matrix3x2.Identity;
@@ -719,6 +800,68 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         var rect = new Vortice.Mathematics.Rect(_gearC.X - _gearR, _gearC.Y - _gearR, _gearR * 2f, _gearR * 2f);
         using (var fg = ctx.CreateSolidColorBrush(Col(0xFF, 0xFF, 0xFF, 0xFF)))
             ctx.DrawText("\u2699", _gearFormat, rect, fg);
+    }
+
+    /// <summary>Returns the current scrollbar thumb rect (window-local DIP), or a
+    /// zero rect when the grid is not scrollable.</summary>
+    private Vortice.Mathematics.Rect ThumbRect()
+    {
+        if (!_scrollable || _barTrackH <= 0f)
+            return default;
+        float frac = (float)(LiquidGlassTheme.VisibleRows * _glassCellH /
+                              ((LiquidGlassTheme.VisibleRows * _glassCellH) + _glassScrollMax));
+        float thumbH = Math.Max(_barTrackH * Math.Clamp(frac, 0.08f, 1f), _barW * 2.4f);
+        float t = _glassScrollMax > 0.5 ? (float)(_glassScroll / _glassScrollMax) : 0f;
+        float top = _barTop + (_barTrackH - thumbH) * t;
+        return new Vortice.Mathematics.Rect(_barX, top, _barW, thumbH);
+    }
+
+    /// <summary>Draws the slim white scroll rail + thumb on the slab's right edge
+    /// (parity with the WPF glass dock's vertical scrollbar).</summary>
+    private void DrawScrollBar(ID2D1DeviceContext ctx)
+    {
+        float r = _barW / 2f;
+        var track = new RoundedRectangle { Rect = new Vortice.Mathematics.Rect(_barX, _barTop, _barW, _barTrackH), RadiusX = r, RadiusY = r };
+        using (var tb = ctx.CreateSolidColorBrush(Col(0x30, 0xFF, 0xFF, 0xFF)))
+            ctx.FillRoundedRectangle(track, tb);
+        var th = ThumbRect();
+        var thumb = new RoundedRectangle { Rect = th, RadiusX = r, RadiusY = r };
+        byte a = (byte)(_barDrag ? 0xF0 : 0xC0);
+        using (var thb = ctx.CreateSolidColorBrush(Col(a, 0xFF, 0xFF, 0xFF)))
+            ctx.FillRoundedRectangle(thumb, thb);
+    }
+
+    /// <summary>Handles a left-press on the scrollbar: starts a thumb drag (grabbing
+    /// at the press offset, or centring the thumb on a track click). Returns true
+    /// when the press is consumed so the icon/gear handlers are skipped.</summary>
+    private bool TryBarPress(float lx, float ly)
+    {
+        if (_saturn || !_scrollable)
+            return false;
+        bool inX = lx >= _barX - 6f && lx <= _barX + _barW + 6f;
+        bool inY = ly >= _barTop - 2f && ly <= _barTop + _barTrackH + 2f;
+        if (!inX || !inY)
+            return false;
+        var th = ThumbRect();
+        bool onThumb = ly >= (float)th.Top - 2f && ly <= (float)th.Top + (float)th.Height + 2f;
+        _barGrabDy = onThumb ? ly - (float)th.Top : (float)th.Height / 2f;
+        _barDrag = true;
+        BarDragTo(ly);
+        SetCapture(_hwnd);
+        return true;
+    }
+
+    /// <summary>Maps a thumb-drag pointer position to the scroll offset (commits the
+    /// offset immediately so the grid tracks the thumb 1:1).</summary>
+    private void BarDragTo(float ly)
+    {
+        var th = ThumbRect();
+        float range = _barTrackH - (float)th.Height;
+        if (range <= 0.01f)
+            return;
+        float top = Math.Clamp(ly - _barGrabDy, _barTop, _barTop + range);
+        double frac = (top - _barTop) / range;
+        _glassScroll = _glassScrollTarget = frac * _glassScrollMax;
     }
 
     private void DrawIcon(ID2D1DeviceContext ctx, in IconSlot s, float scale, Vector2 off, float gIcon = 0f)
@@ -825,6 +968,8 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             case WM_LBUTTONDOWN:
             {
                 (float lx, float ly) = ClientDip(lParam);
+                if (TryBarPress(lx, ly))
+                    return true;
                 _pressX = lx; _pressY = ly; _dragX = lx; _dragY = ly;
                 float hitR = _saturn ? _planetHitR : _gearR;
                 _pressGear = Vector2.Distance(new Vector2(lx, ly), _gearC) <= hitR + 2f;
@@ -836,9 +981,15 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             }
             case WM_MOUSEMOVE:
             {
+                (float lx, float ly) = ClientDip(lParam);
+                if (_barDrag)
+                {
+                    BarDragTo(ly);
+                    Render();
+                    return true;
+                }
                 if (_pressIdx < 0)
                     return false;
-                (float lx, float ly) = ClientDip(lParam);
                 _dragX = lx; _dragY = ly;
                 if (!_dragging && (MathF.Abs(lx - _pressX) + MathF.Abs(ly - _pressY)) > _gIcon * 0.35f)
                 {
@@ -849,9 +1000,24 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
                     Render();
                 return true;
             }
+            case WM_MOUSEWHEEL:
+            {
+                if (_saturn || !_scrollable)
+                    return false;
+                int delta = unchecked((short)(((long)wParam >> 16) & 0xFFFF));
+                _glassScrollTarget = Math.Clamp(_glassScrollTarget - _glassCellH * (delta / 120.0), 0, _glassScrollMax);
+                Render();
+                return true;
+            }
             case WM_LBUTTONUP:
             {
                 ReleaseCapture();
+                if (_barDrag)
+                {
+                    _barDrag = false;
+                    Render();
+                    return true;
+                }
                 int idx = _pressIdx;
                 bool wasDrag = _dragging;
                 bool gear = _pressGear;
@@ -917,6 +1083,14 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     /// <summary>Index of the icon under the (window-local DIP) point, or -1.</summary>
     private int HitSlot(float lx, float ly)
     {
+        // Restrict hits to the visible band and map the pointer into grid space
+        // (icons draw at Center.Y - scroll) when the glass grid is scrolled.
+        if (_scrollable)
+        {
+            if (ly < _gvY || ly > _gvY + _gvH)
+                return -1;
+            ly += (float)_glassScroll;
+        }
         int best = -1; float bestD = _gIcon * 0.6f;
         for (int i = 0; i < _slots.Count; i++)
         {
@@ -974,10 +1148,11 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         }
 
         // Otherwise reorder to the slot nearest the drop point (2-D grid).
+        float dropY = _scrollable ? ly + (float)_glassScroll : ly;
         int tgt = -1; float bestD = float.MaxValue;
         for (int i = 0; i < _slots.Count; i++)
         {
-            float d = Vector2.Distance(_slots[i].Center, new Vector2(lx, ly));
+            float d = Vector2.Distance(_slots[i].Center, new Vector2(lx, dropY));
             if (d < bestD) { bestD = d; tgt = i; }
         }
         if (tgt >= 0 && tgt != idx && idx < _config.Apps.Count && tgt < _config.Apps.Count)
@@ -1007,8 +1182,11 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             return;
         bool changed = false;
         int at = DockSync.ResidentCount(_config);
+        int cap = ThemeRegistry.Get(_config.Settings.Theme).MaxIcons;
         foreach (var entry in entries)
         {
+            if (_config.Apps.Count >= cap)
+                break;   // theme capacity reached (glass 42 / Saturn 42) — stop pinning
             if (_config.Apps.FindIndex(a => DockSync.Matches(a, entry)) >= 0)
                 continue;   // already present — don't duplicate
             DockSync.InsertResident(_config, entry, at);
