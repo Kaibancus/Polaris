@@ -152,6 +152,11 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     private const float RingTiltY = 0.97f;
     private const int Ring0Cap = 14;
     private const int Ring1Cap = 28;
+    // Staggered rings-expand summon (mirrors WPF AnimateRingsExpand): the inner
+    // band leads and the outer band follows ~0.28 of the summon later, each growing
+    // 0.55->1.0 from the planet with a fade-in. Set in Render, read by the icon loop.
+    private float _satInnerScl = 1f, _satOuterScl = 1f, _satInnerOp = 1f, _satOuterOp = 1f;
+    private int _satR0;
 
     // ---- Stage E host integration (IMainDock) state ----
     private bool _realized;              // window created once (kept hidden between summons)
@@ -865,7 +870,6 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         float pos = BackEaseOut(_summon);
         float riseOff = (1f - pos) * _riseUnit;
         bool slid = riseOff > 0.01f;
-        float satScl = 1f;   // Saturn summon zoom (set in the _saturn branch)
         // Glass vertical squash/stretch: the slab springs from 0.94 -> 1.0 about its
         // bottom-centre (ElasticEase Osc=1 Spring=4), mirroring the WPF AnimateGlassRise
         // stretch so the dock reads as a fluid blob settling rather than a rigid slide.
@@ -880,39 +884,47 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
 
         if (_saturn)
         {
-            // Summon "rings expand": grow the whole scene out from the centre with
-            // a soft BackEase-out settle (mirrors the WPF AnimateRingsExpand burst),
-            // collapsing back in on dismiss. Self-consistent zoom about the planet.
-            float satPos = BackEaseOut(_summon);
-            satScl = 0.72f + 0.28f * satPos;
+            // Summon "rings expand" (mirrors WPF AnimateRingsExpand): the inner band
+            // leads and the outer band follows ~0.28 of the summon later, each growing
+            // 0.55 -> 1.0 from the planet with a CubicEaseOut fade-in, so the dock reads
+            // as rings blooming out from the centre rather than a single rigid zoom.
+            float innerP = CubicEaseOut(Math.Clamp(_summon / 0.72f, 0f, 1f));
+            float outerP = CubicEaseOut(Math.Clamp((_summon - 0.28f) / 0.72f, 0f, 1f));
+            _satInnerScl = 0.55f + 0.45f * innerP;
+            _satOuterScl = 0.55f + 0.45f * outerP;
+            _satInnerOp = innerP;
+            _satOuterOp = outerP;
+            _satR0 = EffectiveRing0Count(_slots.Count);
             var cen = new Vector2(_sg.Cx, _sg.Cy);
-            var satBase = System.Numerics.Matrix3x2.CreateScale(satScl, satScl, cen);
+            var satBase = System.Numerics.Matrix3x2.CreateScale(_satInnerScl, _satInnerScl, cen);
             ctx.Transform = satBase;
             if (_satStatic != null)
-                ctx.DrawBitmap(_satStatic, 1f, InterpolationMode.Linear);
+                ctx.DrawBitmap(_satStatic, _satInnerOp, InterpolationMode.Linear);
             // Re-revolve the baked cue bitmaps: Rotate(orbit) * Scale(1,tilt) * base.
+            // Inner cues bloom with the inner band; outer cues trail on the outer band.
             if (_satInner != null)
             {
                 ctx.Transform = System.Numerics.Matrix3x2.CreateRotation((float)(_innerAngle * Math.PI / 180.0), cen)
                     * System.Numerics.Matrix3x2.CreateScale(1f, _sg.TiltY, cen) * satBase;
-                ctx.DrawBitmap(_satInner, 1f, InterpolationMode.Linear);
+                ctx.DrawBitmap(_satInner, _satInnerOp, InterpolationMode.Linear);
             }
             if (_satOuter != null)
             {
+                var outerBase = System.Numerics.Matrix3x2.CreateScale(_satOuterScl, _satOuterScl, cen);
                 ctx.Transform = System.Numerics.Matrix3x2.CreateRotation((float)(_outerAngle * Math.PI / 180.0), cen)
-                    * System.Numerics.Matrix3x2.CreateScale(1f, _sg.TiltY, cen) * satBase;
-                ctx.DrawBitmap(_satOuter, 1f, InterpolationMode.Linear);
+                    * System.Numerics.Matrix3x2.CreateScale(1f, _sg.TiltY, cen) * outerBase;
+                ctx.DrawBitmap(_satOuter, _satOuterOp, InterpolationMode.Linear);
             }
             ctx.Transform = satBase;
             if (_satDisc != null)
             {
                 ctx.Transform = System.Numerics.Matrix3x2.CreateRotation(
                     (float)(_spinAngle * Math.PI / 180.0), cen) * satBase;
-                ctx.DrawBitmap(_satDisc, 1f, InterpolationMode.Linear);
+                ctx.DrawBitmap(_satDisc, _satInnerOp, InterpolationMode.Linear);
                 ctx.Transform = satBase;
             }
             if (_satShade != null)
-                ctx.DrawBitmap(_satShade, 1f, InterpolationMode.Linear);
+                ctx.DrawBitmap(_satShade, _satInnerOp, InterpolationMode.Linear);
             SaturnScene.DrawTwinkle(ctx, _sg, _saturnTime);
             ctx.Transform = System.Numerics.Matrix3x2.Identity;
         }
@@ -959,13 +971,18 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
                 continue;
             var off = new Vector2(_waveOffX[i], _waveOffY[i] - BounceOffset(i) - scrollY);
             float gi = _saturn && i < _slotG.Length ? _slotG[i] : 0f;
-            if (_saturn && satScl != 1f)
+            if (_saturn && (_satInnerScl != 1f || _satOuterScl != 1f))
             {
-                // Expand the ring icons out from the planet in lock-step with the scene zoom.
+                // Staggered rings-expand: inner-ring icons bloom with the inner band,
+                // outer-ring icons trail with the outer band — each scaled out from the
+                // planet and faded in on its own ring's timeline.
+                bool inner = i < _satR0;
+                float rScl = inner ? _satInnerScl : _satOuterScl;
+                float rOp = inner ? _satInnerOp : _satOuterOp;
                 var ce = new Vector2(_sg.Cx, _sg.Cy);
                 var ss = _slots[i];
-                var scaled = new IconSlot(ce + (ss.Center - ce) * satScl, ss.IconKey, ss.Name, ss.Running, ss.Image, ss.Entry);
-                DrawIcon(ctx, scaled, _waveCur[i], off * satScl, gi * satScl);
+                var scaled = new IconSlot(ce + (ss.Center - ce) * rScl, ss.IconKey, ss.Name, ss.Running, ss.Image, ss.Entry);
+                DrawIcon(ctx, scaled, _waveCur[i], off * rScl, gi * rScl, rOp);
             }
             else
                 DrawIcon(ctx, _slots[i], _waveCur[i], off, gi);
@@ -1194,7 +1211,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             ctx.DrawRoundedRectangle(rr, rim, 1.0f);
     }
 
-    private void DrawIcon(ID2D1DeviceContext ctx, in IconSlot s, float scale, Vector2 off, float gIcon = 0f)
+    private void DrawIcon(ID2D1DeviceContext ctx, in IconSlot s, float scale, Vector2 off, float gIcon = 0f, float opacity = 1f)
     {
         float g = gIcon > 0f ? gIcon : _gIcon, half = g / 2f, cx = s.Center.X + off.X, cy = s.Center.Y + off.Y;
         var center = new Vector2(cx, cy);
@@ -1247,7 +1264,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         var bs = bmp.Size;
         ctx.Transform = Matrix3x2.CreateScale(dstSz / Math.Max(1f, bs.Width), dstSz / Math.Max(1f, bs.Height))
                       * Matrix3x2.CreateTranslation(dstX, dstY) * wave;
-        ctx.DrawBitmap(bmp, 1f, InterpolationMode.HighQualityCubic);
+        ctx.DrawBitmap(bmp, Math.Clamp(opacity, 0f, 1f), InterpolationMode.HighQualityCubic);
         ctx.Transform = baseTf;
 
         // New-message attention dot: a small pulsing red disc hugging the icon's
