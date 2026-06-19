@@ -71,6 +71,22 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     private float[] _waveCur = Array.Empty<float>();
     private const float WaveSupport = 2.3f;
 
+    // ---- Saturn dark-slab styling (black smoked dock + flame + debris + stars) ----
+    private bool _saturn;
+    private float _satBaseEdge, _satSlabMain, _satSlabLen, _flameFeather, _satDriftAmp;
+    private bool _curActive; private float _curMain;
+    private Vector2[] _stars = Array.Empty<Vector2>();
+    private float[] _starSz = Array.Empty<float>();
+    private float[] _starA = Array.Empty<float>();
+    private float[] _starTwk = Array.Empty<float>();    // twinkle period (s); 0 = steady
+    private float[] _starPhase = Array.Empty<float>();
+    private float[] _debMain = Array.Empty<float>();
+    private float[] _debCross = Array.Empty<float>();
+    private float[] _debR = Array.Empty<float>();
+    private float[] _debA = Array.Empty<float>();
+    private float[] _debPar = Array.Empty<float>();
+    private float[] _debCur = Array.Empty<float>();
+
     // ---- Interaction (Stage E) -------------------------------------------
     private static readonly Dictionary<IntPtr, SideDockWindowGpu> s_instances = new();
     private int _pressIdx = -1;        // slot under the mouse-down, or -1
@@ -349,6 +365,9 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         _cellMain = (float)cellH;
         _gIcon = (float)gIcon;
         _cellH = (float)cellH;
+        _saturn = ThemeRegistry.Get(_config.Settings.Theme).IsSaturn;
+        if (_saturn)
+            BuildSaturnField(slabMain, slabMainLen, bodyCross, bodyCrossLen, gIcon, uiScale);
         _waveCur = new float[_slots.Count];
         Array.Fill(_waveCur, 1f);
 
@@ -431,12 +450,36 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         _hover = active && focal >= 0 && best <= _cellH ? focal : -1;
         DrivePreview(_hover);
 
+        // Saturn debris: ease each rock's outward push toward the magnify wave at its
+        // main coordinate so the rubble belt bulges under the cursor and relaxes behind.
+        if (_saturn && _debCur.Length > 0)
+        {
+            _curActive = active; _curMain = curMain;
+            float denom = Math.Max(0.0001f, HoverScale - 1f);
+            float maxPush = _gIcon * 0.5f;
+            for (int i = 0; i < _debCur.Length; i++)
+            {
+                float tgt = 0f;
+                if (active)
+                {
+                    float a = Math.Clamp((WaveScaleAt(curMain, _debMain[i]) - 1f) / denom, 0f, 1f);
+                    tgt = a * maxPush * _debPar[i];
+                }
+                float cur = _debCur[i] + (tgt - _debCur[i]) * k;
+                _debCur[i] = cur;
+                maxDelta = Math.Max(maxDelta, Math.Abs(tgt - cur));
+            }
+        }
+        else if (_saturn)
+            _curActive = active;
+
         // Render every frame while the wave is live or a launch bounce is playing;
         // once settled at rest, render one final frame and idle (the timer keeps
-        // polling for re-entry).
+        // polling for re-entry). The Saturn dock keeps animating while shown so its
+        // starfield twinkles and the debris belt drifts (cheap on the GPU).
         bool bouncing = _bounceIdx >= 0 && (Environment.TickCount64 - _bounceStart) <= BounceDurMs;
         if (!bouncing) _bounceIdx = -1;
-        if (active || bouncing || maxDelta > 0.001f)
+        if (active || bouncing || maxDelta > 0.001f || (_saturn && _shown))
             Render();
     }
 
@@ -464,6 +507,189 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
 
     private static Color4 Col(byte a, byte r, byte g, byte b) => new(r / 255f, g / 255f, b / 255f, a / 255f);
 
+    /// <summary>Precomputes the Saturn dock's starfield and debris belt (mirrors the
+    /// WPF DrawDockStarfield / DrawDebrisBelt). Stars are window-local and only twinkle
+    /// in alpha; debris keep logical main/cross coords so the magnify wave can shove
+    /// them outward and a slow drift can orbit them along the belt.</summary>
+    private void BuildSaturnField(double slabMain, double slabMainLen, double bodyCross, double bodyCrossLen, double gIcon, double uiScale)
+    {
+        _satSlabMain = (float)slabMain;
+        _satSlabLen = (float)slabMainLen;
+        _satBaseEdge = (float)(bodyCross + bodyCrossLen);
+        _flameFeather = (float)Math.Max(16.0, Math.Min(slabMainLen, bodyCrossLen) * 0.24);
+        double s = Math.Max(0.5, uiScale);
+        _satDriftAmp = (float)(1.6 * s);
+        double mainLo = slabMain + gIcon * 0.1, mainHi = slabMain + slabMainLen - gIcon * 0.1;
+        double mainSpan = mainHi - mainLo;
+        _stars = Array.Empty<Vector2>(); _debMain = Array.Empty<float>();
+        if (mainSpan <= 0) return;
+
+        // Starfield over the black slab.
+        var rng = new Random(0x2B17F3);
+        double crossLo = bodyCross + gIcon * 0.08;
+        double crossSpan = Math.Max(1.0, _satBaseEdge - crossLo);
+        int sc = Math.Max(14, (int)(mainSpan / (19.0 * s)));
+        var sp = new List<Vector2>(sc); var sz = new List<float>(sc); var sa = new List<float>(sc);
+        var stw = new List<float>(sc); var sph = new List<float>(sc);
+        for (int i = 0; i < sc; i++)
+        {
+            double main = mainLo + rng.NextDouble() * mainSpan;
+            double cross = crossLo + rng.NextDouble() * crossSpan;
+            var (lx, ly) = ToLocal(_side, main, cross, _winW, _winH);
+            sp.Add(new Vector2(lx, ly));
+            sz.Add((float)((0.6 + 1.7 * rng.NextDouble()) * s));
+            sa.Add((float)((50 + 140 * rng.NextDouble()) / 255.0));
+            if (rng.NextDouble() > 0.62) { stw.Add((float)(1.5 + 2.4 * rng.NextDouble())); sph.Add((float)(rng.NextDouble() * Math.PI * 2)); }
+            else { stw.Add(0f); sph.Add(0f); }
+        }
+        _stars = sp.ToArray(); _starSz = sz.ToArray(); _starA = sa.ToArray(); _starTwk = stw.ToArray(); _starPhase = sph.ToArray();
+
+        // Debris belt: dense along the interior edge plus grains through the body.
+        rng = new Random(0x9C34A1);
+        double innerCross = bodyCross + gIcon * 0.08;
+        double beltCross = _satBaseEdge;
+        int beltCount = Math.Max(16, (int)(mainSpan / (6.0 * s)));
+        int bodyCount = Math.Max(20, (int)(mainSpan / (6.0 * s)));
+        var dm = new List<float>(); var dc = new List<float>(); var dr = new List<float>();
+        var da = new List<float>(); var dp = new List<float>();
+        void AddRock(double main, double cross, double r, double alpha)
+        {
+            dm.Add((float)main); dc.Add((float)cross); dr.Add((float)r); da.Add((float)alpha);
+            dp.Add((float)(0.35 + Math.Clamp(r / (7.0 * s), 0.0, 1.0) * 0.65));
+        }
+        for (int i = 0; i < beltCount; i++)
+        {
+            double main = mainLo + rng.NextDouble() * mainSpan;
+            double g = (rng.NextDouble() + rng.NextDouble() + rng.NextDouble()) / 3.0 - 0.5;
+            double cross = beltCross + g * gIcon * 1.05 - gIcon * 0.05;
+            double r = (1.4 + rng.NextDouble() * rng.NextDouble() * 5.9) * s;
+            AddRock(main, cross, r, 0.16 + rng.NextDouble() * 0.44);
+        }
+        for (int i = 0; i < bodyCount; i++)
+        {
+            double main = mainLo + rng.NextDouble() * mainSpan;
+            double cross = innerCross + rng.NextDouble() * Math.Max(1.0, beltCross - innerCross);
+            double r = (1.2 + rng.NextDouble() * rng.NextDouble() * 4.1) * s;
+            AddRock(main, cross, r, 0.12 + rng.NextDouble() * 0.34);
+        }
+        _debMain = dm.ToArray(); _debCross = dc.ToArray(); _debR = dr.ToArray();
+        _debA = da.ToArray(); _debPar = dp.ToArray(); _debCur = new float[dm.Count];
+    }
+
+    /// <summary>Black smoked-glass dock body for the Saturn theme: a near-opaque dark
+    /// slab in place of the clear liquid glass, with a wave-riding black "flame", a
+    /// faint starfield and an orbiting debris belt (mirrors SideDockWindow.Layout's
+    /// darkSlab branch). Drawn before the icons so they sit on top.</summary>
+    private void DrawSaturnBody(ID2D1DeviceContext ctx)
+    {
+        var rr = new RoundedRectangle { Rect = new Rect(_sx, _sy, _sw, _sh), RadiusX = _trayRadius, RadiusY = _trayRadius };
+        using (var body = ctx.CreateSolidColorBrush(Col((byte)(238 * _opacity), 6, 8, 12)))
+            ctx.FillRoundedRectangle(rr, body);
+        DrawSaturnFlame(ctx);
+        DrawSaturnStars(ctx);
+        DrawSaturnDebris(ctx);
+        using (var rim = ctx.CreateSolidColorBrush(Col((byte)(70 * _opacity), 60, 66, 82)))
+            ctx.DrawRoundedRectangle(rr, rim, 1f);
+    }
+
+    /// <summary>A single black flame tongue that licks up from the dock's interior edge,
+    /// gliding to the magnification-weighted cursor centre and flickering (port of WPF
+    /// UpdateWaveBulge as a filled Direct2D path).</summary>
+    private void DrawSaturnFlame(ID2D1DeviceContext ctx)
+    {
+        if (!_curActive)
+            return;
+        bool vertical = _side is DockSide.Left or DockSide.Right;
+        float denom = Math.Max(0.0001f, HoverScale - 1f);
+        float peak = 0f, wsum = 0f, csum = 0f;
+        for (int i = 0; i < _slots.Count; i++)
+        {
+            float a = Math.Clamp((_waveCur[i] - 1f) / denom, 0f, 1f);
+            if (a <= 0f) continue;
+            float w = a * a;
+            float main = vertical ? _slots[i].Center.Y : _slots[i].Center.X;
+            wsum += w; csum += w * main; if (a > peak) peak = a;
+        }
+        if (peak < 0.05f || wsum <= 0f)
+            return;
+        float cm = csum / wsum;
+        float baseEdge = _satBaseEdge, gIcon = _gIcon;
+        float rootC = Math.Max(_bodyCross, baseEdge - _flameFeather - gIcon * 0.55f);
+        double t = Environment.TickCount64 / 1000.0;
+        float half = _cellH * (2.05f + 1.85f * peak);
+        float flick = (float)(Math.Sin(t * 8.5) * 0.5 + Math.Sin(t * 5.3 + 1.1) * 0.5);
+        float Hgt = (float)(Math.Pow(peak, 1.1) * (gIcon * 1.05) * 0.90 * (0.88 + 0.12 * flick));
+        float lean = (float)((0.18 * Math.Sin(t * 3.7) + 0.10 * Math.Sin(t * 6.1 + 0.7)) * Hgt);
+        const int M = 40;
+        float mainLo = _satSlabMain, mainHi = _satSlabMain + _satSlabLen;
+        float endPad = gIcon * 0.45f, endRamp = gIcon * 1.00f;
+        static float SS(float e) { e = Math.Clamp(e, 0f, 1f); return e * e * (3f - 2f * e); }
+        var geo = ctx.Factory.CreatePathGeometry();
+        using (var sink = geo.Open())
+        {
+            sink.BeginFigure(ToLocalV(cm - half, rootC), FigureBegin.Filled);
+            for (int k = 0; k <= M; k++)
+            {
+                float x = -1f + 2f * k / M;
+                float b = 0.5f * (1f + MathF.Cos(MathF.PI * x));
+                float env = MathF.Pow(0.40f * b * b + 0.60f * b, 1.6f);
+                float protUp = Hgt * env * (1f + 0.05f * MathF.Sin(3.5f * MathF.PI * x + (float)t * 5f));
+                float up = MathF.Pow(Math.Clamp(protUp / Math.Max(1e-6f, Hgt), 0f, 1f), 1.3f);
+                float m = cm + x * half + lean * up;
+                float edgeFac = SS((m - (mainLo + endPad)) / endRamp) * SS(((mainHi - endPad) - m) / endRamp);
+                protUp *= edgeFac;
+                sink.AddLine(ToLocalV(m, baseEdge + protUp));
+            }
+            sink.AddLine(ToLocalV(cm + half, rootC));
+            sink.EndFigure(FigureEnd.Closed);
+            sink.Close();
+        }
+        using (var black = ctx.CreateSolidColorBrush(Col((byte)(255 * _opacity), 4, 5, 8)))
+            ctx.FillGeometry(geo, black);
+        geo.Dispose();
+    }
+
+    private void DrawSaturnStars(ID2D1DeviceContext ctx)
+    {
+        if (_stars.Length == 0) return;
+        double t = Environment.TickCount64 / 1000.0;
+        using var br = ctx.CreateSolidColorBrush(Col(255, 255, 255, 250));
+        for (int i = 0; i < _stars.Length; i++)
+        {
+            float a = _starA[i];
+            if (_starTwk[i] > 0f)
+            {
+                float f = 0.5f + 0.5f * MathF.Sin((float)(t * 2 * Math.PI / _starTwk[i]) + _starPhase[i]);
+                a = _starA[i] * (0.28f + 0.72f * f);
+            }
+            br.Opacity = a * _opacity;
+            float r = _starSz[i] * 0.5f;
+            ctx.FillEllipse(new Ellipse { Point = _stars[i], RadiusX = r, RadiusY = r }, br);
+        }
+    }
+
+    private void DrawSaturnDebris(ID2D1DeviceContext ctx)
+    {
+        if (_debMain.Length == 0) return;
+        double t = Environment.TickCount64 / 1000.0;
+        float drift = (float)(Math.Sin(t * 2 * Math.PI / 16.0)) * _satDriftAmp;
+        using var br = ctx.CreateSolidColorBrush(Col(255, 122, 110, 96));
+        for (int i = 0; i < _debMain.Length; i++)
+        {
+            var (lx, ly) = ToLocal(_side, _debMain[i] + drift, _debCross[i], _winW, _winH);
+            Vector2 push = PopOffset(_debCur[i]);
+            br.Opacity = _debA[i] * _opacity;
+            float r = _debR[i];
+            ctx.FillEllipse(new Ellipse { Point = new Vector2(lx + push.X, ly + push.Y), RadiusX = r, RadiusY = r }, br);
+        }
+    }
+
+    private Vector2 ToLocalV(float main, float cross)
+    {
+        var (x, y) = ToLocal(_side, main, cross, _winW, _winH);
+        return new Vector2(x, y);
+    }
+
     private void Render()
     {
         if (_host == null)
@@ -471,7 +697,10 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         var ctx = _host.Context;
         ctx.BeginDraw();
         ctx.Clear(Col(0, 0, 0, 0));
-        GlassSlab.DrawGlass(ctx, _sx, _sy, _sw, _sh, _trayRadius, _opacity, _frost);
+        if (_saturn)
+            DrawSaturnBody(ctx);
+        else
+            GlassSlab.DrawGlass(ctx, _sx, _sy, _sw, _sh, _trayRadius, _opacity, _frost);
         if (_pinnedVisible > 0)
             DrawSeam(ctx);
 
