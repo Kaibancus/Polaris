@@ -79,6 +79,18 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     private const long BounceDurMs = 480;
     private System.Windows.Controls.Primitives.Popup? _slotMenu;
 
+    // ---- Saturn theme state ----
+    private bool _saturn;                 // active theme is the Saturn ring system
+    private SaturnScene.Geom _sg;         // Saturn ring/planet geometry (window-local DIP)
+    private float[] _slotG = Array.Empty<float>();   // per-slot icon draw size (Saturn rings differ)
+    private const float SaturnEnlarge = 1.10f;
+    private const float SaturnDiskEnlarge = 1.3f;
+    private const float SaturnInnerIconScale = 0.85f / SaturnEnlarge;
+    private const float SaturnOuterIconScale = 1.0f;
+    private const float RingTiltY = 0.97f;
+    private const int Ring0Cap = 14;
+    private const int Ring1Cap = 28;
+
     // ---- Stage E host integration (IMainDock) state ----
     private bool _realized;              // window created once (kept hidden between summons)
     private bool _shown;                 // logical shown state (IMainDock.IsShown)
@@ -131,6 +143,13 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         var wa = MonitorLayout.ActiveWorkArea;
         double sw = mon.Width, sh = mon.Height;
 
+        _saturn = ThemeRegistry.Get(_config.Settings.Theme).IsSaturn;
+        if (_saturn)
+        {
+            BuildSaturnLayout(mon, sw, sh);
+        }
+        else
+        {
         double icon = _config.Settings.IconSize * ThemeScale;   // EffectiveIconSize (glass)
         double gIcon = icon * GlassIconScale;
         double cellW = icon * LiquidGlassTheme.ColumnPitch;
@@ -214,6 +233,8 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
                 entry.EffectiveIconSource, entry.Name, run, img, entry));
         }
 
+        }
+
         // Magnify wave state starts at rest (scale 1, no spread).
         _waveCur = new float[_slots.Count];
         _waveOffX = new float[_slots.Count];
@@ -249,6 +270,101 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     }
 
     private static Color4 Col(byte a, byte r, byte g, byte b) => new(r / 255f, g / 255f, b / 255f, a / 255f);
+
+    /// <summary>Saturn theme layout: a screen-centred overlay sized to the ring disc,
+    /// two concentric icon rings (inner B ring + outer F ringlet) and the Direct2D
+    /// ring/planet geometry. Mirrors RadialWindow's Saturn sizing + ComputeLayout.</summary>
+    private void BuildSaturnLayout(System.Windows.Rect mon, double sw, double sh)
+    {
+        float uiScale = (float)Math.Clamp(sh / 1080.0, 1.0, 2.0);
+        float innerRadius = 140f * uiScale * SaturnEnlarge * SaturnDiskEnlarge;
+        float ringStep = 88f * uiScale * SaturnEnlarge * SaturnDiskEnlarge;
+        float icon = (float)(_config.Settings.IconSize * uiScale * SaturnEnlarge);  // EffectiveIconSize
+        float outerIcon = icon * SaturnOuterIconScale;
+        float planetR = 56f * uiScale * SaturnEnlarge * SaturnDiskEnlarge * 2.5f / 2f;
+
+        // Window size (mirror SizeToActiveContent's Saturn branch): centred square.
+        double discR = innerRadius + ringStep + outerIcon;
+        double reach = discR + outerIcon;
+        double dragHeadroom = _config.Settings.IconSize * SaturnEnlarge * 5.0;
+        double margin = 180.0 * uiScale;
+        double halfExt = reach + dragHeadroom;
+        double w = Math.Min((halfExt + margin) * 2.0, sw);
+        double h = Math.Min((halfExt + margin) * 2.0, sh);
+
+        _winW = (int)Math.Ceiling(w);
+        _winH = (int)Math.Ceiling(h);
+        _winX = (int)(mon.Left + (sw - w) / 2.0);
+        _winY = (int)(mon.Top + (sh - h) / 2.0);
+
+        float cx = (float)(w / 2.0), cy = (float)(h / 2.0);
+
+        _sg = new SaturnScene.Geom
+        {
+            Cx = cx,
+            Cy = cy,
+            InnerRadius = innerRadius,
+            RingStep = ringStep,
+            OuterRadius = innerRadius + ringStep,
+            Icon = icon,
+            OuterIcon = outerIcon,
+            PlanetR = planetR,
+            TiltY = RingTiltY,
+            DiscOpacity = (float)(1.0 - Math.Clamp(_config.Settings.PanelTransparency, 0.0, 1.0)),
+        };
+
+        _gIcon = icon;             // base draw size; per-slot size in _slotG
+        _effIcon = icon;
+        _iconRaw = (float)_config.Settings.IconSize;
+        _gearR = _effIcon * 0.30f; // unused on Saturn but keeps _gearFormat sizing valid
+        _opacity = _sg.DiscOpacity;
+
+        // Saturn pops in place for now (rings-expand summon lands in Stage 4).
+        _riseUnit = 0f;
+
+        // --- Two-ring icon layout (mirror SlotPositionsFor / RingPoint) -------
+        var apps = _config.Apps;
+        int count = apps.Count;
+        int r0 = EffectiveRing0Count(count);
+        var running = RunningAppTracker.SnapshotRunning();
+        var noTitles = new List<string>();
+        var noAumids = new HashSet<string>();
+        int ring1 = Math.Max(0, count - r0);
+        var sizes = new List<float>(count);
+        for (int i = 0; i < count; i++)
+        {
+            bool inner = i < r0;
+            float radius = inner ? innerRadius : innerRadius + ringStep;
+            int k = inner ? i : i - r0;
+            int n = inner ? r0 : ring1;
+            double angle = -Math.PI / 2 + 2 * Math.PI * k / Math.Max(1, n);
+            float sx = cx + (float)(radius * Math.Cos(angle));
+            float sy = cy + (float)(radius * Math.Sin(angle) * RingTiltY);
+
+            var entry = apps[i];
+            var img = IconExtractor.GetCached(entry.EffectiveIconSource, _iconCache);
+            bool run = RunningAppTracker.IsEntryRunning(entry, running, noTitles, noAumids);
+            _slots.Add(new IconSlot(new Vector2(sx, sy),
+                entry.EffectiveIconSource, entry.Name, run, img, entry));
+            sizes.Add(icon * (inner ? SaturnInnerIconScale : SaturnOuterIconScale));
+        }
+        _slotG = sizes.ToArray();
+    }
+
+    /// <summary>Inner-ring (resident) icon count for <paramref name="n"/> total icons
+    /// (port of RadialWindow.EffectiveRing0Count).</summary>
+    private int EffectiveRing0Count(int n)
+    {
+        if (n <= 0) return 0;
+        int userR0 = _config.Settings.Ring0Count;
+        int r0 = userR0 > 0
+            ? Math.Min(userR0, Math.Min(Ring0Cap, n))
+            : Math.Min(Ring0Cap, n);
+        if (n - r0 > Ring1Cap)
+            r0 = Math.Min(n, n - Ring1Cap);
+        return Math.Clamp(r0, 1, n);
+    }
+
 
     /// <summary>Raised-cosine fisheye falloff: peaks at <see cref="MagnifyPeak"/> under the
     /// cursor and eases to 1.0 at the support radius (EffectiveIconSize × 1.3), mirroring
@@ -388,6 +504,12 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         if (slid)
             ctx.Transform = System.Numerics.Matrix3x2.CreateTranslation(0f, riseOff);
 
+        if (_saturn)
+        {
+            SaturnScene.Draw(ctx, _sg);
+        }
+        else
+        {
         // Floating liquid-glass slab (drop shadow on, since the main dock floats above
         // the desktop rather than being flush to a screen edge).
         GlassSlab.DrawGlass(ctx, _slabX, _slabY, _slabW, _slabH, _radius, _opacity, _frost, shadowExtent: 26f);
@@ -403,6 +525,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             ctx.DrawRoundedRectangle(slab, rim, 1.4f);
 
         DrawGear(ctx);
+        }
 
         // Draw smallest-first so the magnified (focal) icon sits on top of its neighbours.
         // The dragged icon is skipped here and drawn last, lifted under the cursor.
@@ -415,7 +538,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             if (i == dragIdx)
                 continue;
             var off = new Vector2(_waveOffX[i], _waveOffY[i] - BounceOffset(i));
-            DrawIcon(ctx, _slots[i], _waveCur[i], off);
+            DrawIcon(ctx, _slots[i], _waveCur[i], off, _saturn && i < _slotG.Length ? _slotG[i] : 0f);
         }
 
         if (dragIdx >= 0 && dragIdx < _slots.Count)
@@ -423,7 +546,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             // The dragged icon follows the cursor, lifted 1.12x with no spread.
             var s = _slots[dragIdx];
             var moved = new IconSlot(new Vector2(_dragX, _dragY), s.IconKey, s.Name, s.Running, s.Image, s.Entry);
-            DrawIcon(ctx, moved, 1.12f, Vector2.Zero);
+            DrawIcon(ctx, moved, 1.12f, Vector2.Zero, _saturn && dragIdx < _slotG.Length ? _slotG[dragIdx] : 0f);
         }
         else if (_hover >= 0 && _hover < _slots.Count)
             DrawHoverLabel(ctx, _slots[_hover], _waveCur[_hover]);
@@ -460,9 +583,9 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             ctx.DrawText("\u2699", _gearFormat, rect, fg);
     }
 
-    private void DrawIcon(ID2D1DeviceContext ctx, in IconSlot s, float scale, Vector2 off)
+    private void DrawIcon(ID2D1DeviceContext ctx, in IconSlot s, float scale, Vector2 off, float gIcon = 0f)
     {
-        float g = _gIcon, half = g / 2f, cx = s.Center.X + off.X, cy = s.Center.Y + off.Y;
+        float g = gIcon > 0f ? gIcon : _gIcon, half = g / 2f, cx = s.Center.X + off.X, cy = s.Center.Y + off.Y;
         var center = new Vector2(cx, cy);
         var wave = Matrix3x2.CreateScale(scale, scale, center);
 
@@ -471,7 +594,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         // under the icon and scaled with the wave so a magnified running app keeps its
         // ring. Static (no breathe/sweep) to stay idle-friendly, matching the GPU side
         // dock. A few concentric strokes of falling alpha fake the Gaussian halo.
-        if (s.Running)
+        if (s.Running && !_saturn)
         {
             ctx.Transform = wave;
             float box = g * 0.9f, rr = box * 0.24f;
