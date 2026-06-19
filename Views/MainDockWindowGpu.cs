@@ -90,7 +90,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     private const double OuterOrbitRatio = 1.3941;
     // Baked Saturn layers (full-window): static rings+disc+planet body, the
     // spinning polar disc (rotated each frame), and the static planet shading.
-    private ID2D1Bitmap1? _satStatic, _satDisc, _satShade;
+    private ID2D1Bitmap1? _satStatic, _satDisc, _satShade, _satInner, _satOuter;
     private const float SaturnEnlarge = 1.10f;
     private const float SaturnDiskEnlarge = 1.3f;
     private const float SaturnInnerIconScale = 0.85f / SaturnEnlarge;
@@ -389,6 +389,12 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         _satStatic = RenderToBitmap(ctx, pw, ph, bdpi, c => SaturnScene.DrawStaticScene(c, _sg));
         _satDisc = RenderToBitmap(ctx, pw, ph, bdpi, c => SaturnScene.DrawPlanetDisc(c, _sg));
         _satShade = RenderToBitmap(ctx, pw, ph, bdpi, c => SaturnScene.DrawPlanetShade(c, _sg));
+        // Revolution cues are static apart from their orbit angle, so bake each
+        // orbit group flat (no tilt, orbit=0) once and re-revolve the bitmap per
+        // frame — same trick as the planet disc, keeps the cues near-free.
+        var gFlat = _sg; gFlat.TiltY = 1f;
+        _satInner = RenderToBitmap(ctx, pw, ph, bdpi, c => { SaturnScene.DrawInnerCues(c, gFlat, 0, System.Numerics.Matrix3x2.Identity); c.Transform = System.Numerics.Matrix3x2.Identity; });
+        _satOuter = RenderToBitmap(ctx, pw, ph, bdpi, c => { SaturnScene.DrawOuterCues(c, gFlat, 0, System.Numerics.Matrix3x2.Identity); c.Transform = System.Numerics.Matrix3x2.Identity; });
     }
 
     private ID2D1Bitmap1 RenderToBitmap(ID2D1DeviceContext ctx, int pw, int ph, float dpi, Action<ID2D1DeviceContext> draw)
@@ -411,6 +417,8 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         _satStatic?.Dispose(); _satStatic = null;
         _satDisc?.Dispose(); _satDisc = null;
         _satShade?.Dispose(); _satShade = null;
+        _satInner?.Dispose(); _satInner = null;
+        _satOuter?.Dispose(); _satOuter = null;
     }
 
 
@@ -569,16 +577,32 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
 
         if (_saturn)
         {
+            var satBase = slid
+                ? System.Numerics.Matrix3x2.CreateTranslation(0f, riseOff)
+                : System.Numerics.Matrix3x2.Identity;
             if (_satStatic != null)
                 ctx.DrawBitmap(_satStatic, 1f, InterpolationMode.Linear);
+            // Re-revolve the baked cue bitmaps: Rotate(orbit) * Scale(1,tilt) * base.
+            var cen = new Vector2(_sg.Cx, _sg.Cy);
+            if (_satInner != null)
+            {
+                ctx.Transform = System.Numerics.Matrix3x2.CreateRotation((float)(_innerAngle * Math.PI / 180.0), cen)
+                    * System.Numerics.Matrix3x2.CreateScale(1f, _sg.TiltY, cen) * satBase;
+                ctx.DrawBitmap(_satInner, 1f, InterpolationMode.Linear);
+            }
+            if (_satOuter != null)
+            {
+                ctx.Transform = System.Numerics.Matrix3x2.CreateRotation((float)(_outerAngle * Math.PI / 180.0), cen)
+                    * System.Numerics.Matrix3x2.CreateScale(1f, _sg.TiltY, cen) * satBase;
+                ctx.DrawBitmap(_satOuter, 1f, InterpolationMode.Linear);
+            }
+            ctx.Transform = satBase;
             if (_satDisc != null)
             {
                 ctx.Transform = System.Numerics.Matrix3x2.CreateRotation(
-                    (float)(_spinAngle * Math.PI / 180.0), new Vector2(_sg.Cx, _sg.Cy));
+                    (float)(_spinAngle * Math.PI / 180.0), new Vector2(_sg.Cx, _sg.Cy)) * satBase;
                 ctx.DrawBitmap(_satDisc, 1f, InterpolationMode.Linear);
-                ctx.Transform = slid
-                    ? System.Numerics.Matrix3x2.CreateTranslation(0f, riseOff)
-                    : System.Numerics.Matrix3x2.Identity;
+                ctx.Transform = satBase;
             }
             if (_satShade != null)
                 ctx.DrawBitmap(_satShade, 1f, InterpolationMode.Linear);

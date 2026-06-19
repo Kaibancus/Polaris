@@ -339,6 +339,224 @@ internal static class SaturnScene
     }
 
     // ===================================================================
+    //  Dynamic ring-revolution cues (port of AddShimmer/AddSpoke/AddRingBlob/
+    //  AddMoon). A continuously rotating axisymmetric ring looks identical
+    //  frame-to-frame, so the revolution is conveyed by *local* features that
+    //  sweep along the ring orbits at the inner/outer rates: bright shimmer
+    //  arcs, Voyager-style radial spokes, particle density clumps and faint
+    //  shepherd moons. Drawn vector each frame (NOT cached) — a few dozen
+    //  primitives, so cheap — between the static ring bitmap and the planet.
+    // ===================================================================
+
+    private static readonly Rgb PaleB = new(0xCB, 0xBC, 0x95);
+    private static readonly Rgb TanA = new(0xAA, 0x8E, 0x64);
+    private static readonly Rgb SpokeCol = new(0x14, 0x10, 0x08);
+
+    /// <param name="innerAngle">inner-orbit (B ring) revolution, degrees.</param>
+    /// <param name="outerAngle">outer-orbit (A/F ring) revolution, degrees.</param>
+    /// <param name="baseXform">scene transform to compose under (slide offset / identity).</param>
+    public static void DrawDynamic(ID2D1DeviceContext ctx, in Geom g,
+        double innerAngle, double outerAngle, Matrix3x2 baseXform)
+    {
+        DrawInnerCues(ctx, g, innerAngle, baseXform);
+        DrawOuterCues(ctx, g, outerAngle, baseXform);
+        ctx.Transform = baseXform;
+    }
+
+    /// <summary>Inner B-ring revolution cues (shimmer, spokes, density clumps),
+    /// revolved by <paramref name="orbitDeg"/>. Authored relative to the centre so
+    /// the dock can bake this flat (TiltY=1, orbit=0) into a bitmap and re-revolve it.</summary>
+    public static void DrawInnerCues(ID2D1DeviceContext ctx, in Geom g, double orbitDeg, Matrix3x2 baseXform)
+    {
+        bool extra = Polaris.Services.RenderProfile.SaturnExtraDetail;
+        float rB = g.InnerRadius;
+        float rF = g.InnerRadius + g.RingStep;
+        float planetR = g.PlanetR;
+
+        const double Rplanet = 1.000;
+        const double RBin = 1.526, RBmid = 1.739, RBout = 1.951;
+        const double RF = 2.324;
+        double kIn = (rB - planetR) / (RBmid - Rplanet);
+        double bOutPx = planetR + (RBout - Rplanet) * kIn;
+        double kOut = (rF - bOutPx) / (RF - RBout);
+        double MapR(double rr) => rr <= RBout ? planetR + (rr - Rplanet) * kIn : bOutPx + (rr - RBout) * kOut;
+        double rBinPx = MapR(RBin), rBoutPx = MapR(RBout);
+
+        AddShimmer(ctx, g, rB, orbitDeg, PaleB, 0, 1.0, 0.30, baseXform);
+        AddSpoke(ctx, g, rBinPx, rBoutPx, orbitDeg, 24, 7.0, 0.30, baseXform);
+        AddSpoke(ctx, g, rBinPx, rBoutPx, orbitDeg, 256, 6.0, 0.26, baseXform);
+        AddRingBlob(ctx, g, rB, orbitDeg, 60, rB * 0.16, rB * 0.05, Lighten(PaleB, 0.30), 0.22, baseXform);
+        if (extra)
+        {
+            AddShimmer(ctx, g, rB, orbitDeg, PaleB, 168, 0.55, 0.24, baseXform);
+            AddSpoke(ctx, g, rBinPx, rBoutPx, orbitDeg, 140, 5.0, 0.18, baseXform);
+            AddRingBlob(ctx, g, rB, orbitDeg, 300, rB * 0.12, rB * 0.04, Lighten(PaleB, 0.26), 0.16, baseXform);
+        }
+    }
+
+    /// <summary>Outer A/F-ring revolution cues (shimmer, spokes, clumps, shepherd
+    /// moons), revolved by <paramref name="orbitDeg"/>. Bakeable like the inner cues.</summary>
+    public static void DrawOuterCues(ID2D1DeviceContext ctx, in Geom g, double orbitDeg, Matrix3x2 baseXform)
+    {
+        if (g.OuterRadius <= g.InnerRadius + 0.5f) return;
+        bool extra = Polaris.Services.RenderProfile.SaturnExtraDetail;
+        float icon = g.Icon;
+        float rB = g.InnerRadius;
+        float rF = g.InnerRadius + g.RingStep;
+        float planetR = g.PlanetR;
+
+        const double Rplanet = 1.000;
+        const double RBmid = 1.739, RBout = 1.951;
+        const double RAin = 2.025, REncke = 2.214, RAout = 2.269;
+        const double RF = 2.324;
+        double kIn = (rB - planetR) / (RBmid - Rplanet);
+        double bOutPx = planetR + (RBout - Rplanet) * kIn;
+        double kOut = (rF - bOutPx) / (RF - RBout);
+        double MapR(double rr) => rr <= RBout ? planetR + (rr - Rplanet) * kIn : bOutPx + (rr - RBout) * kOut;
+
+        double rAmid = (MapR(RAin) + MapR(RAout)) / 2;
+        double rAin = MapR(RAin), rAout = MapR(RAout);
+        AddShimmer(ctx, g, rAmid, orbitDeg, PaleB, 0, 0.8, 0.26, baseXform);
+        AddSpoke(ctx, g, rAin, rAout, orbitDeg, 80, 6.0, 0.20, baseXform);
+        AddRingBlob(ctx, g, rAmid, orbitDeg, 150, rAmid * 0.13, rAmid * 0.04, Lighten(TanA, 0.30), 0.16, baseXform);
+        if (extra)
+        {
+            AddShimmer(ctx, g, rAmid, orbitDeg, PaleB, 200, 0.45, 0.22, baseXform);
+            AddSpoke(ctx, g, rAin, rAout, orbitDeg, 290, 5.0, 0.14, baseXform);
+            AddRingBlob(ctx, g, rAmid, orbitDeg, 40, rAmid * 0.10, rAmid * 0.035, Lighten(TanA, 0.26), 0.12, baseXform);
+        }
+
+        double moonD = Math.Max(2.2, icon * 0.05);
+        AddMoon(ctx, g, MapR(REncke), orbitDeg, 18, moonD, baseXform);              // Pan (Encke gap)
+        AddMoon(ctx, g, MapR(RAout) - icon * 0.05, orbitDeg, 104, moonD * 0.85, baseXform); // Daphnis
+        AddMoon(ctx, g, MapR(RAout) + icon * 0.09, orbitDeg, 200, moonD * 1.05, baseXform); // Atlas
+        AddMoon(ctx, g, rF - icon * 0.10, orbitDeg, 286, moonD * 1.15, baseXform);  // Prometheus
+        AddMoon(ctx, g, rF + icon * 0.10, orbitDeg, 330, moonD, baseXform);         // Pandora
+    }
+
+    /// <summary>Builds the transform that revolves a feature authored at angle 0
+    /// (point (Cx+radius, Cy)) by <paramref name="totalDeg"/> about the centre, then
+    /// squashes the circular orbit into the tilted ring ellipse.</summary>
+    private static Matrix3x2 RevolveXform(in Geom g, double totalDeg, Matrix3x2 baseXform)
+    {
+        var c = new Vector2(g.Cx, g.Cy);
+        return Matrix3x2.CreateRotation((float)(totalDeg * Math.PI / 180.0), c)
+             * Matrix3x2.CreateScale(1f, g.TiltY, c)
+             * baseXform;
+    }
+
+    /// <summary>Soft radial-gradient ellipse on the ring at <paramref name="totalDeg"/>,
+    /// revolved and tilted into the ring plane.</summary>
+    private static void AddRevolvedEllipse(ID2D1DeviceContext ctx, in Geom g, double radius,
+        double totalDeg, double rx, double ry, Color4 core, Color4 fade, Matrix3x2 baseXform)
+    {
+        ctx.Transform = RevolveXform(g, totalDeg, baseXform);
+        var ec = new Vector2(g.Cx + (float)radius, g.Cy);
+        var ell = new Ellipse(ec, (float)rx, (float)ry);
+        using var stops = Stops(ctx, (0f, core), (1f, fade));
+        using var brush = ctx.CreateRadialGradientBrush(
+            new RadialGradientBrushProperties { Center = ec, RadiusX = (float)rx, RadiusY = (float)ry }, stops);
+        ctx.FillEllipse(ell, brush);
+    }
+
+    /// <summary>Shimmer arc: a bright crest flanked by a cool leading and warm
+    /// trailing half for a subtle Doppler hint.</summary>
+    private static void AddShimmer(ID2D1DeviceContext ctx, in Geom g, double radius,
+        double orbitDeg, Rgb baseColor, double phaseDeg, double intensity, double arcSpan,
+        Matrix3x2 baseXform)
+    {
+        double rx = Math.Max(26, radius * arcSpan);
+        double ry = Math.Max(5, radius * 0.06);
+        double a = orbitDeg + phaseDeg;
+        // Warm trailing half.
+        AddRevolvedEllipse(ctx, g, radius, a - 6, rx * 0.9, ry,
+            A(Lighten(WarmShift(baseColor), 0.45), 0.18 * intensity), A(baseColor, 0), baseXform);
+        // Cool leading half.
+        AddRevolvedEllipse(ctx, g, radius, a + 6, rx * 0.9, ry,
+            A(Lighten(CoolShift(baseColor), 0.55), 0.21 * intensity), A(baseColor, 0), baseXform);
+        // Bright central crest.
+        AddRevolvedEllipse(ctx, g, radius, a, rx, ry,
+            A(Lighten(baseColor, 0.70), 0.35 * intensity), A(baseColor, 0), baseXform);
+    }
+
+    /// <summary>Tangentially-elongated brighter "density clump" that revolves with the ring.</summary>
+    private static void AddRingBlob(ID2D1DeviceContext ctx, in Geom g, double radius,
+        double orbitDeg, double phaseDeg, double rx, double ry, Rgb color, double alpha,
+        Matrix3x2 baseXform)
+    {
+        AddRevolvedEllipse(ctx, g, radius, orbitDeg + phaseDeg, rx, ry,
+            A(color, alpha), A(color, 0), baseXform);
+    }
+
+    /// <summary>Voyager/Cassini-style radial spoke: a soft dark wedge spanning
+    /// <paramref name="rInner"/>..<paramref name="rOuter"/>, revolving with the ring.
+    /// Soft angular flanks come from a tangential gradient brush (no per-frame blur).</summary>
+    private static void AddSpoke(ID2D1DeviceContext ctx, in Geom g, double rInner, double rOuter,
+        double orbitDeg, double phaseDeg, double widthDeg, double alpha, Matrix3x2 baseXform)
+    {
+        if (rOuter <= rInner) return;
+        double half = widthDeg * Math.PI / 360.0;
+        float cx = g.Cx, cy = g.Cy;
+        Vector2 P(double rr, double ang) =>
+            new((float)(cx + Math.Cos(ang) * rr), (float)(cy + Math.Sin(ang) * rr));
+
+        using var geo = ctx.Factory.CreatePathGeometry();
+        using (var sink = geo.Open())
+        {
+            sink.BeginFigure(P(rInner, -half * 0.7), FigureBegin.Filled);
+            sink.AddLine(P(rOuter, -half));
+            sink.AddLine(P(rOuter, half));
+            sink.AddLine(P(rInner, half * 0.7));
+            sink.EndFigure(FigureEnd.Closed);
+            sink.Close();
+        }
+
+        // Tangential dark-in-the-middle gradient across the wedge's angular width.
+        double hh = rOuter * Math.Sin(half);
+        var start = new Vector2(g.Cx, (float)(g.Cy - hh));
+        var end = new Vector2(g.Cx, (float)(g.Cy + hh));
+        ctx.Transform = RevolveXform(g, orbitDeg + phaseDeg, baseXform);
+        using var stops = Stops(ctx,
+            (0f, A(SpokeCol, 0)), (0.5f, A(SpokeCol, alpha)), (1f, A(SpokeCol, 0)));
+        using var brush = ctx.CreateLinearGradientBrush(
+            new LinearGradientBrushProperties { StartPoint = start, EndPoint = end }, stops);
+        ctx.FillGeometry(geo, brush);
+    }
+
+    /// <summary>Faint shepherd-moon point: a tiny bright core wrapped in a soft glow,
+    /// revolved with the ring and tilted into the ring plane.</summary>
+    private static void AddMoon(ID2D1DeviceContext ctx, in Geom g, double radius,
+        double orbitDeg, double phaseDeg, double dia, Matrix3x2 baseXform)
+    {
+        ctx.Transform = RevolveXform(g, orbitDeg + phaseDeg, baseXform);
+        var center = new Vector2(g.Cx + (float)radius, g.Cy);
+        // Soft glow halo.
+        var halo = new Ellipse(center, (float)(dia * 1.9), (float)(dia * 1.9));
+        using (var stops = Stops(ctx,
+            (0f, new Color4(1f, 0xF6 / 255f, 0xE2 / 255f, 95f / 255f)),
+            (1f, new Color4(1f, 0xF6 / 255f, 0xE2 / 255f, 0f))))
+        using (var brush = ctx.CreateRadialGradientBrush(
+            new RadialGradientBrushProperties { Center = center, RadiusX = (float)(dia * 1.9), RadiusY = (float)(dia * 1.9) }, stops))
+            ctx.FillEllipse(halo, brush);
+        // Bright core.
+        var core = new Ellipse(center, (float)(dia * 0.5), (float)(dia * 0.5));
+        using (var br = ctx.CreateSolidColorBrush(new Color4(1f, 0xFB / 255f, 0xF0 / 255f, 200f / 255f)))
+            ctx.FillEllipse(core, br);
+    }
+
+    /// <summary>Shifts a colour slightly toward cool (blue) for the leading edge.</summary>
+    private static Rgb CoolShift(Rgb c) => new(
+        (byte)Math.Clamp(c.R - 14, 0, 255),
+        (byte)Math.Clamp(c.G - 4, 0, 255),
+        (byte)Math.Clamp(c.B + 18, 0, 255));
+
+    /// <summary>Shifts a colour slightly toward warm (amber) for the trailing edge.</summary>
+    private static Rgb WarmShift(Rgb c) => new(
+        (byte)Math.Clamp(c.R + 16, 0, 255),
+        (byte)Math.Clamp(c.G + 4, 0, 255),
+        (byte)Math.Clamp(c.B - 16, 0, 255));
+
+    // ===================================================================
     //  Centre planet (port of DrawCenterButton), split for bitmap caching:
     //   - DrawPlanetBody:  static lit-sphere gradient (bottom layer)
     //   - DrawPlanetDisc:  rotating gas-giant bands + wind streaks + hexagon
