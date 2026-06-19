@@ -309,9 +309,25 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
             ? (lastPinnedEnd + firstRunStart) / 2.0
             : runAreaMain - seam / 2.0;
 
-        double glassPad = gIcon * 0.30;
-        double bodyCross = slabCross;
-        double bodyCrossLen = (colCenterCross - bodyCross) + gIcon / 2.0 + glassPad;
+        // Dark (Saturn) and clear-glass docks use different body geometry, matching
+        // SideDockWindow.Layout: the dark slab bleeds its edge-side off-screen
+        // (darkBleed) so the feathered black sits flush against the screen edge (no
+        // floating gap), and reserves a larger interior pad (darkPad). The clear-glass
+        // dock hugs the column with a modest glassPad and no bleed.
+        bool darkSlab = ThemeRegistry.Get(_config.Settings.Theme).IsSaturn;
+        double bodyCross, bodyCrossLen;
+        if (darkSlab)
+        {
+            double darkBleed = gIcon * 0.4, darkPad = gIcon * 0.5;
+            bodyCross = slabCross - darkBleed;
+            bodyCrossLen = (colCenterCross - bodyCross) + gIcon / 2.0 + darkPad;
+        }
+        else
+        {
+            double glassPad = gIcon * 0.30;
+            bodyCross = slabCross;
+            bodyCrossLen = (colCenterCross - bodyCross) + gIcon / 2.0 + glassPad;
+        }
         _trayRadius = (float)(iconSize * uiScale * 0.42);
         _opacity = (float)(1.0 - Math.Clamp(_config.Settings.PanelTransparency, 0.0, 1.0));
         _frost = (float)GlassChrome.FrostStrengthFor(_config.Settings.PanelTransparency);
