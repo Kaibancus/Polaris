@@ -1092,8 +1092,8 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         float rRoot = _gearR * 0.50f;    // valley radius between teeth
         float rHole = _gearR * 0.24f;    // hollow hub
         double step = 2 * Math.PI / teeth;
-        double tipHalf = step * 0.13;    // narrow flat tip
-        double rootHalf = step * 0.26;   // wider base, so each tooth is a trapezoid
+        double tipHalf = step * 0.17;    // narrow flat tip
+        double rootHalf = step * 0.33;   // wider base, so each tooth is a trapezoid
         Vector2 Polar(double a, float rad) =>
             new Vector2(_gearC.X + (float)(Math.Cos(a) * rad), _gearC.Y + (float)(Math.Sin(a) * rad));
         var pts = new List<Vector2>(teeth * 4);
@@ -1114,7 +1114,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
                 sink.EndFigure(FigureEnd.Closed);
                 sink.Close();
             }
-            float sw = MathF.Max(2f, _gearR * 0.12f);
+            float sw = MathF.Max(2.4f, _gearR * 0.16f);
             using var stroke = ctx.CreateSolidColorBrush(Col(0xF2, 0xF2, 0xF7, 0xFF));
             ctx.DrawGeometry(cog, stroke, sw);
             ctx.DrawEllipse(new Vortice.Direct2D1.Ellipse(_gearC, rHole, rHole), stroke, sw);
