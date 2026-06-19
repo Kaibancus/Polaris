@@ -1703,9 +1703,12 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     private int ProspectiveResidentCount(int src, float lx, float dropY)
     {
         int resident = DockSync.ResidentCount(_config);
+        // Classify by the resident-row Y band only (parity with WPF GlassRowAt /
+        // ProspectiveResidentCount, which keys off the row and not the X): an icon
+        // dragged within the resident rows promotes even if it drifts horizontally
+        // past the framed icons, and only leaving the rows vertically demotes it.
         bool inResident = _hasResident
-            && dropY >= _resY && dropY <= _resY + _resH
-            && lx >= _resX && lx <= _resX + _resW;
+            && dropY >= _resY && dropY <= _resY + _resH;
         bool wasResident = src >= 0 && src < resident;
         if (inResident && !wasResident && resident < DockSync.MaxResidentCount)
             return resident + 1;
@@ -2104,8 +2107,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             float dropY = _scrollable ? ly + (float)_glassScroll : ly;
             insertIdx = ComputeGridInsertIndex(lx, dropY);
             intoInner = _hasResident
-                && dropY >= _resY && dropY <= _resY + _resH
-                && lx >= _resX && lx <= _resX + _resW;
+                && dropY >= _resY && dropY <= _resY + _resH;
         }
 
         bool changed = false;
