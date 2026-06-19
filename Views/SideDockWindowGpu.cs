@@ -1313,6 +1313,17 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     /// <summary>Collects running-but-unpinned taskbar apps for the running strip.
     /// A lightweight version of the WPF dock's filter (excludes pinned apps by full
     /// path / file name) — enough for the spike's visual parity.</summary>
+    // A pinned launcher whose running window is a separate helper process (not
+    // matched to the pinned exe by path or name) lists its helper exe file name(s)
+    // here, so the helper window is folded into the launcher tile instead of showing
+    // as a separate running app. Keyed on the pinned launcher's exe file name.
+    // Mirrors SideDockWindow.LauncherHelperExeNames.
+    private static readonly Dictionary<string, string[]> LauncherHelperExeNames =
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["steam.exe"] = new[] { "steamwebhelper.exe" },
+        };
+
     private List<RunItem> CollectRunning(IReadOnlyList<AppEntry> pinned, out int overflow)
     {
         overflow = 0;
@@ -1322,14 +1333,29 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
             var excludePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var excludeNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var excludeAumids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var excludeTitles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            void AddLauncherHelpers(string exePath)
+            {
+                string launcher;
+                try { launcher = System.IO.Path.GetFileName(exePath); }
+                catch { return; }
+                if (!string.IsNullOrWhiteSpace(launcher) && LauncherHelperExeNames.TryGetValue(launcher, out var helpers))
+                    foreach (var h in helpers) excludeNames.Add(h);
+            }
             void AddPathAndName(string p)
             {
                 try { excludePaths.Add(System.IO.Path.GetFullPath(p)); } catch { excludePaths.Add(p); }
                 try { var fn = System.IO.Path.GetFileName(p); if (!string.IsNullOrWhiteSpace(fn)) excludeNames.Add(fn); }
                 catch { /* unreadable path */ }
+                AddLauncherHelpers(p);
             }
             foreach (var a in pinned)
             {
+                // Path-protected apps (UU加速器) expose no usable path/AUMID for their
+                // running window, so also exclude any running window whose TITLE equals
+                // a resident pin's display name (parity with WPF excludeTitles).
+                if (!string.IsNullOrWhiteSpace(a.Name))
+                    excludeTitles.Add(a.Name);
                 if (string.IsNullOrWhiteSpace(a.Path))
                     continue;
                 // Mirror the WPF dock: resolve each pinned app's launcher AUMID and
@@ -1387,6 +1413,10 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
                     }
                 }
                 if (inPinnedFolder)
+                    continue;
+                // Title fallback for path-protected apps whose running window carries
+                // no usable path/AUMID (parity with WPF excludeTitles).
+                if (!string.IsNullOrWhiteSpace(ta.Title) && excludeTitles.Contains(ta.Title))
                     continue;
                 filtered.Add(ta);
             }
