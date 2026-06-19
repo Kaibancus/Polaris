@@ -225,11 +225,11 @@ public partial class App : Application
         ConfigStore.Save(_config);
 
         // Pick the main-dock implementation. The GPU (DirectComposition + Direct2D)
-        // liquid-glass dock is opt-in behind POLARIS_GPU_MAINDOCK=1; the WPF dock
-        // stays the default. Both implement IMainDock so the host wiring is identical.
-        _panel = Environment.GetEnvironmentVariable("POLARIS_GPU_MAINDOCK") == "1"
-            ? new Polaris.Views.MainDockWindowGpu(_config)
-            : new RadialWindow(_config, Persist);
+        // liquid-glass dock is now the DEFAULT; set POLARIS_GPU_MAINDOCK=0 to fall
+        // back to the WPF dock. Both implement IMainDock so the host wiring is identical.
+        _panel = Environment.GetEnvironmentVariable("POLARIS_GPU_MAINDOCK") == "0"
+            ? new RadialWindow(_config, Persist)
+            : new Polaris.Views.MainDockWindowGpu(_config);
         _panel.RequestOpenSettings += OpenSettings;
         _panel.Realize();   // realise once (stays shown, fully transparent) to avoid show/hide flicker
 
