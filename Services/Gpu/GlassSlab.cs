@@ -81,6 +81,33 @@ internal static class GlassSlab
                 new RoundedRectangle { Rect = new Rect(x + w * 0.07f, cy - h * 0.275f, w * 0.86f, h * 0.55f), RadiusX = w * 0.43f, RadiusY = w * 0.43f },
                 bloom);
 
+        // Diagonal glare streak (parity with WPF GlassChrome glare): a faint tilted
+        // bright bar across the upper body. Clipped to the slab's axis-aligned bounds
+        // (small corner radius → negligible corner bleed) and kept soft via a
+        // centre-bright→transparent gradient so it reads as a glassy light streak.
+        ctx.PushAxisAlignedClip(new Rect(x, y, w, h), AntialiasMode.PerPrimitive);
+        {
+            float bandCx = x + w * 0.34f;
+            float bandHalf = w * 0.13f;
+            var saved = ctx.Transform;
+            ctx.Transform = System.Numerics.Matrix3x2.CreateRotation(-0.32f, new Vector2(bandCx, cy)) * saved;
+            using (var glare = ctx.CreateLinearGradientBrush(
+                new LinearGradientBrushProperties { StartPoint = new Vector2(bandCx - bandHalf, y), EndPoint = new Vector2(bandCx + bandHalf, y) },
+                Stops(ctx, (0f, C(0x00, 0xFF, 0xFF, 0xFF, op)), (0.5f, C(0x24, 0xFF, 0xFF, 0xFF, op)), (1f, C(0x00, 0xFF, 0xFF, 0xFF, op)))))
+                ctx.FillRectangle(new Rect(bandCx - bandHalf, y - h * 0.3f, bandHalf * 2f, h * 1.6f), glare);
+            ctx.Transform = saved;
+        }
+        ctx.PopAxisAlignedClip();
+
+        // Inner refraction glow (parity with WPF inner refraction ring): a soft bright
+        // stroke just inside the rim, like a liquid lens bending light at the edge.
+        float ir = Math.Max(0f, radius - 2f);
+        var innerRing = new RoundedRectangle { Rect = new Rect(x + 2.2f, y + 2.2f, w - 4.4f, h - 4.4f), RadiusX = ir, RadiusY = ir };
+        using (var iglow = ctx.CreateLinearGradientBrush(
+            new LinearGradientBrushProperties { StartPoint = new Vector2(x, y), EndPoint = new Vector2(x + w, y + h) },
+            Stops(ctx, (0f, C(0x55, 0xFF, 0xFF, 0xFF, op)), (0.5f, C(0x14, 0xDC, 0xEC, 0xFF, op)), (1f, C(0x40, 0xFF, 0xFF, 0xFF, op)))))
+            ctx.DrawRoundedRectangle(innerRing, iglow, 2.2f);
+
         // Luminous rim hairline.
         using (var rim = ctx.CreateLinearGradientBrush(
             new LinearGradientBrushProperties { StartPoint = new Vector2(x, y), EndPoint = new Vector2(x + w, y + h) },
