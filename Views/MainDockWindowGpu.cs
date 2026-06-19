@@ -86,7 +86,9 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     private float[] _slotG = Array.Empty<float>();   // per-slot icon draw size (Saturn rings differ)
     private double _spinAngle, _innerAngle, _outerAngle, _saturnTime;   // Saturn animation phases
     private long _saturnLastMs;
+    private double _spinRate = 1.0;          // Saturn: planet spin multiplier (eased toward hover target)
     private const double PlanetSpinSeconds = 60.0;
+    private const double PlanetHoverSpinMul = 20.0;   // hover over the planet -> ~3s period (WPF StartSpin(3.0))
     private const double InnerOrbitRatio = 0.9023;
     private const double OuterOrbitRatio = 1.3941;
     // Baked Saturn layers (full-window): static rings+disc+planet body, the
@@ -475,6 +477,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         }
 
         bool active = false;
+        bool planetHover = false;
         Vector2 cur = default;
         if (!_dragging && GetCursorPos(out POINT p))
         {
@@ -483,6 +486,8 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             for (int i = 0; i < _slots.Count; i++)
                 nearest = Math.Min(nearest, Vector2.Distance(_slots[i].Center, cur));
             active = nearest <= _effIcon * 1.3f;
+            if (_saturn)
+                planetHover = Vector2.Distance(cur, _gearC) <= _planetHitR;
         }
 
         // Focal icon = nearest to the cursor; it stays anchored while neighbours
@@ -547,7 +552,11 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             double dt = _saturnLastMs == 0 ? 0.016 : Math.Clamp((now - _saturnLastMs) / 1000.0, 0, 0.1);
             _saturnLastMs = now;
             _saturnTime += dt;
-            _spinAngle = (_spinAngle + dt * 360.0 / PlanetSpinSeconds) % 360.0;
+            // Ease the spin multiplier toward the hover target (accelerate on planet
+            // hover, coast back to ambient on leave) — tau ~0.4s for a smooth ramp.
+            double spinTarget = planetHover ? PlanetHoverSpinMul : 1.0;
+            _spinRate += (spinTarget - _spinRate) * (1.0 - Math.Exp(-dt / 0.4));
+            _spinAngle = (_spinAngle + _spinRate * dt * 360.0 / PlanetSpinSeconds) % 360.0;
             _innerAngle = (_innerAngle + dt * 360.0 / (PlanetSpinSeconds * InnerOrbitRatio)) % 360.0;
             _outerAngle = (_outerAngle + dt * 360.0 / (PlanetSpinSeconds * OuterOrbitRatio)) % 360.0;
         }
