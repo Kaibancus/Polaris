@@ -103,6 +103,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     private bool _dragging;              // press has crossed the drag threshold
     private float _pressX, _pressY;      // mouse-down point (window-local DIP)
     private float _dragX, _dragY;        // current drag point (window-local DIP)
+    private long _dragArrangeLastMs;     // last drag-reflow advance (time-based ease)
     private int _bounceIdx = -1;         // slot playing the launch hop, or -1
     private long _bounceStart;
     private const long BounceDurMs = 480;
@@ -207,6 +208,15 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     private void Build() => Build(true);
 
     private void Build(bool visible)
+    {
+        LayoutContent();
+        CreateWindowAndHost(visible);
+    }
+
+    /// <summary>Recomputes slot positions, running state, grid/scroll geometry and the
+    /// window rect from the current config — everything except creating the OS window and
+    /// GPU host. Reused by the initial build and by in-place reorder relayouts.</summary>
+    private void LayoutContent()
     {
         _slots.Clear();
         // Reset scroll/resident state; the glass branch recomputes, Saturn leaves off.
@@ -380,7 +390,14 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         _waveOffX = new float[_slots.Count];
         _waveOffY = new float[_slots.Count];
         Array.Fill(_waveCur, 1f);
+    }
 
+    /// <summary>Creates the layered OS window and the DirectComposition/D2D host, builds the
+    /// text formats and Saturn cache, then starts the render timer. Split from
+    /// <see cref="LayoutContent"/> so a reorder can relayout without recreating the host
+    /// (recreating it would blank/flash the screen for a frame).</summary>
+    private void CreateWindowAndHost(bool visible)
+    {
         _hwnd = CreateWindow(_winW, _winH);
         s_instances[_hwnd] = this;
         _dpi = DpiScale();
@@ -691,17 +708,9 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         float push = _iconRaw * SpreadPush;
         float maxDelta = 0f;
 
-        // While dragging, neighbours reflow to make room: compute the prospective
-        // reading-order arrangement and steer each non-dragged icon toward the slot
-        // it would occupy, so icons part around the dragged one (WPF push-aside).
-        int[]? dragArrange = null;
-        if (!_saturn && _dragging && _pressIdx >= 0 && _pressIdx < _slots.Count)
-        {
-            float dropY = _scrollable ? _dragY + (float)_glassScroll : _dragY;
-            int dtgt = ComputeGridTarget(_dragX, dropY, _pressIdx);
-            dragArrange = GridArrangement(_pressIdx, dtgt);
-        }
-
+        // While dragging, neighbours reflow to make room. The arrangement + offset ease
+        // are driven by AdvanceDragArrange (time-based, also called from WM_MOUSEMOVE so the
+        // gap keeps pace with the cursor); the hover-spread below only runs when not dragging.
         for (int i = 0; i < _slots.Count; i++)
         {
             float d = active ? Vector2.Distance(_slots[i].Center, cur) : 0f;
@@ -710,14 +719,11 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             _waveCur[i] = c;
             maxDelta = Math.Max(maxDelta, Math.Abs(target - c));
 
+            if (_dragging)
+                continue;   // offsets owned by AdvanceDragArrange while dragging
+
             float tx = 0f, ty = 0f;
-            if (dragArrange != null && i != _pressIdx)
-            {
-                // Slide toward the slot this icon takes in the make-room arrangement.
-                Vector2 v = _slots[dragArrange[i]].Center - _slots[i].Center;
-                tx = v.X; ty = v.Y;
-            }
-            else if (active && focal >= 0 && i != focal && focalF > 0.001f)
+            if (active && focal >= 0 && i != focal && focalF > 0.001f)
             {
                 Vector2 v = _slots[i].Center - fp;
                 float vd = v.Length();
@@ -732,6 +738,8 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             maxDelta = Math.Max(maxDelta, Math.Abs(tx - _waveOffX[i]));
             maxDelta = Math.Max(maxDelta, Math.Abs(ty - _waveOffY[i]));
         }
+        if (_dragging)
+            maxDelta = Math.Max(maxDelta, AdvanceDragArrange());
 
         // Hover only when the pointer is genuinely over an icon's cell.
         _hover = active && focal >= 0 && best <= _effIcon * 0.85f ? focal : -1;
@@ -1190,7 +1198,11 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     {
         float g = gIcon > 0f ? gIcon : _gIcon, half = g / 2f, cx = s.Center.X + off.X, cy = s.Center.Y + off.Y;
         var center = new Vector2(cx, cy);
-        var wave = Matrix3x2.CreateScale(scale, scale, center);
+        // Compose every icon transform with the ambient context transform (the glass
+        // summon slide + bottom-anchored squash/stretch) so the icons ride the slab as it
+        // rises, instead of snapping to their docked positions while the slab slides.
+        var baseTf = ctx.Transform;
+        var wave = Matrix3x2.CreateScale(scale, scale, center) * baseTf;
 
         // Running indicator: a soft pulsing glow halo plus a flowing sweep border — a
         // rounded-rect stroke painted with a linear gradient whose axis rotates
@@ -1199,7 +1211,10 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         if (s.Running)
         {
             ctx.Transform = wave;
-            float box = g * 0.9f, rr = box * 0.24f;
+            // Frame the icon at its full nominal size (parity with the WPF RunningBorder,
+            // a Border of Width/Height = IconSize) so the flow ring sits clear of the
+            // glyph rather than cutting into it.
+            float box = g, rr = box * 0.18f;
             var rect = new Vortice.Mathematics.Rect(cx - box / 2f, cy - box / 2f, box, box);
             var rrect = new RoundedRectangle { Rect = rect, RadiusX = rr, RadiusY = rr };
             // Pulsing cool halo (a few falling-alpha strokes fake the blurred glow).
@@ -1222,7 +1237,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             using (var sweep = ctx.CreateLinearGradientBrush(
                 new LinearGradientBrushProperties { StartPoint = new Vector2(cx - dir.X, cy - dir.Y), EndPoint = new Vector2(cx + dir.X, cy + dir.Y) }, stops))
                 ctx.DrawRoundedRectangle(rrect, sweep, 2.5f);
-            ctx.Transform = Matrix3x2.Identity;
+            ctx.Transform = baseTf;
         }
 
         var bmp = GetBitmap(ctx, s.IconKey, s.Image);
@@ -1233,7 +1248,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         ctx.Transform = Matrix3x2.CreateScale(dstSz / Math.Max(1f, bs.Width), dstSz / Math.Max(1f, bs.Height))
                       * Matrix3x2.CreateTranslation(dstX, dstY) * wave;
         ctx.DrawBitmap(bmp, 1f, InterpolationMode.HighQualityCubic);
-        ctx.Transform = Matrix3x2.Identity;
+        ctx.Transform = baseTf;
 
         // New-message attention dot: a small pulsing red disc hugging the icon's
         // lower-left corner when any of this app's windows is flashing for attention
@@ -1433,10 +1448,14 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
                 if (!_dragging && (MathF.Abs(lx - _pressX) + MathF.Abs(ly - _pressY)) > _gIcon * 0.35f)
                 {
                     _dragging = true;
+                    _dragArrangeLastMs = Environment.TickCount64;   // seed the time-based reflow ease
                     GlassDragActiveChanged?.Invoke(true);   // keep the side dock shown as a drop target
                 }
                 if (_dragging)
+                {
+                    AdvanceDragArrange();   // keep neighbours in step with the cursor between ticks
                     Render();
+                }
                 return true;
             }
             case WM_MOUSEWHEEL:
@@ -1584,6 +1603,50 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         return slotOfEntry;
     }
 
+    /// <summary>Time-based neighbour reflow while dragging: recomputes the grid insertion
+    /// target from the live cursor and eases each non-dragged icon's offset toward the slot
+    /// it would occupy once the dragged icon is reinserted there (mirrors WPF GridArrangement
+    /// "make room"). Called from both Tick and WM_MOUSEMOVE so the gap keeps pace with the
+    /// pointer instead of stuttering on the 16ms timer. Returns the max per-frame delta so
+    /// the caller can keep rendering until the reflow settles.</summary>
+    private float AdvanceDragArrange()
+    {
+        if (_waveOffX.Length == 0)
+            return 0f;
+        long now = Environment.TickCount64;
+        float dt = (now - _dragArrangeLastMs) / 1000f;
+        _dragArrangeLastMs = now;
+        if (dt <= 0f)
+            return 0f;
+        if (dt > 0.1f) dt = 0.1f;   // clamp after a stall so we don't snap
+        float k = 1f - MathF.Exp(-dt / 0.045f);   // tau 45ms
+
+        // Where each icon should sit while the dragged icon hovers its target cell.
+        int[]? arr = null;
+        if (_dragging && !_saturn && _pressIdx >= 0 && _pressIdx < _slots.Count)
+        {
+            float dropY = _scrollable ? _dragY + (float)_glassScroll : _dragY;
+            int tgt = ComputeGridTarget(_dragX, dropY, _pressIdx);
+            arr = GridArrangement(_pressIdx, tgt);
+        }
+
+        float maxDelta = 0f;
+        for (int i = 0; i < _slots.Count && i < _waveOffX.Length; i++)
+        {
+            float tx = 0f, ty = 0f;
+            if (arr != null && i != _pressIdx && i < arr.Length)
+            {
+                Vector2 d = _slots[arr[i]].Center - _slots[i].Center;
+                tx = d.X; ty = d.Y;
+            }
+            _waveOffX[i] += (tx - _waveOffX[i]) * k;
+            _waveOffY[i] += (ty - _waveOffY[i]) * k;
+            maxDelta = Math.Max(maxDelta, Math.Abs(tx - _waveOffX[i]));
+            maxDelta = Math.Max(maxDelta, Math.Abs(ty - _waveOffY[i]));
+        }
+        return maxDelta;
+    }
+
     private void ClickSlot(int idx)
     {
         var s = _slots[idx];
@@ -1639,7 +1702,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             var e = _config.Apps[idx];
             _config.Apps.RemoveAt(idx);
             _config.Apps.Insert(tgt, e);
-            PersistAndRebuild();
+            PersistAndRelayout();
         }
         else
         {
@@ -1700,6 +1763,39 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         catch (Exception ex) { Log.Warn("MainDockGpu", "persist failed: " + ex.Message); }
         AppsChanged?.Invoke();   // let the host re-mirror the resident region
         Rebuild();
+    }
+
+    /// <summary>Persists the config then relayouts in place (no window/host recreation) so
+    /// a reorder drop does not flash. Used for reorders, where the icon count — and hence
+    /// the window geometry — is unchanged.</summary>
+    private void PersistAndRelayout()
+    {
+        try
+        {
+            DockSync.MirrorResidentToLeft(_config);
+            ConfigStore.Save(_config);
+        }
+        catch (Exception ex) { Log.Warn("MainDockGpu", "persist failed: " + ex.Message); }
+        AppsChanged?.Invoke();
+        RelayoutInPlace();
+    }
+
+    /// <summary>Re-lays out the slots after a reorder while keeping the existing window and
+    /// GPU host alive, so the dock does not flash. Falls back to a full <see cref="Rebuild"/>
+    /// if the host is gone or the window rect would change.</summary>
+    private void RelayoutInPlace()
+    {
+        if (_host == null || _hwnd == IntPtr.Zero) { Rebuild(); return; }
+        int ow = _winW, oh = _winH, ox = _winX, oy = _winY;
+        _pressIdx = -1; _dragging = false; _hover = -1;
+        LayoutContent();
+        if (_winW != ow || _winH != oh || _winX != ox || _winY != oy)
+        {
+            Rebuild();   // geometry changed → the swapchain/window must be recreated
+            return;
+        }
+        if (_saturn) { _saturnLastMs = 0; }   // cache is window-sized, unchanged; just resume
+        Render();
     }
 
     private void Rebuild()
