@@ -70,9 +70,10 @@ internal sealed class MainDockWindowGpu : IDisposable
         public readonly Vector2 Center;       // window-local DIP
         public readonly string IconKey;
         public readonly string Name;
+        public readonly bool Running;
         public readonly BitmapSource? Image;
-        public IconSlot(Vector2 c, string key, string name, BitmapSource? img)
-        { Center = c; IconKey = key; Name = name; Image = img; }
+        public IconSlot(Vector2 c, string key, string name, bool running, BitmapSource? img)
+        { Center = c; IconKey = key; Name = name; Running = running; Image = img; }
     }
 
     public MainDockWindowGpu(AppConfig config) => _config = config;
@@ -153,12 +154,16 @@ internal sealed class MainDockWindowGpu : IDisposable
         int count = Math.Min(apps.Count, LiquidGlassTheme.Capacity);
         var slots = ((LiquidGlassTheme)ThemeRegistry.Get("liquidglass"))
             .ComputeSlots(count, new Point(centerX, dockCenterY), _config.Settings, out _);
+        var running = RunningAppTracker.SnapshotRunning();
+        var noTitles = new List<string>();
+        var noAumids = new HashSet<string>();
         for (int i = 0; i < count && i < slots.Count; i++)
         {
             var entry = apps[i];
             var img = IconExtractor.GetCached(entry.EffectiveIconSource, _iconCache);
+            bool run = RunningAppTracker.IsEntryRunning(entry, running, noTitles, noAumids);
             _slots.Add(new IconSlot(new Vector2((float)slots[i].X, (float)slots[i].Y),
-                entry.EffectiveIconSource, entry.Name, img));
+                entry.EffectiveIconSource, entry.Name, run, img));
         }
 
         // Magnify wave state starts at rest (scale 1, no spread).
@@ -315,10 +320,31 @@ internal sealed class MainDockWindowGpu : IDisposable
     private void DrawIcon(ID2D1DeviceContext ctx, in IconSlot s, float scale, Vector2 off)
     {
         float g = _gIcon, half = g / 2f, cx = s.Center.X + off.X, cy = s.Center.Y + off.Y;
+        var center = new Vector2(cx, cy);
+        var wave = Matrix3x2.CreateScale(scale, scale, center);
+
+        // Running indicator (glass theme): a soft blue glow border hugging the icon,
+        // mirroring RadialIcon's RunningGlowBorder (#3FA9FF, rounded, blurred). Drawn
+        // under the icon and scaled with the wave so a magnified running app keeps its
+        // ring. Static (no breathe/sweep) to stay idle-friendly, matching the GPU side
+        // dock. A few concentric strokes of falling alpha fake the Gaussian halo.
+        if (s.Running)
+        {
+            ctx.Transform = wave;
+            float box = g * 0.9f, rr = box * 0.24f;
+            var rect = new Vortice.Mathematics.Rect(cx - box / 2f, cy - box / 2f, box, box);
+            (float w, byte a)[] ring = { (7f, 0x1E), (4.5f, 0x3A), (2.4f, 0x80) };
+            foreach (var (sw, a) in ring)
+                using (var br = ctx.CreateSolidColorBrush(Col(a, 0x3F, 0xA9, 0xFF)))
+                    ctx.DrawRoundedRectangle(new RoundedRectangle { Rect = rect, RadiusX = rr, RadiusY = rr }, br, sw);
+            using (var hot = ctx.CreateSolidColorBrush(Col(0xC8, 0x6F, 0xD3, 0xFF)))
+                ctx.DrawRoundedRectangle(new RoundedRectangle { Rect = rect, RadiusX = rr, RadiusY = rr }, hot, 1.2f);
+            ctx.Transform = Matrix3x2.Identity;
+        }
+
         var bmp = GetBitmap(ctx, s.IconKey, s.Image);
         if (bmp == null)
             return;
-        var wave = Matrix3x2.CreateScale(scale, scale, new Vector2(cx, cy));
         float pad = g * 0.06f, dstX = cx - half + pad, dstY = cy - half + pad, dstSz = g - pad * 2;
         var bs = bmp.Size;
         ctx.Transform = Matrix3x2.CreateScale(dstSz / Math.Max(1f, bs.Width), dstSz / Math.Max(1f, bs.Height))
