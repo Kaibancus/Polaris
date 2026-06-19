@@ -119,6 +119,25 @@ internal sealed class NotchClockWindowGpu : INotchClock
         blur.SetInput(0, glowSrc, true);
         blur.StandardDeviation = 14f / 3f;
 
+        // Warm tan glow behind the gold text (parity with WPF DropShadowEffect:
+        // colour CBBC95, blur 7, depth 0, opacity 0.45) so the clock reads as part
+        // of the Saturn ring palette rather than flat gold. Built here (outside the
+        // main BeginDraw) as its own command list, then composited under the gold.
+        string txt = DateTime.Now.ToString("M月d日 ddd  H:mm", CultureInfo.GetCultureInfo("zh-CN"));
+        var rect = new Rect(ox, oy, PlateWidth, PlateHeight);
+        var textGlowSrc = ctx.CreateCommandList();
+        ctx.Target = textGlowSrc;
+        ctx.BeginDraw();
+        using (var tan = ctx.CreateSolidColorBrush(C(0x73, 0xCB, 0xBC, 0x95)))   // 0x73 ≈ 0.45 opacity
+            ctx.DrawText(txt, _format, rect, tan);
+        ctx.EndDraw();
+        textGlowSrc.Close();
+        _host.SetDefaultTarget();
+
+        using var textGlow = new Vortice.Direct2D1.Effects.GaussianBlur(ctx);
+        textGlow.SetInput(0, textGlowSrc, true);
+        textGlow.StandardDeviation = 7f / 3f;
+
         ctx.BeginDraw();
         ctx.Clear(C(0, 0, 0, 0));
         ctx.DrawImage(blur, new Vector2(0, 0), InterpolationMode.Linear, CompositeMode.SourceOver);
@@ -128,11 +147,11 @@ internal sealed class NotchClockWindowGpu : INotchClock
         using (var plateBrush = ctx.CreateSolidColorBrush(C(0xEE, 0x07, 0x08, 0x0B)))
             ctx.FillGeometry(plate, plateBrush);
 
-        // 3-D raised lettering: dark offset copy behind a pale-gold copy.
-        string txt = DateTime.Now.ToString("M月d日 ddd  H:mm", CultureInfo.GetCultureInfo("zh-CN"));
-        var rect = new Rect(ox, oy, PlateWidth, PlateHeight);
+        // 3-D raised lettering: dark offset copy, warm tan glow, then pale-gold copy.
         using (var dark = ctx.CreateSolidColorBrush(C(0xCD, 0x00, 0x00, 0x00)))
             ctx.DrawText(txt, _format, new Rect(rect.X + 1.3f, rect.Y + 1.6f, rect.Width, rect.Height), dark);
+        ctx.DrawImage(textGlow, new Vector2(0, 0), InterpolationMode.Linear, CompositeMode.SourceOver);
+        textGlowSrc.Dispose();
         using (var gold = ctx.CreateSolidColorBrush(C(0xFF, 0xEC, 0xDF, 0xBE)))
             ctx.DrawText(txt, _format, rect, gold);
 

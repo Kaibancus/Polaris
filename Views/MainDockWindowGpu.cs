@@ -1377,7 +1377,12 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         float w = Math.Max(48f, s.Name.Length * _labelFontPx * 0.95f + 20f);
         float lx = s.Center.X, ly = s.Center.Y + zoomedHalf + 2f + h / 2f;
         var rect = new Vortice.Mathematics.Rect(lx - w / 2f, ly - h / 2f, w, h);
-        using (var bg = ctx.CreateSolidColorBrush(Col(0x05, 0x1A, 0x1A, 0x1A)))
+        // Saturn uses the icon's built-in dark pill (Background #261A1A1A, the
+        // RadialIcon LabelChrome); glass uses a barely-there tint (#051A1A1A, the
+        // floating ShowGlassHoverLabel). Match the per-theme opacity so the saturn
+        // label reads as a solid name pill rather than near-transparent.
+        byte bgA = _saturn ? (byte)0x26 : (byte)0x05;
+        using (var bg = ctx.CreateSolidColorBrush(Col(bgA, 0x1A, 0x1A, 0x1A)))
             ctx.FillRoundedRectangle(new RoundedRectangle { Rect = rect, RadiusX = 7f, RadiusY = 7f }, bg);
         // 3-D raised lettering: dark offset copies behind the light text give the name
         // depth and a legibility halo, mirroring the WPF DropShadowEffect (black, depth
