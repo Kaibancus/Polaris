@@ -92,6 +92,12 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     private float[] _debA = Array.Empty<float>();
     private float[] _debPar = Array.Empty<float>();
     private float[] _debCur = Array.Empty<float>();
+    // Faceted-rock rendering (parity with WPF MakeRock): per-rock jittered polygon
+    // offsets (local px), a base grey value, and lazily-built device geometry/brush.
+    private Vector2[][] _debVerts = Array.Empty<Vector2[]>();
+    private byte[] _debVal = Array.Empty<byte>();
+    private ID2D1PathGeometry?[] _debGeo = Array.Empty<ID2D1PathGeometry?>();
+    private ID2D1LinearGradientBrush?[] _debBrush = Array.Empty<ID2D1LinearGradientBrush?>();
 
     // ---- Interaction (Stage E) -------------------------------------------
     private static readonly Dictionary<IntPtr, SideDockWindowGpu> s_instances = new();
@@ -610,10 +616,23 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         int bodyCount = Math.Max(20, (int)(mainSpan / (6.0 * s)));
         var dm = new List<float>(); var dc = new List<float>(); var dr = new List<float>();
         var da = new List<float>(); var dp = new List<float>();
+        var dv = new List<Vector2[]>(); var dval = new List<byte>();
         void AddRock(double main, double cross, double r, double alpha)
         {
             dm.Add((float)main); dc.Add((float)cross); dr.Add((float)r); da.Add((float)alpha);
             dp.Add((float)(0.35 + Math.Clamp(r / (7.0 * s), 0.0, 1.0) * 0.65));
+            // Jittered, faceted polygon offsets around the rock centre (mirrors MakeRock).
+            int verts = 6 + rng.Next(3);
+            var poly = new Vector2[verts];
+            double a0 = rng.NextDouble() * Math.PI * 2.0;
+            for (int k = 0; k < verts; k++)
+            {
+                double ang = a0 + (Math.PI * 2.0) * k / verts + (rng.NextDouble() - 0.5) * 0.55;
+                double rad = r * (0.58 + rng.NextDouble() * 0.42);
+                poly[k] = new Vector2((float)(Math.Cos(ang) * rad), (float)(Math.Sin(ang) * rad));
+            }
+            dv.Add(poly);
+            dval.Add((byte)(70 + rng.Next(60)));   // mid-grey base value
         }
         for (int i = 0; i < beltCount; i++)
         {
@@ -632,6 +651,21 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         }
         _debMain = dm.ToArray(); _debCross = dc.ToArray(); _debR = dr.ToArray();
         _debA = da.ToArray(); _debPar = dp.ToArray(); _debCur = new float[dm.Count];
+        _debVerts = dv.ToArray(); _debVal = dval.ToArray();
+        DisposeRockResources();
+        _debGeo = new ID2D1PathGeometry?[dm.Count];
+        _debBrush = new ID2D1LinearGradientBrush?[dm.Count];
+    }
+
+    /// <summary>Releases the lazily-built per-rock geometry and gradient brushes (the
+    /// geometry is device-independent, the brushes are device-bound — both are rebuilt
+    /// on demand after a layout/device rebuild).</summary>
+    private void DisposeRockResources()
+    {
+        foreach (var g in _debGeo) g?.Dispose();
+        foreach (var b in _debBrush) b?.Dispose();
+        _debGeo = Array.Empty<ID2D1PathGeometry?>();
+        _debBrush = Array.Empty<ID2D1LinearGradientBrush?>();
     }
 
     /// <summary>Black smoked-glass dock body for the Saturn theme: a near-opaque dark
@@ -685,7 +719,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         var geo = ctx.Factory.CreatePathGeometry();
         using (var sink = geo.Open())
         {
-            sink.BeginFigure(ToLocalV(cm - half, rootC), FigureBegin.Filled);
+            sink.BeginFigure(ToLocalV(Math.Clamp(cm - half, mainLo, mainHi), rootC), FigureBegin.Filled);
             for (int k = 0; k <= M; k++)
             {
                 float x = -1f + 2f * k / M;
@@ -696,9 +730,12 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
                 float m = cm + x * half + lean * up;
                 float edgeFac = SS((m - (mainLo + endPad)) / endRamp) * SS(((mainHi - endPad) - m) / endRamp);
                 protUp *= edgeFac;
-                sink.AddLine(ToLocalV(m, baseEdge + protUp));
+                // Clamp the tongue to the slab's main extent so it never spills past the
+                // rounded ends when the cursor sits on an edge icon (edgeFac has already
+                // tapered the height to ~0 there, so this only trims the invisible base).
+                sink.AddLine(ToLocalV(Math.Clamp(m, mainLo, mainHi), baseEdge + protUp));
             }
-            sink.AddLine(ToLocalV(cm + half, rootC));
+            sink.AddLine(ToLocalV(Math.Clamp(cm + half, mainLo, mainHi), rootC));
             sink.EndFigure(FigureEnd.Closed);
             sink.Close();
         }
@@ -731,15 +768,52 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         if (_debMain.Length == 0) return;
         double t = Environment.TickCount64 / 1000.0;
         float drift = (float)(Math.Sin(t * 2 * Math.PI / 16.0)) * _satDriftAmp;
-        using var br = ctx.CreateSolidColorBrush(Col(255, 122, 110, 96));
         for (int i = 0; i < _debMain.Length; i++)
         {
             var (lx, ly) = ToLocal(_side, _debMain[i] + drift, _debCross[i], _winW, _winH);
             Vector2 push = PopOffset(_debCur[i]);
+            var geo = _debGeo[i] ??= BuildRockGeometry(ctx, _debVerts[i]);
+            var br = _debBrush[i] ??= BuildRockBrush(ctx, _debVal[i], _debR[i]);
             br.Opacity = _debA[i] * _opacity;
-            float r = _debR[i];
-            ctx.FillEllipse(new Ellipse { Point = new Vector2(lx + push.X, ly + push.Y), RadiusX = r, RadiusY = r }, br);
+            // The faceted polygon is centred on the origin; translate it onto the rock's
+            // local position (plus the magnify-wave push) so its shading rides the bulge.
+            ctx.Transform = Matrix3x2.CreateTranslation(lx + push.X, ly + push.Y);
+            ctx.FillGeometry(geo, br);
         }
+        ctx.Transform = Matrix3x2.Identity;
+    }
+
+    /// <summary>Builds (once) a closed faceted polygon from precomputed vertex offsets.
+    /// Device-independent (factory resource), so it survives a device rebuild.</summary>
+    private ID2D1PathGeometry BuildRockGeometry(ID2D1DeviceContext ctx, Vector2[] verts)
+    {
+        var geo = ctx.Factory.CreatePathGeometry();
+        using var sink = geo.Open();
+        sink.BeginFigure(verts[0], FigureBegin.Filled);
+        for (int k = 1; k < verts.Length; k++)
+            sink.AddLine(verts[k]);
+        sink.EndFigure(FigureEnd.Closed);
+        sink.Close();
+        return geo;
+    }
+
+    /// <summary>Builds (once) a per-rock linear gradient shaded from a lit upper-left
+    /// facet through a mid tone to a dark lower-right, so each pebble reads as a 3D rock
+    /// (mirrors WPF MakeRock's gradient). Coordinates are relative to the rock centre, so
+    /// the brush rides the rock's translate transform.</summary>
+    private ID2D1LinearGradientBrush BuildRockBrush(ID2D1DeviceContext ctx, byte b, float r)
+    {
+        byte Lit(int add) => (byte)Math.Min(255, b + add);
+        byte Dark(double mul) => (byte)Math.Max(0, (int)(b * mul));
+        using var stops = ctx.CreateGradientStopCollection(new[]
+        {
+            new Vortice.Direct2D1.GradientStop { Position = 0f,    Color = new Color4(Lit(58) / 255f, Lit(54) / 255f, Lit(50) / 255f, 1f) },
+            new Vortice.Direct2D1.GradientStop { Position = 0.55f, Color = new Color4(b / 255f,       b / 255f,       Lit(6) / 255f,  1f) },
+            new Vortice.Direct2D1.GradientStop { Position = 1f,    Color = new Color4(Dark(0.32) / 255f, Dark(0.32) / 255f, Dark(0.40) / 255f, 1f) },
+        });
+        return ctx.CreateLinearGradientBrush(
+            new LinearGradientBrushProperties { StartPoint = new Vector2(-0.6f * r, -0.8f * r), EndPoint = new Vector2(0.7f * r, 0.9f * r) },
+            stops);
     }
 
     private Vector2 ToLocalV(float main, float cross)
@@ -1086,6 +1160,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         if (_anchorWin != null) { try { _anchorWin.Close(); } catch { } _anchorWin = null; _anchorEl = null; _preview = null; }
         foreach (var b in _bmpCache.Values) b?.Dispose();
         _bmpCache.Clear();
+        DisposeRockResources();
         _host?.Dispose();
         if (_hwnd != IntPtr.Zero) { s_instances.Remove(_hwnd); DestroyWindow(_hwnd); }
     }
@@ -1630,6 +1705,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         if (_hwnd != IntPtr.Zero) { DestroyWindow(_hwnd); _hwnd = IntPtr.Zero; }
         foreach (var b in _bmpCache.Values) b?.Dispose();
         _bmpCache.Clear();
+        DisposeRockResources();
         _hover = -1; _pressIdx = -1; _dragging = false;
         try { Build(); }
         catch (Exception ex) { Log.Warn("SideDockGpu", "rebuild failed: " + ex); }
