@@ -42,6 +42,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
 
     private readonly AppConfig _config;
     private IntPtr _hwnd;
+    private OleDropTarget? _oleDrop;   // OLE drop target for Explorer/desktop drags
     private CompositionHost? _host;
     private readonly Dictionary<string, ID2D1Bitmap?> _bmpCache = new();
     private readonly Dictionary<string, BitmapSource?> _iconCache = new();
@@ -414,6 +415,11 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         SetWindowPos(_hwnd, HWND_TOPMOST, px, py, pw, ph, SWP_NOACTIVATE);
         if (visible) ShowWindow(_hwnd, SW_SHOWNOACTIVATE);
         DragAcceptFiles(_hwnd, true);   // accept desktop shortcuts / files dropped to pin
+        // Also register a full OLE drop target so Explorer/desktop drags (which use the
+        // OLE IDropTarget protocol, not WM_DROPFILES) can drop files AND shell items
+        // onto the dock — parity with the WPF dock's AllowDrop. Runs on the STA UI thread.
+        _oleDrop = new OleDropTarget(_hwnd, HandleOleDrop);
+        _oleDrop.Register();
         _host = new CompositionHost(_hwnd, pw, ph, (float)(96.0 * _dpi));
 
         _dwrite = DWrite.DWriteCreateFactory<IDWriteFactory>();
@@ -2089,6 +2095,42 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             try { var e = ShortcutResolver.CreateEntry(p); if (e != null && !string.IsNullOrWhiteSpace(e.Path)) entries.Add(e); }
             catch { /* skip an unresolvable drop */ }
         }
+        InsertDroppedEntries(entries, lx, ly);
+    }
+
+    /// <summary>True when an OLE drag carries something the dock can pin (files or
+    /// shell IDList items), so the drag cursor shows the copy effect.</summary>
+    private void HandleOleDrop(List<string> files, byte[]? shellIdList, int screenX, int screenY)
+    {
+        var entries = new List<AppEntry>();
+        foreach (var f in files)
+        {
+            try { var e = ShortcutResolver.CreateEntry(f); if (e != null && !string.IsNullOrWhiteSpace(e.Path)) entries.Add(e); }
+            catch { /* skip an unresolvable drop */ }
+        }
+        // Shell-namespace items (This PC, Recycle Bin, packaged apps…) arrive as a
+        // Shell IDList Array rather than CF_HDROP (parity with WPF OnDropPanel).
+        if (shellIdList != null)
+        {
+            try { entries.AddRange(ShellNamespace.CreateEntriesFromBytes(shellIdList)); }
+            catch (Exception ex) { Log.Warn("MainDockGpu", "shell-item drop parse failed: " + ex.Message); }
+        }
+
+        // Screen pixels → window-local DIPs (icon-slot geometry space).
+        float lx = (float)(screenX / _dpi - _winX);
+        float ly = (float)(screenY / _dpi - _winY);
+        // Defer the actual insert: it may rebuild (recreate) this window, which must
+        // NOT happen while the OS is still inside the IDropTarget.Drop call. Run it
+        // once the drop returns and the OLE drag loop has unwound.
+        Dispatcher.BeginInvoke(new Action(() => InsertDroppedEntries(entries, lx, ly)),
+            DispatcherPriority.Background);
+    }
+
+    /// <summary>Shared drop core: pins each resolved entry at the grid/ring slot
+    /// nearest the window-local drop point (<paramref name="lx"/>,<paramref name="ly"/>),
+    /// growing the resident / inner-ring count when the drop lands in that region.</summary>
+    private void InsertDroppedEntries(List<AppEntry> entries, float lx, float ly)
+    {
         if (entries.Count == 0)
             return;
 
@@ -2229,6 +2271,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         ClosePreview();
         if (_hwnd != IntPtr.Zero) s_instances.Remove(_hwnd);
         DisposeSaturnCache();
+        _oleDrop?.Revoke(); _oleDrop = null;
         _host?.Dispose(); _host = null;
         _labelFormat?.Dispose(); _labelFormat = null;
         _clockFormat?.Dispose(); _clockFormat = null;
@@ -2493,6 +2536,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         foreach (var b in _bmpCache.Values) b?.Dispose();
         _bmpCache.Clear();
         DisposeSaturnCache();
+        _oleDrop?.Revoke(); _oleDrop = null;
         _host?.Dispose();
         if (_hwnd != IntPtr.Zero) { s_instances.Remove(_hwnd); DestroyWindow(_hwnd); }
     }

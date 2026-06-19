@@ -71,13 +71,21 @@ public static class ShellNamespace
     /// <summary>Builds AppEntry items from a dropped Shell IDList Array.</summary>
     public static List<AppEntry> CreateEntries(System.Windows.IDataObject data)
     {
-        var result = new List<AppEntry>();
         byte[]? bytes = data.GetData(ShellIdListFormat) switch
         {
             MemoryStream ms => ms.ToArray(),
             byte[] b => b,
             _ => null,
         };
+        return CreateEntriesFromBytes(bytes);
+    }
+
+    /// <summary>Builds AppEntry items from the raw bytes of a CFSTR_SHELLIDLIST
+    /// ("Shell IDList Array" / CIDA) blob, e.g. extracted directly from a native OLE
+    /// IDataObject. Shared with the WPF-IDataObject overload above.</summary>
+    public static List<AppEntry> CreateEntriesFromBytes(byte[]? bytes)
+    {
+        var result = new List<AppEntry>();
         if (bytes == null || bytes.Length < 8)
             return result;
 
