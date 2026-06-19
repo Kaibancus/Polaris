@@ -85,6 +85,11 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     private float _orbitAngle;            // glass orbit-light angle (deg, 36s/rev clockwise)
     private bool _anyRunning;             // any slot is running (gates the sweep/pulse)
 
+    // ---- Show/hide slide + fade (parity with WPF SideDockWindow.DoShow/DoHide) -------
+    private long _introStart;             // tick the slide/fade animation began
+    private int _introMode;               // 0=idle, 1=show (slide-in + fade-in), 2=hide (fade-out)
+    private float _introSlidePx;          // physical-px cross slide distance for the show anim
+
     // ---- Saturn dark-slab styling (black smoked dock + flame + debris + stars) ----
     private bool _saturn;
     private float _satBaseEdge, _satSlabMain, _satSlabLen, _flameFeather, _satDriftAmp;
@@ -179,7 +184,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     private void DoShow()
     {
         _shown = true;
-        if (!_realized) { Realize(); return; }   // Realize builds with _shown=true → shown
+        if (!_realized) { Realize(); StartIntro(); return; }
         // Recreate so the running strip + layout reflect the latest state, then
         // ensure the window is visible and on top.
         Rebuild();
@@ -188,6 +193,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
             ShowWindow(_hwnd, SW_SHOWNOACTIVATE);
             SetWindowPos(_hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE);
         }
+        StartIntro();
     }
 
     private void DoHide()
@@ -196,8 +202,56 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         CloseSlotMenu();
         ClosePreview();
         _hover = -1; _prevHover = -1;
-        if (_hwnd != IntPtr.Zero)
+        // Fade out on the GPU compositor, then SW_HIDE once it completes (DriveIntro
+        // mode 2). If there's no live host yet, just hide immediately.
+        if (_host != null && _hwnd != IntPtr.Zero)
+        {
+            _introStart = Environment.TickCount64;
+            _introMode = 2;
+            DriveIntro();
+        }
+        else if (_hwnd != IntPtr.Zero)
             ShowWindow(_hwnd, SW_HIDE);
+    }
+
+    /// <summary>Begins the show slide-in + fade-up: the dock eases in from its anchored
+    /// edge (QuinticEaseOut, 220ms) while fading up (120ms), mirroring WPF DoShow.</summary>
+    private void StartIntro()
+    {
+        if (!_shown || _host == null) return;
+        _introSlidePx = (_slabCrossLen + 40f) * (float)_dpi;
+        _introStart = Environment.TickCount64;
+        _introMode = 1;
+        DriveIntro();
+    }
+
+    /// <summary>Advances the show/hide slide+fade on the GPU compositor. Returns true
+    /// while an animation is live (so the caller keeps rendering). On show: slides the
+    /// visual from the edge to rest and fades up. On hide: fades out, then SW_HIDEs.</summary>
+    private bool DriveIntro()
+    {
+        if (_introMode == 0 || _host == null) return false;
+        long now = Environment.TickCount64;
+        if (_introMode == 1)
+        {
+            float st = Math.Clamp((now - _introStart) / 220f, 0f, 1f);   // slide 220ms
+            float ot = Math.Clamp((now - _introStart) / 120f, 0f, 1f);   // fade  120ms
+            float e = 1f - MathF.Pow(1f - st, 5f);                       // QuinticEaseOut
+            var off = PopOffset(-_introSlidePx * (1f - e));              // start toward the edge
+            _host.SetIntro(off.X, off.Y, ot);
+            if (st >= 1f && ot >= 1f) { _host.SetIntro(0f, 0f, 1f); _introMode = 0; return false; }
+            return true;
+        }
+        // mode 2: fade out, then hide
+        float ft = Math.Clamp((now - _introStart) / 160f, 0f, 1f);
+        _host.SetIntro(0f, 0f, 1f - ft);
+        if (ft >= 1f)
+        {
+            _introMode = 0;
+            if (_hwnd != IntPtr.Zero) ShowWindow(_hwnd, SW_HIDE);
+            return false;
+        }
+        return true;
     }
 
     public void RefreshFromConfig()
@@ -465,8 +519,16 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
 
     private void Tick()
     {
-        if (_host == null || !_shown)
+        if (_host == null)
             return;
+        // Drive the show/hide slide+fade. During the hide outro _shown is already
+        // false but the fade is still playing, so animate-and-render then bail.
+        bool intro = DriveIntro();
+        if (!_shown)
+        {
+            if (intro) Render();
+            return;
+        }
         bool vertical = _side is DockSide.Left or DockSide.Right;
         bool active = false;
         float curMain = 0;
@@ -554,7 +616,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         if (!_saturn && _shown)
             _orbitAngle = (_orbitAngle + 16f * 360f / 36000f) % 360f;
 
-        if (active || bouncing || maxDelta > 0.001f || (_saturn && _shown) || (!_saturn && _shown) || anyFlash)
+        if (active || bouncing || maxDelta > 0.001f || (_saturn && _shown) || (!_saturn && _shown) || anyFlash || intro)
             Render();
     }
 

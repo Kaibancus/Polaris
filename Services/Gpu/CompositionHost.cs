@@ -26,6 +26,7 @@ internal sealed class CompositionHost : IDisposable
     private readonly IDCompositionDevice _dcomp;
     private readonly IDCompositionTarget _target;
     private readonly IDCompositionVisual _visual;
+    private readonly IDCompositionVisual3? _visual3;
     private readonly ID2D1Factory1 _d2dFactory;
     private readonly ID2D1Device _d2dDevice;
     private readonly ID2D1DeviceContext _d2d;
@@ -105,6 +106,9 @@ internal sealed class CompositionHost : IDisposable
         _dcomp.CreateTargetForHwnd(hwnd, true, out _target).CheckError();
         _visual = _dcomp.CreateVisual();
         _visual.SetContent(_swapChain);
+        // IDCompositionVisual3 adds per-visual opacity (premultiplied content), used to
+        // fade the whole dock in/out on the GPU compositor without re-rendering.
+        try { _visual3 = _visual.QueryInterface<IDCompositionVisual3>(); } catch { _visual3 = null; }
         _target.SetRoot(_visual);
         _dcomp.Commit();
 
@@ -147,6 +151,18 @@ internal sealed class CompositionHost : IDisposable
     /// command list for the D2D <c>Shadow</c> effect).</summary>
     public void SetDefaultTarget() => _d2d.Target = _targetBitmap;
 
+    /// <summary>Slides and fades the whole dock visual on the GPU compositor: sets the
+    /// root visual's pixel offset (slide-in/out) and opacity (fade) then commits. Used
+    /// by the side dock's show/hide animation so the panel eases in from its anchored
+    /// edge instead of popping. Offsets are in physical pixels.</summary>
+    public void SetIntro(float offsetX, float offsetY, float opacity)
+    {
+        _visual.SetOffsetX(offsetX);
+        _visual.SetOffsetY(offsetY);
+        _visual3?.SetOpacity(Math.Clamp(opacity, 0f, 1f));
+        _dcomp.Commit();
+    }
+
     /// <summary>Presents the swap chain (for callers that drive BeginDraw/EndDraw
     /// themselves, e.g. an interleaved command-list shadow pass).</summary>
     public void Present() => _swapChain.Present(1, PresentFlags.None);
@@ -168,6 +184,7 @@ internal sealed class CompositionHost : IDisposable
         _d2dDevice?.Dispose();
         _d2dFactory?.Dispose();
         _visual?.Dispose();
+        _visual3?.Dispose();
         _target?.Dispose();
         _dcomp?.Dispose();
         _swapChain?.Dispose();
