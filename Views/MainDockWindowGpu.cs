@@ -56,6 +56,9 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     private float _iconRaw;                     // raw IconSize (DIP), spread unit
     private Vector2 _gearC;                     // settings-gear button centre (window-local DIP)
     private float _gearR;                        // settings-gear button radius
+    private bool _gearHover;                     // cursor is over the gear
+    private float _gearAngle;                    // gear glyph rotation (deg), spins while hovered
+    private float _gearScale = 1f;               // gear press-scale (1.0 idle, ~0.8 pressed)
     private float _planetHitR;                   // Saturn: planet click radius (settings)
     private bool _pressGear;                     // mouse-down landed on the gear
     private readonly List<IconSlot> _slots = new();
@@ -65,6 +68,8 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     private IDWriteFactory? _dwrite;
     private IDWriteTextFormat? _labelFormat;
     private IDWriteTextFormat? _gearFormat;
+    private IDWriteTextFormat? _clockFormat;   // glass top-left date/time bar
+    private int _lastClockMin = -1;            // last rendered minute (forces a clock repaint)
     private float[] _waveCur = Array.Empty<float>();   // smoothed per-icon scale
     private float[] _waveOffX = Array.Empty<float>();  // smoothed spread offset (DIP)
     private float[] _waveOffY = Array.Empty<float>();
@@ -92,6 +97,10 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     private bool _barDrag;                // a scrollbar-thumb drag is in progress
     private float _barGrabDy;             // pointer offset within the thumb at grab time
     private const uint WM_MOUSEWHEEL = 0x020A;
+
+    // ---- Resident-region frame (glass theme): rounded box around the pinned rows --
+    private bool _hasResident;            // a resident frame should be drawn
+    private float _resX, _resY, _resW, _resH, _resR;   // frame rect (grid space, window-local DIP)
 
     // ---- Saturn theme state ----
     private bool _saturn;                 // active theme is the Saturn ring system
@@ -163,8 +172,8 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     private void Build(bool visible)
     {
         _slots.Clear();
-        // Reset scroll state; the glass branch recomputes it, Saturn leaves it off.
-        _scrollable = false; _glassScrollMax = 0; _barTrackH = 0;
+        // Reset scroll/resident state; the glass branch recomputes, Saturn leaves off.
+        _scrollable = false; _glassScrollMax = 0; _barTrackH = 0; _hasResident = false;
         var mon = MonitorLayout.ActiveBounds;
         var wa = MonitorLayout.ActiveWorkArea;
         double sw = mon.Width, sh = mon.Height;
@@ -239,14 +248,23 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         // the bottom of the window so a dismissed dock is entirely off-screen.
         _riseUnit = (_winH - _slabY) + _effIcon;
 
-        // Settings gear button: a small circle tucked into the slab's top-right band.
-        _gearR = _effIcon * 0.30f;
-        _gearC = new Vector2(_slabX + _slabW - _gearR - _effIcon * 0.28f, _slabY + _gearR + _effIcon * 0.10f);
-        // Pinned-icon grid positions (window-local DIP) via the theme layout.
+        // Settings gear button: a frosted disc tucked into the slab's top-right
+        // corner (mirrors RadialWindow.Glass gear: gs = max(40, icon*0.72), inset
+        // 14px from the right edge and 6px from the top).
+        float gs = MathF.Max(40f, _effIcon * 0.72f);
+        _gearR = gs / 2f;
+        _gearC = new Vector2(_slabX + _slabW - _gearR - 14f, _slabY + 6f + _gearR);
+        // Pinned-icon grid positions (window-local DIP) via the theme layout. Match
+        // the WPF dock exactly: lay out on the resolution-scaled icon size (so the
+        // grid spacing tracks EffectiveIconSize, not the raw slider value) and tell
+        // the layout how many apps form the resident block (Ring0Count = ResidentCount)
+        // so the overflow rows start on a fresh row beneath the framed region.
         var apps = _config.Apps;
+        int residentN = DockSync.ResidentCount(_config);
+        var scaledSettings = new AppSettings { IconSize = icon, Ring0Count = residentN };
         int count = Math.Min(apps.Count, LiquidGlassTheme.Capacity);
         var slots = ((LiquidGlassTheme)ThemeRegistry.Get("liquidglass"))
-            .ComputeSlots(count, new Point(centerX, dockCenterY), _config.Settings, out _);
+            .ComputeSlots(apps.Count, new Point(centerX, dockCenterY), scaledSettings, out _);
         var running = RunningAppTracker.SnapshotRunning();
         var noTitles = new List<string>();
         var noAumids = new HashSet<string>();
@@ -260,11 +278,11 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         }
 
         // ---- Grid scrolling geometry (rows beyond VisibleRows scroll vertically) --
-        // ComputeSlots positions rows on the RAW IconSize pitch, so the scroll step
-        // and viewport must use the same units (not the *ThemeScale draw size).
+        // The grid is laid out on the scaled icon pitch (see above), so the scroll
+        // step and viewport use the same scaled units.
         _gridCenterY = (float)dockCenterY;
-        _glassCellH = _config.Settings.IconSize * LiquidGlassTheme.RowPitch;
-        int resCount = Math.Min(DockSync.ResidentCount(_config), count);
+        _glassCellH = icon * LiquidGlassTheme.RowPitch;
+        int resCount = Math.Min(residentN, count);
         int resRows = resCount > 0 ? (resCount + LiquidGlassTheme.Columns - 1) / LiquidGlassTheme.Columns : 0;
         int restRows = (Math.Max(0, count - resCount) + LiquidGlassTheme.Columns - 1) / LiquidGlassTheme.Columns;
         int totalRows = Math.Max(1, resRows + restRows);
@@ -273,12 +291,11 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         _glassScroll = Math.Clamp(_glassScroll, 0, _glassScrollMax);
         _glassScrollTarget = Math.Clamp(_glassScrollTarget, 0, _glassScrollMax);
 
-        // Clip the grid to the visible block (raw-pitch rows), with a margin under
-        // the row pitch so the adjacent scrolled-out rows stay hidden.
-        double rawIcon = _config.Settings.IconSize;
+        // Clip the grid to the visible block, with a margin under the row pitch so
+        // the adjacent scrolled-out rows stay hidden.
         double visBlockH = (LiquidGlassTheme.VisibleRows - 1) * _glassCellH;
-        double vMargin = rawIcon * 1.4;
-        double hMargin = rawIcon * 1.9;
+        double vMargin = icon * 1.4;
+        double hMargin = icon * 1.9;
         _gvX = (float)(_slabX - hMargin);
         _gvW = (float)(_slabW + hMargin * 2.0);
         _gvY = (float)(dockCenterY - visBlockH / 2.0 - vMargin);
@@ -288,10 +305,34 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         // spanning the visible block (only drawn / interactive when scrollable).
         if (_scrollable)
         {
-            _barW = (float)(rawIcon * 0.12);
-            _barX = _slabX + _slabW - _barW - (float)(rawIcon * 0.30);
-            _barTop = (float)(dockCenterY - visBlockH / 2.0 - rawIcon * 0.3);
-            _barTrackH = (float)(visBlockH + rawIcon * 0.6);
+            _barW = (float)(icon * 0.12);
+            _barX = _slabX + _slabW - _barW - (float)(icon * 0.30);
+            _barTop = (float)(dockCenterY - visBlockH / 2.0 - icon * 0.3);
+            _barTrackH = (float)(visBlockH + icon * 0.6);
+        }
+
+        // ---- Resident-region frame: a rounded box around the pinned (resident)
+        // rows, mirroring RadialWindow.DrawResidentRegionBorder. It lives in grid
+        // space (scrolls with the grid) and reads as an etched inner frame.
+        _hasResident = count > 0 && residentN > 0;
+        if (_hasResident)
+        {
+            double resCellW = icon * LiquidGlassTheme.ColumnPitch;
+            double resGridW = (LiquidGlassTheme.Columns - 1) * resCellW;
+            double y0 = dockCenterY - (LiquidGlassTheme.VisibleRows - 1) * _glassCellH / 2.0; // row 0 centre
+            double glyph = gIcon;                          // icon glyph size (icon * GlassIconScale)
+            int resClamp = Math.Min(residentN, count);
+            int residentRows = Math.Clamp((resClamp + LiquidGlassTheme.Columns - 1) / LiquidGlassTheme.Columns, 1, 2);
+            double lastRowY = y0 + (residentRows - 1) * _glassCellH;
+            double resPadY = icon * 0.56, resPadX = icon * 0.82;
+            double rTop = y0 - glyph / 2.0 - resPadY;
+            double rBottom = lastRowY + glyph / 2.0 + resPadY;
+            double half = resGridW / 2.0 + glyph / 2.0 + resPadX;
+            _resX = (float)(centerX - half);
+            _resW = (float)(half * 2.0);
+            _resY = (float)rTop;
+            _resH = (float)(rBottom - rTop);
+            _resR = (float)(icon * 0.42);
         }
 
         }
@@ -318,9 +359,14 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         _labelFormat.TextAlignment = Vortice.DirectWrite.TextAlignment.Center;
         _labelFormat.ParagraphAlignment = ParagraphAlignment.Center;
         _gearFormat = _dwrite.CreateTextFormat("Segoe UI Symbol", null, Vortice.DirectWrite.FontWeight.Normal,
-            FontStyle.Normal, Vortice.DirectWrite.FontStretch.Normal, _gearR * 1.05f, "en-us");
+            FontStyle.Normal, Vortice.DirectWrite.FontStretch.Normal, _gearR * 1.16f, "en-us");
         _gearFormat.TextAlignment = Vortice.DirectWrite.TextAlignment.Center;
         _gearFormat.ParagraphAlignment = ParagraphAlignment.Center;
+        float clockSize = (float)(Math.Max(18.0, _effIcon * 0.36) * FontScale.Current);
+        _clockFormat = _dwrite.CreateTextFormat("Segoe UI Semibold", null, Vortice.DirectWrite.FontWeight.SemiBold,
+            FontStyle.Normal, Vortice.DirectWrite.FontStretch.Normal, clockSize, "zh-cn");
+        _clockFormat.TextAlignment = Vortice.DirectWrite.TextAlignment.Leading;
+        _clockFormat.ParagraphAlignment = ParagraphAlignment.Near;
 
         if (_saturn) { _saturnLastMs = 0; BuildSaturnCache(); }
 
@@ -542,7 +588,21 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             active = inViewport && nearest <= _effIcon * 1.3f;
             if (_saturn)
                 planetHover = Vector2.Distance(cur, _gearC) <= _planetHitR;
+            else
+                _gearHover = Vector2.Distance(cur, _gearC) <= _gearR + 2f;
             cur = curGrid;
+        }
+        else
+            _gearHover = false;
+
+        // Gear button: spin the glyph while hovered (1.7s/rev, WPF parity) and coast
+        // to rest on leave; ease the press-scale toward 0.8 while held.
+        if (!_saturn)
+        {
+            if (_gearHover)
+                _gearAngle = (_gearAngle + 16f * 360f / 1700f) % 360f;
+            float gearTarget = (_pressGear && !_dragging) ? 0.8f : 1f;
+            _gearScale += (gearTarget - _gearScale) * 0.25f;
         }
 
         // Focal icon = nearest to the cursor; it stays anchored while neighbours
@@ -627,7 +687,9 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             _outerAngle = (_outerAngle + dt * 360.0 / (PlanetSpinSeconds * OuterOrbitRatio)) % 360.0;
         }
 
-        if (_saturn || animating || active || _dragging || bouncing || scrolling || _barDrag || maxDelta > 0.001f)
+        if (_saturn || animating || active || _dragging || bouncing || scrolling || _barDrag || maxDelta > 0.001f
+            || _gearHover || MathF.Abs(_gearScale - 1f) > 0.002f
+            || (!_saturn && _visible && DateTime.Now.Minute != _lastClockMin))
             Render();
     }
 
@@ -719,6 +781,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             ctx.DrawRoundedRectangle(slab, rim, 1.4f);
 
         DrawGear(ctx);
+        DrawClock(ctx);
         }
 
         // Draw smallest-first so the magnified (focal) icon sits on top of its neighbours.
@@ -731,6 +794,8 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         bool clip = _scrollable;
         if (clip)
             ctx.PushAxisAlignedClip(new Vortice.Mathematics.Rect(_gvX, _gvY, _gvW, _gvH), AntialiasMode.Aliased);
+        if (!_saturn && _hasResident)
+            DrawResidentFrame(ctx, scrollY);
         foreach (int i in order)
         {
             if (i == dragIdx)
@@ -786,20 +851,63 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
 
     private static float EaseInCubic(float t) => t * t * t;
 
-    /// <summary>Settings gear: a small blue disc with a ⚙ glyph in the slab's top
-    /// band; clicking it asks the host to open the settings window (parity with the
-    /// WPF dock's centre gear button).</summary>
+    /// <summary>Settings gear: a frosted disc with a ⚙ glyph in the slab's top-right
+    /// corner; the glyph spins while hovered and the disc dips on press, mirroring the
+    /// WPF dock gear. Clicking it asks the host to open the settings window.</summary>
     private void DrawGear(ID2D1DeviceContext ctx)
     {
         if (_gearFormat == null) return;
-        var e = new Vortice.Direct2D1.Ellipse(_gearC, _gearR, _gearR);
-        using (var fill = ctx.CreateSolidColorBrush(Col(0xCC, 0x2A, 0x6C, 0xF0)))
+        float r = _gearR * _gearScale;
+        var e = new Vortice.Direct2D1.Ellipse(_gearC, r, r);
+        // Frosted vertical gradient fill (WPF: 70FFFFFF -> 42EAF2FF -> 5CD6E4F6).
+        using (var stops = ctx.CreateGradientStopCollection(new[]
+        {
+            new Vortice.Direct2D1.GradientStop { Position = 0f,   Color = Col(0x70, 0xFF, 0xFF, 0xFF) },
+            new Vortice.Direct2D1.GradientStop { Position = 0.5f, Color = Col(0x42, 0xEA, 0xF2, 0xFF) },
+            new Vortice.Direct2D1.GradientStop { Position = 1f,   Color = Col(0x5C, 0xD6, 0xE4, 0xF6) },
+        }))
+        using (var fill = ctx.CreateLinearGradientBrush(
+            new LinearGradientBrushProperties { StartPoint = new Vector2(_gearC.X, _gearC.Y - r), EndPoint = new Vector2(_gearC.X, _gearC.Y + r) }, stops))
             ctx.FillEllipse(e, fill);
-        using (var rim = ctx.CreateSolidColorBrush(Col(0xEE, 0xFF, 0xFF, 0xFF)))
-            ctx.DrawEllipse(e, rim, 1.4f);
+        using (var rim = ctx.CreateSolidColorBrush(Col(0xFF, 0xEA, 0xF4, 0xFF)))
+            ctx.DrawEllipse(e, rim, 2.0f);
+        // ⚙ glyph: rotate while hovered, scale on press.
+        var saved = ctx.Transform;
+        ctx.Transform = Matrix3x2.CreateRotation(_gearAngle * MathF.PI / 180f, _gearC)
+            * Matrix3x2.CreateScale(_gearScale, _gearScale, _gearC) * saved;
         var rect = new Vortice.Mathematics.Rect(_gearC.X - _gearR, _gearC.Y - _gearR, _gearR * 2f, _gearR * 2f);
-        using (var fg = ctx.CreateSolidColorBrush(Col(0xFF, 0xFF, 0xFF, 0xFF)))
+        using (var fg = ctx.CreateSolidColorBrush(Col(0xF0, 0xFF, 0xFF, 0xFF)))
             ctx.DrawText("\u2699", _gearFormat, rect, fg);
+        ctx.Transform = saved;
+    }
+
+    /// <summary>Top-left date/time bar on the glass slab (parity with RadialWindow's
+    /// inline clock): frosted white gradient text with a soft dark halo, formatted
+    /// "yyyy年M月d日  ddd   H:mm" in the local culture.</summary>
+    private void DrawClock(ID2D1DeviceContext ctx)
+    {
+        if (_clockFormat == null) return;
+        _lastClockMin = DateTime.Now.Minute;
+        string text = DateTime.Now.ToString("yyyy\u5e74M\u6708d\u65e5  ddd   H:mm",
+            System.Globalization.CultureInfo.GetCultureInfo("zh-CN"));
+        float x = _slabX + 18f, y = _slabY + 14f;
+        var rect = new Vortice.Mathematics.Rect(x, y, _slabW - 36f, _effIcon * 1.2f);
+        // Dark halo: a faint offset underlay reads as a soft drop shadow.
+        using (var halo = ctx.CreateSolidColorBrush(Col(0xB0, 0x03, 0x06, 0x0E)))
+        {
+            ctx.DrawText(text, _clockFormat, new Vortice.Mathematics.Rect(x + 1f, y + 1.5f, rect.Width, rect.Height), halo);
+            ctx.DrawText(text, _clockFormat, new Vortice.Mathematics.Rect(x - 0.6f, y + 0.6f, rect.Width, rect.Height), halo);
+        }
+        // Frosted white vertical gradient (WPF: F0FFFFFF -> D2F2F6FF -> BED8E2F2).
+        using (var stops = ctx.CreateGradientStopCollection(new[]
+        {
+            new Vortice.Direct2D1.GradientStop { Position = 0f,   Color = Col(0xF0, 0xFF, 0xFF, 0xFF) },
+            new Vortice.Direct2D1.GradientStop { Position = 0.55f, Color = Col(0xD2, 0xF2, 0xF6, 0xFF) },
+            new Vortice.Direct2D1.GradientStop { Position = 1f,   Color = Col(0xBE, 0xD8, 0xE2, 0xF2) },
+        }))
+        using (var ink = ctx.CreateLinearGradientBrush(
+            new LinearGradientBrushProperties { StartPoint = new Vector2(x, y), EndPoint = new Vector2(x, y + _clockFormat.FontSize * 1.2f) }, stops))
+            ctx.DrawText(text, _clockFormat, rect, ink);
     }
 
     /// <summary>Returns the current scrollbar thumb rect (window-local DIP), or a
@@ -862,6 +970,25 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         float top = Math.Clamp(ly - _barGrabDy, _barTop, _barTop + range);
         double frac = (top - _barTop) / range;
         _glassScroll = _glassScrollTarget = frac * _glassScrollMax;
+    }
+
+    /// <summary>Etched rounded frame around the resident (pinned) rows, mirroring
+    /// RadialWindow.DrawResidentRegionBorder: ~95%-transparent fill, a soft cool
+    /// glow and a brighter cool rim. Drawn in grid space (shifted by the scroll
+    /// offset) under the icons.</summary>
+    private void DrawResidentFrame(ID2D1DeviceContext ctx, float scrollY)
+    {
+        var rect = new Vortice.Mathematics.Rect(_resX, _resY - scrollY, _resW, _resH);
+        var rr = new RoundedRectangle { Rect = rect, RadiusX = _resR, RadiusY = _resR };
+        using (var fill = ctx.CreateSolidColorBrush(Col(0x10, 0xFF, 0xFF, 0xFF)))
+            ctx.FillRoundedRectangle(rr, fill);
+        // Soft cool glow (a couple of falling-alpha strokes fake the WPF blur=4 halo).
+        using (var glow = ctx.CreateSolidColorBrush(Col(0x18, 0xBF, 0xE0, 0xFF)))
+            ctx.DrawRoundedRectangle(rr, glow, 4.5f);
+        using (var glow2 = ctx.CreateSolidColorBrush(Col(0x24, 0xBF, 0xE0, 0xFF)))
+            ctx.DrawRoundedRectangle(rr, glow2, 2.4f);
+        using (var rim = ctx.CreateSolidColorBrush(Col(0x66, 0xEA, 0xF4, 0xFF)))
+            ctx.DrawRoundedRectangle(rr, rim, 1.0f);
     }
 
     private void DrawIcon(ID2D1DeviceContext ctx, in IconSlot s, float scale, Vector2 off, float gIcon = 0f)
@@ -1233,6 +1360,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         _host?.Dispose(); _host = null;
         _labelFormat?.Dispose(); _labelFormat = null;
         _gearFormat?.Dispose(); _gearFormat = null;
+        _clockFormat?.Dispose(); _clockFormat = null;
         _dwrite?.Dispose(); _dwrite = null;
         if (_hwnd != IntPtr.Zero) { DestroyWindow(_hwnd); _hwnd = IntPtr.Zero; }
         foreach (var b in _bmpCache.Values) b?.Dispose();
@@ -1455,6 +1583,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         CloseSlotMenu();
         _labelFormat?.Dispose();
         _gearFormat?.Dispose();
+        _clockFormat?.Dispose();
         _dwrite?.Dispose();
         foreach (var b in _bmpCache.Values) b?.Dispose();
         _bmpCache.Clear();
