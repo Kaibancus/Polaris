@@ -169,6 +169,10 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     private Action? _onFaded;            // deferred callback once a dismiss finishes
     private const float SummonInSec = 0.32f;
     private const float SummonOutSec = 0.20f;
+    // Pointer travel (window-DIP, Manhattan) before a press becomes a drag. Matches
+    // the WPF dock's 6 px DragThreshold (RadialWindow.xaml.cs) so small reorder/unpin
+    // gestures aren't misread as clicks (was icon*0.35 ~ 24 px).
+    private const float DragThreshold = 6f;
     // Content fade (DComp visual opacity): summon eases the whole dock from 0->1 over
     // FadeInMs (CubicEaseOut); dismiss is a PURE fade-out 1->0 over FadeOutMs (no slide /
     // scale), mirroring the WPF RootGrid opacity animation in both themes.
@@ -1525,7 +1529,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
                 if (_pressIdx < 0)
                     return false;
                 _dragX = lx; _dragY = ly;
-                if (!_dragging && (MathF.Abs(lx - _pressX) + MathF.Abs(ly - _pressY)) > _gIcon * 0.35f)
+                if (!_dragging && (MathF.Abs(lx - _pressX) + MathF.Abs(ly - _pressY)) > DragThreshold)
                 {
                     _dragging = true;
                     _dragArrangeLastMs = Environment.TickCount64;   // seed the time-based reflow ease

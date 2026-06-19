@@ -138,7 +138,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     // surface; the magnify/render Tick idles while hidden.
     private bool _shown;
     private bool _realized;
-    private bool _byMain, _byEdge, _byDrag, _byPinned;
+    private bool _byMain, _byEdge, _byDrag, _byPinned, _byMenu;
 
     /// <summary>Raised after the dock mutates the shared main-dock app list, so the
     /// host can refresh the main dock (parity with the WPF side dock).</summary>
@@ -170,7 +170,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
 
     public void HideAll()
     {
-        _byMain = _byEdge = _byDrag = _byPinned = false;
+        _byMain = _byEdge = _byDrag = _byPinned = _byMenu = false;
         UpdateVisibility();
     }
 
@@ -184,7 +184,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         // Keep the dock shown while a hover-thumbnail preview is open (the pointer is
         // over the floating preview, which sits beyond the slab, so the edge poll would
         // otherwise retract the dock out from under it — mirrors the WPF hold reasons).
-        bool want = _byMain || _byEdge || _byDrag || _byPinned || (_preview?.IsOpen == true);
+        bool want = _byMain || _byEdge || _byDrag || _byPinned || _byMenu || (_preview?.IsOpen == true);
         if (want == _shown)
             return;
         if (want) DoShow();
@@ -296,12 +296,22 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         bool inside = lx >= _sx - m && lx <= _sx + _sw + m && ly >= _sy - m && ly <= _sy + _sh + m;
         if (!inside)
             return false;
-        if (_config.Apps.FindIndex(a => DockSync.Matches(a, entry)) < 0)
+        float main = _side is DockSide.Left or DockSide.Right ? ly : lx;
+        int dropIdx = (int)Math.Round((main - _pinnedAreaMain) / _cellMain);
+        dropIdx = Math.Clamp(dropIdx, 0, DockSync.ResidentCount(_config));
+        int existing = _config.Apps.FindIndex(a => DockSync.Matches(a, entry));
+        if (existing < 0)
         {
-            float main = _side is DockSide.Left or DockSide.Right ? ly : lx;
-            int dropIdx = (int)Math.Round((main - _pinnedAreaMain) / _cellMain);
-            dropIdx = Math.Clamp(dropIdx, 0, DockSync.ResidentCount(_config));
             DockSync.InsertResident(_config, entry, dropIdx);
+            PersistAndRebuild();
+        }
+        else if (existing >= DockSync.ResidentCount(_config))
+        {
+            // Already in the dock but not resident — promote it into the resident
+            // region at the drop position (mirrors WPF SideDockWindow.Sync.cs OnDrop).
+            var moved = _config.Apps[existing];
+            _config.Apps.RemoveAt(existing);
+            DockSync.InsertResident(_config, moved, Math.Clamp(dropIdx, 0, DockSync.ResidentCount(_config)));
             PersistAndRebuild();
         }
         return true;
@@ -1629,6 +1639,10 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         }
         else if (s.Kind == SlotKind.Run)
         {
+            // The Polaris tile (no backing window) has no meaningful menu — the WPF
+            // dock gives it none either, so skip it rather than offer a dead "close".
+            if (s.IconKey.StartsWith("polaris:", StringComparison.Ordinal))
+                return;
             if (!string.IsNullOrWhiteSpace(s.RunPath) || !string.IsNullOrWhiteSpace(s.RunAumid))
                 items.Add(("固定到常驻区", () => PinRunningSlot(s)));
             items.Add(("关闭窗口", () => CloseSlotWindows(s)));
@@ -1721,8 +1735,10 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
             VerticalOffset = py,
             PopupAnimation = System.Windows.Controls.Primitives.PopupAnimation.Fade,
         };
-        popup.Closed += (_, _) => { if (ReferenceEquals(_slotMenu, popup)) _slotMenu = null; };
+        popup.Closed += (_, _) => { if (ReferenceEquals(_slotMenu, popup)) _slotMenu = null; _byMenu = false; UpdateVisibility(); };
         _slotMenu = popup;
+        _byMenu = true;   // hold the dock open while the context menu is up (parity with WPF _menuHold)
+        UpdateVisibility();
         popup.IsOpen = true;
     }
 
