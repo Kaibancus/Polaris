@@ -668,29 +668,62 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         _debBrush = Array.Empty<ID2D1LinearGradientBrush?>();
     }
 
-    /// <summary>Black smoked-glass dock body for the Saturn theme: a near-opaque dark
-    /// slab in place of the clear liquid glass, with a wave-riding black "flame", a
-    /// faint starfield and an orbiting debris belt (mirrors SideDockWindow.Layout's
-    /// darkSlab branch). Drawn before the icons so they sit on top.</summary>
-    private void DrawSaturnBody(ID2D1DeviceContext ctx)
+    /// <summary>Pre-renders the Saturn dock's fused slab+flame silhouette into a command
+    /// list and wraps it in a GaussianBlur, mirroring the WPF "darkGroup": the slab and
+    /// the wave-riding flame are drawn as ONE opaque black mass (no per-element opacity)
+    /// and feathered by a SINGLE blur, so they share one identical soft edge instead of
+    /// reading as two stacked semi-transparent layers. The panel transparency is baked
+    /// into the source alpha once (the shapes don't visibly overlap at their feathered
+    /// edges, so no double-darkening). Runs as its own BeginDraw pass on an alternate
+    /// target, so it must be called before the main render pass. The caller draws the
+    /// returned blur and disposes both handles after EndDraw.</summary>
+    private (ID2D1CommandList src, Vortice.Direct2D1.Effects.GaussianBlur blur) PrepareSaturnSilhouette(ID2D1DeviceContext ctx)
     {
+        byte a = (byte)Math.Clamp(255f * _opacity, 0f, 255f);
         var rr = new RoundedRectangle { Rect = new Rect(_sx, _sy, _sw, _sh), RadiusX = _trayRadius, RadiusY = _trayRadius };
-        using (var body = ctx.CreateSolidColorBrush(Col((byte)(238 * _opacity), 6, 8, 12)))
-            ctx.FillRoundedRectangle(rr, body);
-        DrawSaturnFlame(ctx);
-        DrawSaturnStars(ctx);
-        DrawSaturnDebris(ctx);
-        using (var rim = ctx.CreateSolidColorBrush(Col((byte)(70 * _opacity), 60, 66, 82)))
-            ctx.DrawRoundedRectangle(rr, rim, 1f);
+        var flame = BuildFlameGeometry(ctx);
+
+        // Keep the flame tongue clear of the slab's rounded ends (WPF clips the tongue
+        // to a main-axis inset rect); the slab itself covers everything below baseEdge.
+        float m0 = _satSlabMain + _trayRadius, m1 = _satSlabMain + _satSlabLen - _trayRadius;
+        Rect tongueClip = _side is DockSide.Left or DockSide.Right
+            ? new Rect(0f, m0, _winW, Math.Max(0f, m1 - m0))
+            : new Rect(m0, 0f, Math.Max(0f, m1 - m0), _winH);
+
+        var src = ctx.CreateCommandList();
+        ctx.Target = src;
+        ctx.BeginDraw();
+        using (var black = ctx.CreateSolidColorBrush(Col(a, 6, 8, 12)))
+        {
+            ctx.FillRoundedRectangle(rr, black);
+            if (flame != null)
+            {
+                ctx.PushAxisAlignedClip(tongueClip, AntialiasMode.PerPrimitive);
+                ctx.FillGeometry(flame, black);
+                ctx.PopAxisAlignedClip();
+            }
+        }
+        ctx.EndDraw();
+        src.Close();
+        _host!.SetDefaultTarget();
+        flame?.Dispose();
+
+        var blur = new Vortice.Direct2D1.Effects.GaussianBlur(ctx);
+        blur.SetInput(0, src, true);
+        // WPF feathers the group with BlurEffect.Radius = max(12, slabFeather); a D2D
+        // Gaussian standard deviation of radius/3 matches that penumbra (same ratio the
+        // notch clock uses for its 14px halo).
+        blur.StandardDeviation = Math.Max(12f, _flameFeather) / 3f;
+        return (src, blur);
     }
 
-    /// <summary>A single black flame tongue that licks up from the dock's interior edge,
-    /// gliding to the magnification-weighted cursor centre and flickering (port of WPF
-    /// UpdateWaveBulge as a filled Direct2D path).</summary>
-    private void DrawSaturnFlame(ID2D1DeviceContext ctx)
+    /// <summary>Builds the wave-riding "black flame" tongue as a filled path (geometry
+    /// only — the fill and feather happen once in the fused silhouette pass). Returns
+    /// null when no icon is magnified. Port of WPF UpdateWaveBulge.</summary>
+    private ID2D1PathGeometry? BuildFlameGeometry(ID2D1DeviceContext ctx)
     {
         if (!_curActive)
-            return;
+            return null;
         bool vertical = _side is DockSide.Left or DockSide.Right;
         float denom = Math.Max(0.0001f, HoverScale - 1f);
         float peak = 0f, wsum = 0f, csum = 0f;
@@ -703,7 +736,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
             wsum += w; csum += w * main; if (a > peak) peak = a;
         }
         if (peak < 0.05f || wsum <= 0f)
-            return;
+            return null;
         float cm = csum / wsum;
         float baseEdge = _satBaseEdge, gIcon = _gIcon;
         float rootC = Math.Max(_bodyCross, baseEdge - _flameFeather - gIcon * 0.55f);
@@ -719,7 +752,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         var geo = ctx.Factory.CreatePathGeometry();
         using (var sink = geo.Open())
         {
-            sink.BeginFigure(ToLocalV(Math.Clamp(cm - half, mainLo, mainHi), rootC), FigureBegin.Filled);
+            sink.BeginFigure(ToLocalV(cm - half, rootC), FigureBegin.Filled);
             for (int k = 0; k <= M; k++)
             {
                 float x = -1f + 2f * k / M;
@@ -730,18 +763,13 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
                 float m = cm + x * half + lean * up;
                 float edgeFac = SS((m - (mainLo + endPad)) / endRamp) * SS(((mainHi - endPad) - m) / endRamp);
                 protUp *= edgeFac;
-                // Clamp the tongue to the slab's main extent so it never spills past the
-                // rounded ends when the cursor sits on an edge icon (edgeFac has already
-                // tapered the height to ~0 there, so this only trims the invisible base).
-                sink.AddLine(ToLocalV(Math.Clamp(m, mainLo, mainHi), baseEdge + protUp));
+                sink.AddLine(ToLocalV(m, baseEdge + protUp));
             }
-            sink.AddLine(ToLocalV(Math.Clamp(cm + half, mainLo, mainHi), rootC));
+            sink.AddLine(ToLocalV(cm + half, rootC));
             sink.EndFigure(FigureEnd.Closed);
             sink.Close();
         }
-        using (var black = ctx.CreateSolidColorBrush(Col((byte)(255 * _opacity), 4, 5, 8)))
-            ctx.FillGeometry(geo, black);
-        geo.Dispose();
+        return geo;
     }
 
     private void DrawSaturnStars(ID2D1DeviceContext ctx)
@@ -827,10 +855,24 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         if (_host == null)
             return;
         var ctx = _host.Context;
+
+        // Saturn: pre-render the fused slab+flame silhouette and blur it (its own
+        // BeginDraw pass on an alternate target, so it has to happen before the main
+        // pass). Stars/debris are drawn crisp on top in the main pass.
+        ID2D1CommandList? satSrc = null;
+        Vortice.Direct2D1.Effects.GaussianBlur? satBlur = null;
+        if (_saturn)
+            (satSrc, satBlur) = PrepareSaturnSilhouette(ctx);
+
         ctx.BeginDraw();
         ctx.Clear(Col(0, 0, 0, 0));
         if (_saturn)
-            DrawSaturnBody(ctx);
+        {
+            if (satBlur != null)
+                ctx.DrawImage(satBlur, new Vector2(0, 0), InterpolationMode.Linear, CompositeMode.SourceOver);
+            DrawSaturnStars(ctx);
+            DrawSaturnDebris(ctx);
+        }
         else
             GlassSlab.DrawGlass(ctx, _sx, _sy, _sw, _sh, _trayRadius, _opacity, _frost);
         if (_pinnedVisible > 0)
@@ -863,6 +905,8 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
             DrawHoverLabel(ctx, _slots[_hover], _waveCur[_hover]);
         ctx.EndDraw();
         _host.Present();
+        satBlur?.Dispose();
+        satSrc?.Dispose();
     }
 
     private void DrawIcon(ID2D1DeviceContext ctx, in Slot s, float scale, Vector2 pop)
