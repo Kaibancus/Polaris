@@ -79,11 +79,10 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     private long _attnLast;               // last attention poll tick (throttle to ~800ms)
     private volatile bool _attnBusy;      // an attention poll task is in flight
 
-    // ---- Running-icon flow border + glass orbit light (parity with the GPU main dock) ----
-    private float _runSweep;              // running-icon sweep gradient angle (deg, 4.2s/rev)
+    // ---- Running-icon glow pulse + glass orbit light (parity with the GPU main dock) ----
     private float _runPulse = 0.5f;       // running-icon glow pulse (0.35..0.8, 2.2s breathe)
     private float _orbitAngle;            // glass orbit-light angle (deg, 36s/rev clockwise)
-    private bool _anyRunning;             // any slot is running (gates the sweep/pulse)
+    private bool _anyRunning;             // any slot is running (gates the pulse/orbit)
 
     // ---- Show/hide slide + fade (parity with WPF SideDockWindow.DoShow/DoHide) -------
     private long _introStart;             // tick the slide/fade animation began
@@ -625,15 +624,13 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         if (anyFlash)
             _badgePulse = 1.09f + 0.09f * MathF.Sin(Environment.TickCount64 / 1000f * 2f * MathF.PI / 1.4f);
 
-        // Running-icon sweep + glow pulse: breathe the halo (2.2s) so running icons
-        // pulse in both themes; rotate the sweep gradient (4.2s/rev) for the glass
-        // flowing border. Mirrors RadialIcon RunningGlow/RunningBorder + GPU main dock.
+        // Running-icon glow pulse: breathe the running dot's halo (2.2s) in both themes
+        // (mirrors RadialIcon's UpdateRunningDot ambient pulse). The flowing border is a
+        // main-dock-only effect (WPF side dock shows only the dot, no sweep border).
         if (_anyRunning)
         {
             double rph = Environment.TickCount64 / 1000.0 * 2.0 * Math.PI / 2.2;
             _runPulse = 0.575f + 0.225f * MathF.Sin((float)rph);
-            if (!_saturn)
-                _runSweep = (_runSweep + 16f * 360f / 4200f) % 360f;
         }
         if (!_saturn && _shown)
             _orbitAngle = (_orbitAngle + 16f * 360f / 36000f) % 360f;
@@ -1079,33 +1076,6 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
 
         ctx.Transform = wave;
         var plate = new Rect(cx - half, cy - half, g, g);
-
-        // Running indicator (glass theme): a soft pulsing cool halo plus a flowing sweep
-        // border — a rounded-rect stroke painted with a linear gradient whose axis rotates
-        // (4.2s/rev), mirroring RadialIcon's RunningBorder/RunningGlow and the GPU main dock.
-        if (s.Running && !_saturn)
-        {
-            float box = g * 0.92f, rr = box * 0.24f;
-            var rrect = new RoundedRectangle { Rect = new Rect(cx - box / 2f, cy - box / 2f, box, box), RadiusX = rr, RadiusY = rr };
-            float pulse = _runPulse;
-            (float sw, byte a)[] ring = { (7f, (byte)(0x22 * pulse)), (4.5f, (byte)(0x44 * pulse)) };
-            foreach (var (sw, a) in ring)
-                using (var br = ctx.CreateSolidColorBrush(Col(a, 0x3F, 0xA9, 0xFF)))
-                    ctx.DrawRoundedRectangle(rrect, br, sw);
-            float ang = _runSweep * MathF.PI / 180f, R = box * 0.6f;
-            var dir = new Vector2(MathF.Cos(ang) * R, MathF.Sin(ang) * R);
-            using (var stops = ctx.CreateGradientStopCollection(new[]
-            {
-                new Vortice.Direct2D1.GradientStop { Position = 0f,    Color = Col(0x10, 0x3D, 0xA9, 0xFF) },
-                new Vortice.Direct2D1.GradientStop { Position = 0.28f, Color = Col(0x66, 0x57, 0xC8, 0xFF) },
-                new Vortice.Direct2D1.GradientStop { Position = 0.5f,  Color = Col(0xFF, 0x6F, 0xD3, 0xFF) },
-                new Vortice.Direct2D1.GradientStop { Position = 0.72f, Color = Col(0x66, 0x57, 0xC8, 0xFF) },
-                new Vortice.Direct2D1.GradientStop { Position = 1f,    Color = Col(0x10, 0x3D, 0xA9, 0xFF) },
-            }))
-            using (var sweep = ctx.CreateLinearGradientBrush(
-                new LinearGradientBrushProperties { StartPoint = new Vector2(cx - dir.X, cy - dir.Y), EndPoint = new Vector2(cx + dir.X, cy + dir.Y) }, stops))
-                ctx.DrawRoundedRectangle(rrect, sweep, 2.5f);
-        }
 
         if (s.Kind == SlotKind.Overflow)
         {

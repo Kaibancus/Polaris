@@ -738,9 +738,10 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             _outerAngle = (_outerAngle + dt * 360.0 / (PlanetSpinSeconds * OuterOrbitRatio)) % 360.0;
         }
 
-        // Running-icon sweep + glow pulse (glass): rotate the gradient (4.2s/rev) and
-        // breathe the halo (2.2s) so running apps show a flowing border, like the WPF dock.
-        if (!_saturn && _anyRunning)
+        // Running-icon sweep + glow pulse: rotate the gradient (4.2s/rev) and breathe the
+        // halo (2.2s) so running apps show a flowing border in BOTH themes (the WPF
+        // RadialIcon RunningBorder is not theme-gated).
+        if (_anyRunning)
         {
             _runSweep = (_runSweep + 16f * 360f / 4200f) % 360f;
             double ph = Environment.TickCount64 / 1000.0 * 2.0 * Math.PI / 2.2;
@@ -1128,10 +1129,11 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         var center = new Vector2(cx, cy);
         var wave = Matrix3x2.CreateScale(scale, scale, center);
 
-        // Running indicator (glass theme): a soft pulsing glow halo plus a flowing
-        // sweep border — a rounded-rect stroke painted with a linear gradient whose
-        // axis rotates (4.2s/rev), mirroring RadialIcon's RunningBorder/RunningGlow.
-        if (s.Running && !_saturn)
+        // Running indicator: a soft pulsing glow halo plus a flowing sweep border — a
+        // rounded-rect stroke painted with a linear gradient whose axis rotates
+        // (4.2s/rev). Shown in BOTH themes, mirroring RadialIcon's RunningBorder which
+        // is not theme-gated.
+        if (s.Running)
         {
             ctx.Transform = wave;
             float box = g * 0.9f, rr = box * 0.24f;
