@@ -120,8 +120,14 @@ internal sealed class ClickAwayWatcher
                     if (root != IntPtr.Zero)
                         GetWindowThreadProcessId(root, out pid);
                     // A click resolving to no window, or to a window owned by
-                    // another process, is outside every Polaris surface.
-                    if (root == IntPtr.Zero || pid != _ownPid)
+                    // another process, is outside every Polaris surface. A click on
+                    // one of our own windows still counts as "outside" when it lands
+                    // in the transparent headroom around the dock (the GPU docks are
+                    // a large HWND whose padding hit-tests as HTTRANSPARENT), so the
+                    // dock dismisses when the user clicks just outside the visible slab.
+                    bool ownSurface = root != IntPtr.Zero && pid == _ownPid
+                        && SendMessage(root, WM_NCHITTEST, IntPtr.Zero, MakeLParam(px, py)) != (IntPtr)HTTRANSPARENT;
+                    if (!ownSurface)
                         ClickedOutside?.Invoke();   // non-blocking: handler marshals to UI
                 }
             }
@@ -137,6 +143,18 @@ internal sealed class ClickAwayWatcher
     private const uint LLMHF_INJECTED = 0x00000001;
     private const uint WM_QUIT = 0x0012;
     private const uint GA_ROOT = 2;
+    private const uint WM_NCHITTEST = 0x0084;
+    private const int HTTRANSPARENT = -1;
+    private const uint SMTO_ABORTIFHUNG = 0x0002;
+
+    private static IntPtr MakeLParam(int x, int y) => (IntPtr)((y << 16) | (x & 0xFFFF));
+
+    private static IntPtr SendMessage(IntPtr hwnd, uint msg, IntPtr w, IntPtr l)
+    {
+        // Short timeout so a busy UI thread never stalls the mouse hook.
+        return SendMessageTimeout(hwnd, msg, w, l, SMTO_ABORTIFHUNG, 60, out var res) == IntPtr.Zero
+            ? IntPtr.Zero : res;
+    }
 
     private delegate IntPtr LowLevelMouseProc(int nCode, IntPtr wParam, IntPtr lParam);
 
@@ -166,6 +184,9 @@ internal sealed class ClickAwayWatcher
 
     [DllImport("user32.dll")]
     private static extern IntPtr WindowFromPoint(POINT pt);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam, uint flags, uint timeoutMs, out IntPtr result);
 
     [DllImport("user32.dll")]
     private static extern IntPtr GetAncestor(IntPtr hwnd, uint gaFlags);
