@@ -83,6 +83,14 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     private bool _saturn;                 // active theme is the Saturn ring system
     private SaturnScene.Geom _sg;         // Saturn ring/planet geometry (window-local DIP)
     private float[] _slotG = Array.Empty<float>();   // per-slot icon draw size (Saturn rings differ)
+    private double _spinAngle, _innerAngle, _outerAngle, _saturnTime;   // Saturn animation phases
+    private long _saturnLastMs;
+    private const double PlanetSpinSeconds = 60.0;
+    private const double InnerOrbitRatio = 0.9023;
+    private const double OuterOrbitRatio = 1.3941;
+    // Baked Saturn layers (full-window): static rings+disc+planet body, the
+    // spinning polar disc (rotated each frame), and the static planet shading.
+    private ID2D1Bitmap1? _satStatic, _satDisc, _satShade;
     private const float SaturnEnlarge = 1.10f;
     private const float SaturnDiskEnlarge = 1.3f;
     private const float SaturnInnerIconScale = 0.85f / SaturnEnlarge;
@@ -261,6 +269,8 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         _gearFormat.TextAlignment = Vortice.DirectWrite.TextAlignment.Center;
         _gearFormat.ParagraphAlignment = ParagraphAlignment.Center;
 
+        if (_saturn) { _saturnLastMs = 0; BuildSaturnCache(); }
+
         Render();
 
         _timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(16) };
@@ -363,6 +373,44 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         if (n - r0 > Ring1Cap)
             r0 = Math.Min(n, n - Ring1Cap);
         return Math.Clamp(r0, 1, n);
+    }
+
+    /// <summary>Bakes the static Saturn layers into full-window target bitmaps so
+    /// only the cheap spin (a single rotated DrawBitmap) and twinkle redraw each
+    /// frame — mirroring the WPF BitmapCache layering that kept the spinning dock
+    /// from re-tessellating hundreds of vector shapes every frame.</summary>
+    private void BuildSaturnCache()
+    {
+        if (_host == null) return;
+        DisposeSaturnCache();
+        var ctx = _host.Context;
+        int pw = (int)Math.Ceiling(_winW * _dpi), ph = (int)Math.Ceiling(_winH * _dpi);
+        float bdpi = (float)(96.0 * _dpi);
+        _satStatic = RenderToBitmap(ctx, pw, ph, bdpi, c => SaturnScene.DrawStaticScene(c, _sg));
+        _satDisc = RenderToBitmap(ctx, pw, ph, bdpi, c => SaturnScene.DrawPlanetDisc(c, _sg));
+        _satShade = RenderToBitmap(ctx, pw, ph, bdpi, c => SaturnScene.DrawPlanetShade(c, _sg));
+    }
+
+    private ID2D1Bitmap1 RenderToBitmap(ID2D1DeviceContext ctx, int pw, int ph, float dpi, Action<ID2D1DeviceContext> draw)
+    {
+        var props = new BitmapProperties1(
+            new Vortice.DCommon.PixelFormat(Vortice.DXGI.Format.B8G8R8A8_UNorm, Vortice.DCommon.AlphaMode.Premultiplied),
+            dpi, dpi, BitmapOptions.Target);
+        var bmp = ctx.CreateBitmap(new Vortice.Mathematics.SizeI(pw, ph), IntPtr.Zero, 0, props);
+        ctx.Target = bmp;
+        ctx.BeginDraw();
+        ctx.Clear(new Color4(0, 0, 0, 0));
+        draw(ctx);
+        ctx.EndDraw();
+        _host!.SetDefaultTarget();
+        return bmp;
+    }
+
+    private void DisposeSaturnCache()
+    {
+        _satStatic?.Dispose(); _satStatic = null;
+        _satDisc?.Dispose(); _satDisc = null;
+        _satShade?.Dispose(); _satShade = null;
     }
 
 
@@ -468,7 +516,22 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
 
         bool bouncing = _bounceIdx >= 0 && (Environment.TickCount64 - _bounceStart) <= BounceDurMs;
         if (!bouncing) _bounceIdx = -1;
-        if (animating || active || _dragging || bouncing || maxDelta > 0.001f)
+
+        // Saturn ambient: advance the planet spin, ring revolutions and twinkle
+        // clock and re-render every tick while shown (matches the WPF perpetual
+        // idle spin/orbit). The scene is GPU-drawn so the per-frame cost is cheap.
+        if (_saturn && _visible)
+        {
+            long now = Environment.TickCount64;
+            double dt = _saturnLastMs == 0 ? 0.016 : Math.Clamp((now - _saturnLastMs) / 1000.0, 0, 0.1);
+            _saturnLastMs = now;
+            _saturnTime += dt;
+            _spinAngle = (_spinAngle + dt * 360.0 / PlanetSpinSeconds) % 360.0;
+            _innerAngle = (_innerAngle + dt * 360.0 / (PlanetSpinSeconds * InnerOrbitRatio)) % 360.0;
+            _outerAngle = (_outerAngle + dt * 360.0 / (PlanetSpinSeconds * OuterOrbitRatio)) % 360.0;
+        }
+
+        if (_saturn || animating || active || _dragging || bouncing || maxDelta > 0.001f)
             Render();
     }
 
@@ -506,7 +569,20 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
 
         if (_saturn)
         {
-            SaturnScene.Draw(ctx, _sg);
+            if (_satStatic != null)
+                ctx.DrawBitmap(_satStatic, 1f, InterpolationMode.Linear);
+            if (_satDisc != null)
+            {
+                ctx.Transform = System.Numerics.Matrix3x2.CreateRotation(
+                    (float)(_spinAngle * Math.PI / 180.0), new Vector2(_sg.Cx, _sg.Cy));
+                ctx.DrawBitmap(_satDisc, 1f, InterpolationMode.Linear);
+                ctx.Transform = slid
+                    ? System.Numerics.Matrix3x2.CreateTranslation(0f, riseOff)
+                    : System.Numerics.Matrix3x2.Identity;
+            }
+            if (_satShade != null)
+                ctx.DrawBitmap(_satShade, 1f, InterpolationMode.Linear);
+            SaturnScene.DrawTwinkle(ctx, _sg, _saturnTime);
         }
         else
         {
@@ -911,6 +987,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         _timer?.Stop();
         CloseSlotMenu();
         if (_hwnd != IntPtr.Zero) s_instances.Remove(_hwnd);
+        DisposeSaturnCache();
         _host?.Dispose(); _host = null;
         _labelFormat?.Dispose(); _labelFormat = null;
         _gearFormat?.Dispose(); _gearFormat = null;
@@ -1139,6 +1216,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         _dwrite?.Dispose();
         foreach (var b in _bmpCache.Values) b?.Dispose();
         _bmpCache.Clear();
+        DisposeSaturnCache();
         _host?.Dispose();
         if (_hwnd != IntPtr.Zero) { s_instances.Remove(_hwnd); DestroyWindow(_hwnd); }
     }

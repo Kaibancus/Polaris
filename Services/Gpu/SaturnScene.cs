@@ -80,18 +80,30 @@ internal static class SaturnScene
         return ctx.CreateGradientStopCollection(arr);
     }
 
-    /// <summary>Draws the full Saturn ring system + planet. Caller is inside
-    /// BeginDraw/EndDraw. Angles are reserved for later animation stages.</summary>
+    /// <summary>Draws the full Saturn scene in one pass (used for the uncached
+    /// path / reference). Prefer the split <see cref="DrawStaticScene"/> +
+    /// <see cref="DrawPlanetDisc"/> + <see cref="DrawPlanetShade"/> + <see cref="DrawTwinkle"/>
+    /// so the static layers can be baked to bitmaps and only the spin/twinkle
+    /// re-draw each frame.</summary>
     public static void Draw(ID2D1DeviceContext ctx, in Geom g,
-        double innerAngle = 0, double outerAngle = 0, double spinAngle = 0)
+        double innerAngle = 0, double outerAngle = 0, double spinAngle = 0, double time = 0)
     {
-        DrawBackingDisc(ctx, g);
-        DrawPlanet(ctx, g, spinAngle);
+        DrawStaticScene(ctx, g);
+        DrawPlanetDisc(ctx, g);
+        DrawPlanetShade(ctx, g);
+        DrawTwinkle(ctx, g, time);
     }
 
     // ===================================================================
-    //  Ring system (port of DrawBackingDisc)
+    //  Static layer: disc + (non-twinkle) starfield + named rings + planet body.
+    //  Baked once into a bitmap by the dock; never changes between frames.
     // ===================================================================
+    public static void DrawStaticScene(ID2D1DeviceContext ctx, in Geom g)
+    {
+        DrawBackingDisc(ctx, g);
+        DrawPlanetBody(ctx, g);
+    }
+
     private static void DrawBackingDisc(ID2D1DeviceContext ctx, in Geom g)
     {
         float tilt = g.TiltY;
@@ -118,8 +130,9 @@ internal static class SaturnScene
             }, stops))
             ctx.FillEllipse(disc, brush);
 
-        // Faint starfield behind the rings.
-        DrawStarfield(ctx, g, r);
+        // Faint starfield behind the rings (non-twinkling stars only; the
+        // twinkling subset is re-drawn each frame by DrawTwinkle).
+        DrawStarfieldBase(ctx, g);
 
         bool hasOuter = g.OuterRadius > g.InnerRadius + 0.5f;
         float icon = g.Icon;
@@ -279,11 +292,14 @@ internal static class SaturnScene
         }
     }
 
-    private static void DrawStarfield(ID2D1DeviceContext ctx, in Geom g, double r)
+    private static void DrawStarfieldBase(ID2D1DeviceContext ctx, in Geom g)
     {
+        float r = g.OuterRadius + g.OuterIcon;
         int count = (int)Math.Round(104 * Polaris.Services.RenderProfile.SaturnDetailFactor);
+        const double twinkleGate = 0.55;
         for (int i = 0; i < count; i++)
         {
+            if (Hash01(i * 11.1) > twinkleGate) continue;   // twinkler -> drawn dynamically
             double ang = Hash01(i * 2.17) * Math.PI * 2;
             double rad = Math.Sqrt(Hash01(i * 5.31)) * r * 0.96;
             double px = g.Cx + Math.Cos(ang) * rad;
@@ -296,31 +312,52 @@ internal static class SaturnScene
         }
     }
 
+    /// <summary>Re-draws only the twinkling star subset each frame (~45 stars), so
+    /// the static scene can stay baked. Opacity oscillates per-star.</summary>
+    public static void DrawTwinkle(ID2D1DeviceContext ctx, in Geom g, double time)
+    {
+        float r = g.OuterRadius + g.OuterIcon;
+        int count = (int)Math.Round(104 * Polaris.Services.RenderProfile.SaturnDetailFactor);
+        const double twinkleGate = 0.55;
+        for (int i = 0; i < count; i++)
+        {
+            if (Hash01(i * 11.1) <= twinkleGate) continue;
+            double ang = Hash01(i * 2.17) * Math.PI * 2;
+            double rad = Math.Sqrt(Hash01(i * 5.31)) * r * 0.96;
+            double px = g.Cx + Math.Cos(ang) * rad;
+            double py = g.Cy + Math.Sin(ang) * rad * g.TiltY;
+            double sz = 0.6 + 1.9 * Hash01(i * 7.7);
+            double full = (60 + 150 * Hash01(i * 3.3)) / 255.0;
+            double period = 1.4 + 2.2 * Hash01(i * 4.9);
+            double phase = 2.0 * Hash01(i * 6.2);
+            double s = 0.5 + 0.5 * Math.Sin((time / period + phase) * Math.PI * 2);
+            double br = full * (0.3 + 0.7 * s);
+            var e = new Ellipse(new Vector2((float)px, (float)py), (float)(sz / 2), (float)(sz / 2));
+            using var brush = ctx.CreateSolidColorBrush(new Color4(1f, 1f, 250f / 255f, (float)br));
+            ctx.FillEllipse(e, brush);
+        }
+    }
+
     // ===================================================================
-    //  Centre planet (port of DrawCenterButton)
+    //  Centre planet (port of DrawCenterButton), split for bitmap caching:
+    //   - DrawPlanetBody:  static lit-sphere gradient (bottom layer)
+    //   - DrawPlanetDisc:  rotating gas-giant bands + wind streaks + hexagon
+    //   - DrawPlanetShade: static limb / terminator / highlight / rim (top)
     // ===================================================================
-    private static void DrawPlanet(ID2D1DeviceContext ctx, in Geom g, double spinAngle)
+    private static readonly Rgb Amber = new(0xE2, 0xBE, 0x82);
+    private static readonly Rgb AmberDark = new(0x7A, 0x5C, 0x36);
+    private static readonly Rgb AmberLight = new(0xFC, 0xEF, 0xCC);
+
+    private static void DrawPlanetBody(ID2D1DeviceContext ctx, in Geom g)
     {
         float size = g.PlanetR * 2f;
         float r = g.PlanetR;
-        var c = new Vector2(g.Cx, g.Cy);   // planet centre = panel centre
-
-        var amber = new Rgb(0xE2, 0xBE, 0x82);
-        var amberDark = new Rgb(0x7A, 0x5C, 0x36);
-        var amberLight = new Rgb(0xFC, 0xEF, 0xCC);
-
-        // Every band/streak/hexagon feature is generated inside radius r, and the
-        // limb-darkening + dark rim below mask the globe edge, so no explicit
-        // circular clip layer is needed for Stage 1.
-        var prevTransform = ctx.Transform;
-        var spin = Matrix3x2.CreateRotation((float)(spinAngle * Math.PI / 180.0), c);
-
-        // Body gradient fill.
+        var c = new Vector2(g.Cx, g.Cy);
         using (var stops = Stops(ctx,
-            (0f, A(amberLight, 1.0)),
-            (0.5f, A(amber, 1.0)),
-            (0.82f, A(Darken(amber, 0.25), 1.0)),
-            (1f, A(amberDark, 1.0))))
+            (0f, A(AmberLight, 1.0)),
+            (0.5f, A(Amber, 1.0)),
+            (0.82f, A(Darken(Amber, 0.25), 1.0)),
+            (1f, A(AmberDark, 1.0))))
         using (var body = ctx.CreateRadialGradientBrush(
             new RadialGradientBrushProperties
             {
@@ -330,14 +367,27 @@ internal static class SaturnScene
                 RadiusY = r * 1.44f,
             }, stops))
             ctx.FillEllipse(new Ellipse(c, r, r), body);
+    }
 
-        ctx.Transform = spin;
-        DrawPlanetBands(ctx, c, r, amber, amberDark, amberLight, size);
-        DrawWindStreaks(ctx, c, r, amber, size);
+    /// <summary>The spinning polar disc (bands + streaks + hexagon). Authored at
+    /// rest; the caller bakes this into a bitmap and rotates the bitmap by the
+    /// spin angle each frame.</summary>
+    public static void DrawPlanetDisc(ID2D1DeviceContext ctx, in Geom g)
+    {
+        float size = g.PlanetR * 2f;
+        float r = g.PlanetR;
+        var c = new Vector2(g.Cx, g.Cy);
+        DrawPlanetBands(ctx, c, r, Amber, AmberDark, AmberLight, size);
+        DrawWindStreaks(ctx, c, r, Amber, size);
         DrawHexagon(ctx, c, r);
-        ctx.Transform = prevTransform;
+    }
 
-        // --- Spherical shading (static, over the spinning disc) --------------
+    public static void DrawPlanetShade(ID2D1DeviceContext ctx, in Geom g)
+    {
+        float size = g.PlanetR * 2f;
+        float r = g.PlanetR;
+        var c = new Vector2(g.Cx, g.Cy);
+
         // Limb darkening hugging the edge.
         using (var stops = Stops(ctx,
             (0f, new Color4(0, 0, 0, 0)),
