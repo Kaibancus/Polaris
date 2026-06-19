@@ -54,12 +54,16 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     private float _gIcon;
     private float _effIcon;                    // EffectiveIconSize (DIP), wave support unit
     private float _iconRaw;                     // raw IconSize (DIP), spread unit
+    private Vector2 _gearC;                     // settings-gear button centre (window-local DIP)
+    private float _gearR;                        // settings-gear button radius
+    private bool _pressGear;                     // mouse-down landed on the gear
     private readonly List<IconSlot> _slots = new();
 
     // ---- Stage B magnify wave state ----
     private DispatcherTimer? _timer;
     private IDWriteFactory? _dwrite;
     private IDWriteTextFormat? _labelFormat;
+    private IDWriteTextFormat? _gearFormat;
     private float[] _waveCur = Array.Empty<float>();   // smoothed per-icon scale
     private float[] _waveOffX = Array.Empty<float>();  // smoothed spread offset (DIP)
     private float[] _waveOffY = Array.Empty<float>();
@@ -189,6 +193,10 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         // Summon slide distance: push the slab (plus its shadow headroom) fully past
         // the bottom of the window so a dismissed dock is entirely off-screen.
         _riseUnit = (_winH - _slabY) + _effIcon;
+
+        // Settings gear button: a small circle tucked into the slab's top-right band.
+        _gearR = _effIcon * 0.30f;
+        _gearC = new Vector2(_slabX + _slabW - _gearR - _effIcon * 0.28f, _slabY + _gearR + _effIcon * 0.10f);
         // Pinned-icon grid positions (window-local DIP) via the theme layout.
         var apps = _config.Apps;
         int count = Math.Min(apps.Count, LiquidGlassTheme.Capacity);
@@ -227,6 +235,10 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             FontStyle.Normal, Vortice.DirectWrite.FontStretch.Normal, 13f, "zh-cn");
         _labelFormat.TextAlignment = Vortice.DirectWrite.TextAlignment.Center;
         _labelFormat.ParagraphAlignment = ParagraphAlignment.Center;
+        _gearFormat = _dwrite.CreateTextFormat("Segoe UI Symbol", null, Vortice.DirectWrite.FontWeight.Normal,
+            FontStyle.Normal, Vortice.DirectWrite.FontStretch.Normal, _gearR * 1.05f, "en-us");
+        _gearFormat.TextAlignment = Vortice.DirectWrite.TextAlignment.Center;
+        _gearFormat.ParagraphAlignment = ParagraphAlignment.Center;
 
         Render();
 
@@ -390,6 +402,8 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         using (var rim = ctx.CreateSolidColorBrush(Col(0xE6, 0xEA, 0xF4, 0xFF)))
             ctx.DrawRoundedRectangle(slab, rim, 1.4f);
 
+        DrawGear(ctx);
+
         // Draw smallest-first so the magnified (focal) icon sits on top of its neighbours.
         // The dragged icon is skipped here and drawn last, lifted under the cursor.
         int dragIdx = _dragging ? _pressIdx : -1;
@@ -429,6 +443,22 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     }
 
     private static float EaseInCubic(float t) => t * t * t;
+
+    /// <summary>Settings gear: a small blue disc with a ⚙ glyph in the slab's top
+    /// band; clicking it asks the host to open the settings window (parity with the
+    /// WPF dock's centre gear button).</summary>
+    private void DrawGear(ID2D1DeviceContext ctx)
+    {
+        if (_gearFormat == null) return;
+        var e = new Vortice.Direct2D1.Ellipse(_gearC, _gearR, _gearR);
+        using (var fill = ctx.CreateSolidColorBrush(Col(0xCC, 0x2A, 0x6C, 0xF0)))
+            ctx.FillEllipse(e, fill);
+        using (var rim = ctx.CreateSolidColorBrush(Col(0xEE, 0xFF, 0xFF, 0xFF)))
+            ctx.DrawEllipse(e, rim, 1.4f);
+        var rect = new Vortice.Mathematics.Rect(_gearC.X - _gearR, _gearC.Y - _gearR, _gearR * 2f, _gearR * 2f);
+        using (var fg = ctx.CreateSolidColorBrush(Col(0xFF, 0xFF, 0xFF, 0xFF)))
+            ctx.DrawText("\u2699", _gearFormat, rect, fg);
+    }
 
     private void DrawIcon(ID2D1DeviceContext ctx, in IconSlot s, float scale, Vector2 off)
     {
@@ -535,9 +565,10 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             {
                 (float lx, float ly) = ClientDip(lParam);
                 _pressX = lx; _pressY = ly; _dragX = lx; _dragY = ly;
-                _pressIdx = HitSlot(lx, ly);
+                _pressGear = Vector2.Distance(new Vector2(lx, ly), _gearC) <= _gearR + 2f;
+                _pressIdx = _pressGear ? -1 : HitSlot(lx, ly);
                 _dragging = false;
-                if (_pressIdx >= 0)
+                if (_pressIdx >= 0 || _pressGear)
                     SetCapture(_hwnd);
                 return true;
             }
@@ -561,10 +592,17 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
                 ReleaseCapture();
                 int idx = _pressIdx;
                 bool wasDrag = _dragging;
+                bool gear = _pressGear;
                 (float lx, float ly) = ClientDip(lParam);
                 _pressIdx = -1;
                 _dragging = false;
-                if (idx >= 0 && idx < _slots.Count)
+                _pressGear = false;
+                if (gear)
+                {
+                    if (Vector2.Distance(new Vector2(lx, ly), _gearC) <= _gearR + 2f)
+                        RequestOpenSettings?.Invoke();
+                }
+                else if (idx >= 0 && idx < _slots.Count)
                 {
                     if (!wasDrag) ClickSlot(idx);
                     else DropSlot(idx, lx, ly);
@@ -752,6 +790,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         if (_hwnd != IntPtr.Zero) s_instances.Remove(_hwnd);
         _host?.Dispose(); _host = null;
         _labelFormat?.Dispose(); _labelFormat = null;
+        _gearFormat?.Dispose(); _gearFormat = null;
         _dwrite?.Dispose(); _dwrite = null;
         if (_hwnd != IntPtr.Zero) { DestroyWindow(_hwnd); _hwnd = IntPtr.Zero; }
         foreach (var b in _bmpCache.Values) b?.Dispose();
@@ -775,7 +814,6 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         };
         if (s.Running)
             items.Add(("关闭窗口", () => CloseSlotWindows(s)));
-        items.Add(("Polaris 设置…", () => RequestOpenSettings?.Invoke()));
         BuildAndShowSlotMenu(s, items);
     }
 
@@ -974,6 +1012,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         _timer = null;
         CloseSlotMenu();
         _labelFormat?.Dispose();
+        _gearFormat?.Dispose();
         _dwrite?.Dispose();
         foreach (var b in _bmpCache.Values) b?.Dispose();
         _bmpCache.Clear();
