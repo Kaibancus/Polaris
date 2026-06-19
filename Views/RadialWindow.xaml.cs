@@ -19,7 +19,7 @@ namespace Polaris.Views;
 /// rings with a center settings button. Supports hover animation, click-to-launch,
 /// drag-to-reorder and drag-out-to-delete.
 /// </summary>
-public partial class RadialWindow : Window
+public partial class RadialWindow : Window, IMainDock
 {
     private const double DragThreshold = 6.0;
     private const double BaseInnerRadius = 140.0;
@@ -476,24 +476,24 @@ public partial class RadialWindow : Window
     /// the left-edge dock, this is invoked with the screen-space drop point and
     /// the entry. Returns true when the entry was pinned to the left dock (the
     /// main-dock entry is then left in place).</summary>
-    public Func<Point, AppEntry, bool>? DropToSideDock;
+    public Func<Point, AppEntry, bool>? DropToSideDock { get; set; }
 
     /// <summary>Set by the host: returns the height (DIP, measured up from the
     /// bottom screen edge) that the side dock occupies when it is docked at the
     /// BOTTOM, so the liquid-glass main dock can lift itself clear of it. Returns
     /// 0 when the side dock is on another edge. Used by
     /// <see cref="GlassDockBottomMargin"/>.</summary>
-    public Func<double>? BottomDockReserve;
+    public Func<double>? BottomDockReserve { get; set; }
 
     /// <summary>Raised after the main dock mutates its app list (add / delete /
     /// reorder), so the host can re-mirror the resident region into the left
     /// dock.</summary>
-    public Action? AppsChanged;
+    public Action? AppsChanged { get; set; }
 
     /// <summary>Raised while a glass icon is being dragged (true on drag start,
     /// false when it ends), so the host can keep the left dock visible as a drop
     /// target for the whole gesture.</summary>
-    public Action<bool>? GlassDragActiveChanged;
+    public Action<bool>? GlassDragActiveChanged { get; set; }
 
     public RadialWindow(AppConfig config, Action persist)
     {

@@ -27,7 +27,7 @@ namespace Polaris.Views;
 /// <c>RadialWindow.Magnify</c>) and a floating hover name label below the focal icon.
 /// Still click-through (hit-test is poll-based) — launch / drag interaction lands in
 /// Stage D. Shown behind POLARIS_GPU_MAINDOCK=1.</summary>
-internal sealed class MainDockWindowGpu : IDisposable
+internal sealed class MainDockWindowGpu : IMainDock, IDisposable
 {
     // Mirror the WPF glass theme scale factors (see RadialWindow: _uiScale=1, _themeScale=0.9
     // for glass; glyphs drawn at icon*GlassIconScale).
@@ -75,6 +75,28 @@ internal sealed class MainDockWindowGpu : IDisposable
     private const long BounceDurMs = 480;
     private System.Windows.Controls.Primitives.Popup? _slotMenu;
 
+    // ---- Stage E host integration (IMainDock) state ----
+    private bool _realized;              // window created once (kept hidden between summons)
+    private bool _shown;                 // logical shown state (IMainDock.IsShown)
+    private bool _pinned;                // stays open until explicitly dismissed
+    private bool _visible;               // window is currently not SW_HIDE
+    private float _summon;               // 0 = fully dismissed (off-screen), 1 = fully docked
+    private int _summonDir;              // +1 rising, -1 dropping, 0 settled
+    private long _summonLast;            // last summon-tick timestamp (ms)
+    private float _riseUnit;             // slide distance (DIP) that clears the slab off-screen
+    private Action? _onFaded;            // deferred callback once a dismiss finishes
+    private const float SummonInSec = 0.32f;
+    private const float SummonOutSec = 0.20f;
+
+    public event Action? RequestOpenSettings;
+    public event Action? PanelDismissed;
+    public Func<Point, AppEntry, bool>? DropToSideDock { get; set; }
+    public Func<double>? BottomDockReserve { get; set; }
+    public Action? AppsChanged { get; set; }
+    public Action<bool>? GlassDragActiveChanged { get; set; }
+    public Dispatcher Dispatcher { get; } = Dispatcher.CurrentDispatcher;
+    public bool IsShown => _shown;
+
     private readonly struct IconSlot
     {
         public readonly Vector2 Center;       // window-local DIP
@@ -91,11 +113,14 @@ internal sealed class MainDockWindowGpu : IDisposable
 
     public void Show()
     {
-        try { Build(); }
+        _shown = true; _summon = 1f; _visible = true;
+        try { Build(true); }
         catch (Exception ex) { Log.Warn("MainDockGpu", "failed: " + ex); }
     }
 
-    private void Build()
+    private void Build() => Build(true);
+
+    private void Build(bool visible)
     {
         _slots.Clear();
         var mon = MonitorLayout.ActiveBounds;
@@ -110,9 +135,10 @@ internal sealed class MainDockWindowGpu : IDisposable
         double padX = icon * 1.15;
         double dockW = gridW + icon + padX * 2;
 
-        // Bottom-docked margin: slab bottom rests above the system taskbar.
+        // Bottom-docked margin: slab bottom rests above the system taskbar, and
+        // lifts further when the side dock reserves space at the bottom edge.
         double taskbarH = Math.Max(0.0, mon.Bottom - wa.Bottom);
-        double bottomMargin = taskbarH + icon * 0.12;
+        double bottomMargin = Math.Max(taskbarH + icon * 0.12, BottomDockReserve?.Invoke() ?? 0.0);
 
         // Dock heights (mirror RadialWindow glass geometry).
         double padY = icon * 0.95;
@@ -160,6 +186,9 @@ internal sealed class MainDockWindowGpu : IDisposable
         _opacity = (float)(1.0 - Math.Clamp(_config.Settings.PanelTransparency, 0.0, 1.0));
         _frost = (float)GlassChrome.FrostStrengthFor(_config.Settings.PanelTransparency);
 
+        // Summon slide distance: push the slab (plus its shadow headroom) fully past
+        // the bottom of the window so a dismissed dock is entirely off-screen.
+        _riseUnit = (_winH - _slabY) + _effIcon;
         // Pinned-icon grid positions (window-local DIP) via the theme layout.
         var apps = _config.Apps;
         int count = Math.Min(apps.Count, LiquidGlassTheme.Capacity);
@@ -189,7 +218,7 @@ internal sealed class MainDockWindowGpu : IDisposable
         int pw = (int)Math.Ceiling(_winW * _dpi), ph = (int)Math.Ceiling(_winH * _dpi);
         int px = (int)Math.Round(_winX * _dpi), py = (int)Math.Round(_winY * _dpi);
         SetWindowPos(_hwnd, HWND_TOPMOST, px, py, pw, ph, SWP_NOACTIVATE);
-        ShowWindow(_hwnd, SW_SHOWNOACTIVATE);
+        if (visible) ShowWindow(_hwnd, SW_SHOWNOACTIVATE);
         DragAcceptFiles(_hwnd, true);   // accept desktop shortcuts / files dropped to pin
         _host = new CompositionHost(_hwnd, pw, ph, (float)(96.0 * _dpi));
 
@@ -203,7 +232,8 @@ internal sealed class MainDockWindowGpu : IDisposable
 
         _timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(16) };
         _timer.Tick += (_, _) => Tick();
-        _timer.Start();
+        _visible = visible;
+        if (visible) _timer.Start();
     }
 
     private static Color4 Col(byte a, byte r, byte g, byte b) => new(r / 255f, g / 255f, b / 255f, a / 255f);
@@ -227,6 +257,25 @@ internal sealed class MainDockWindowGpu : IDisposable
     {
         if (_host == null || _slots.Count == 0)
             return;
+
+        // Advance the summon (rise / drop) slide.
+        bool animating = _summonDir != 0;
+        if (animating)
+        {
+            long nowMs = Environment.TickCount64;
+            float dt = Math.Clamp((nowMs - _summonLast) / 1000f, 0f, 0.1f);
+            _summonLast = nowMs;
+            if (_summonDir > 0)
+            {
+                _summon = Math.Min(1f, _summon + dt / SummonInSec);
+                if (_summon >= 1f) _summonDir = 0;
+            }
+            else
+            {
+                _summon = Math.Max(0f, _summon - dt / SummonOutSec);
+                if (_summon <= 0f) { _summonDir = 0; OnDismissComplete(); return; }
+            }
+        }
 
         bool active = false;
         Vector2 cur = default;
@@ -291,7 +340,7 @@ internal sealed class MainDockWindowGpu : IDisposable
 
         bool bouncing = _bounceIdx >= 0 && (Environment.TickCount64 - _bounceStart) <= BounceDurMs;
         if (!bouncing) _bounceIdx = -1;
-        if (active || _dragging || bouncing || maxDelta > 0.001f)
+        if (animating || active || _dragging || bouncing || maxDelta > 0.001f)
             Render();
     }
 
@@ -317,6 +366,15 @@ internal sealed class MainDockWindowGpu : IDisposable
         var ctx = _host.Context;
         ctx.BeginDraw();
         ctx.Clear(Col(0, 0, 0, 0));
+
+        // Summon slide: translate the whole scene down past the screen edge while
+        // dismissed and let it ease up into its docked rest position. BackEase-out
+        // on the way in gives a soft settle overshoot; ease-in on the way out.
+        float pos = _summonDir < 0 ? EaseInCubic(_summon) : BackEaseOut(_summon);
+        float riseOff = (1f - pos) * _riseUnit;
+        bool slid = riseOff > 0.01f;
+        if (slid)
+            ctx.Transform = System.Numerics.Matrix3x2.CreateTranslation(0f, riseOff);
 
         // Floating liquid-glass slab (drop shadow on, since the main dock floats above
         // the desktop rather than being flush to a screen edge).
@@ -356,9 +414,21 @@ internal sealed class MainDockWindowGpu : IDisposable
         else if (_hover >= 0 && _hover < _slots.Count)
             DrawHoverLabel(ctx, _slots[_hover], _waveCur[_hover]);
 
+        if (slid)
+            ctx.Transform = System.Numerics.Matrix3x2.Identity;
         ctx.EndDraw();
         _host.Present();
     }
+
+    // BackEase-out (soft overshoot, mirrors the WPF glass-rise settle).
+    private static float BackEaseOut(float t)
+    {
+        const float s = 1.18f;   // Amplitude ~0.18
+        float u = t - 1f;
+        return u * u * ((s + 1f) * u + s) + 1f;
+    }
+
+    private static float EaseInCubic(float t) => t * t * t;
 
     private void DrawIcon(ID2D1DeviceContext ctx, in IconSlot s, float scale, Vector2 off)
     {
@@ -478,7 +548,10 @@ internal sealed class MainDockWindowGpu : IDisposable
                 (float lx, float ly) = ClientDip(lParam);
                 _dragX = lx; _dragY = ly;
                 if (!_dragging && (MathF.Abs(lx - _pressX) + MathF.Abs(ly - _pressY)) > _gIcon * 0.35f)
+                {
                     _dragging = true;
+                    GlassDragActiveChanged?.Invoke(true);   // keep the side dock shown as a drop target
+                }
                 if (_dragging)
                     Render();
                 return true;
@@ -561,7 +634,8 @@ internal sealed class MainDockWindowGpu : IDisposable
         try
         {
             _bounceIdx = idx; _bounceStart = Environment.TickCount64;   // launch hop
-            AppLauncher.Launch(s.Entry, null);
+            // Launching dismisses the dock (and, via PanelDismissed, the side dock).
+            AppLauncher.Launch(s.Entry, () => HidePanel());
         }
         catch (Exception ex) { Log.Warn("MainDockGpu", "launch failed: " + ex.Message); }
     }
@@ -570,8 +644,23 @@ internal sealed class MainDockWindowGpu : IDisposable
     /// grid slot nearest the drop point.</summary>
     private void DropSlot(int idx, float lx, float ly)
     {
+        // Drag gesture finished — let the host retract the side-dock drop target.
+        GlassDragActiveChanged?.Invoke(false);
+
         var s = _slots[idx];
         if (s.Entry == null) { Render(); return; }
+
+        // Dropping onto the left-edge side dock pins it there (the main-dock entry
+        // stays); checked first so a drag toward the dock adds rather than deletes.
+        if (DropToSideDock != null)
+        {
+            var screen = new Point(_winX + lx, _winY + ly);
+            if (DropToSideDock(screen, s.Entry))
+            {
+                Render();   // snap the dragged icon back into its slot
+                return;
+            }
+        }
 
         // Dragged clear of the slab (with a margin) → unpin / delete.
         float m = _gIcon * 0.4f;
@@ -651,11 +740,13 @@ internal sealed class MainDockWindowGpu : IDisposable
             ConfigStore.Save(_config);
         }
         catch (Exception ex) { Log.Warn("MainDockGpu", "persist failed: " + ex.Message); }
+        AppsChanged?.Invoke();   // let the host re-mirror the resident region
         Rebuild();
     }
 
     private void Rebuild()
     {
+        bool wasVisible = _visible;
         _timer?.Stop();
         CloseSlotMenu();
         if (_hwnd != IntPtr.Zero) s_instances.Remove(_hwnd);
@@ -666,7 +757,7 @@ internal sealed class MainDockWindowGpu : IDisposable
         foreach (var b in _bmpCache.Values) b?.Dispose();
         _bmpCache.Clear();
         _hover = -1; _pressIdx = -1; _dragging = false;
-        try { Build(); }
+        try { Build(wasVisible); }
         catch (Exception ex) { Log.Warn("MainDockGpu", "rebuild failed: " + ex); }
     }
 
@@ -684,6 +775,7 @@ internal sealed class MainDockWindowGpu : IDisposable
         };
         if (s.Running)
             items.Add(("关闭窗口", () => CloseSlotWindows(s)));
+        items.Add(("Polaris 设置…", () => RequestOpenSettings?.Invoke()));
         BuildAndShowSlotMenu(s, items);
     }
 
@@ -789,6 +881,93 @@ internal sealed class MainDockWindowGpu : IDisposable
         t.Start();
     }
 
+    // ---- IMainDock host integration (Stage E) ----
+
+    /// <summary>Create the dock window once, kept hidden (off-screen) until summoned.</summary>
+    public void Realize()
+    {
+        if (_realized) return;
+        _realized = true;
+        _summon = 0f; _summonDir = 0; _shown = false;
+        try { Build(false); }      // build hidden — no flash, no idle ticking
+        catch (Exception ex) { Log.Warn("MainDockGpu", "realize failed: " + ex); }
+    }
+
+    /// <summary>Re-read config / running state and rebuild the layout in place.</summary>
+    public void RefreshFromConfig()
+    {
+        if (!_realized) return;
+        Rebuild();
+    }
+
+    public void ShowPanel() => Summon(pinned: false);
+    public void ShowPinned() => Summon(pinned: true);
+
+    private void Summon(bool pinned)
+    {
+        Realize();
+        _shown = true;
+        _pinned = pinned;
+        // Start fully dismissed (off-screen) so the very first frame after the
+        // rebuild slides in rather than popping at rest.
+        _summon = 0f; _summonDir = +1; _summonLast = Environment.TickCount64;
+        if (!_visible)
+        {
+            ShowWindow(_hwnd, SW_SHOWNOACTIVATE);
+            _visible = true;
+        }
+        SetWindowPos(_hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE);
+        Rebuild();                 // pick up config / running changes; rebuilds visible
+        _timer?.Start();
+    }
+
+    public void HidePanel() => HidePanel(null);
+
+    public void HidePanel(Action? onFaded)
+    {
+        if (!_realized || !_shown)
+        {
+            // Nothing to slide out — still honour the callback (e.g. open settings).
+            onFaded?.Invoke();
+            return;
+        }
+        _shown = false;
+        _pinned = false;
+        // Cancel any in-flight drag / menu so they don't outlive the dismiss.
+        _pressIdx = -1; _dragging = false; _hover = -1;
+        CloseSlotMenu();
+        PanelDismissed?.Invoke();   // retract the side dock together with the main dock
+        _onFaded = onFaded;
+        _summonDir = -1; _summonLast = Environment.TickCount64;
+        _timer?.Start();
+    }
+
+    public void HideIfNotPinned()
+    {
+        if (!_pinned)
+            HidePanel();
+    }
+
+    /// <summary>The GPU dock has no perpetual ambient animation to pause (parity
+    /// with the GPU side dock), so this is a no-op.</summary>
+    public void SetAmbientPaused(bool paused) { }
+
+    public void Close() => Dispose();
+
+    /// <summary>Called once a dismiss slide reaches the bottom: hide the window so a
+    /// dismissed dock costs nothing, then run any deferred callback.</summary>
+    private void OnDismissComplete()
+    {
+        if (_hwnd != IntPtr.Zero)
+            ShowWindow(_hwnd, SW_HIDE);
+        _visible = false;
+        _timer?.Stop();
+        var cb = _onFaded;
+        _onFaded = null;
+        if (cb != null)
+            Dispatcher.BeginInvoke(cb, DispatcherPriority.Background);
+    }
+
     public void Dispose()
     {
         _timer?.Stop();
@@ -889,6 +1068,9 @@ internal sealed class MainDockWindowGpu : IDisposable
     private const int SW_SHOWNOACTIVATE = 4;
     private static readonly IntPtr HWND_TOPMOST = new(-1);
     private const uint SWP_NOACTIVATE = 0x0010;
+    private const uint SWP_NOSIZE = 0x0001;
+    private const uint SWP_NOMOVE = 0x0002;
+    private const int SW_HIDE = 0;
 
     [StructLayout(LayoutKind.Sequential)] private struct POINT { public int X, Y; }
 

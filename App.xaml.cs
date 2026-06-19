@@ -87,7 +87,7 @@ public partial class App : Application
     private KeyboardHook? _hook;
     private KeyboardHook? _pinnedHook;
     private KeyboardHook? _escHook;
-    private RadialWindow? _panel;
+    private IMainDock? _panel;
     private SettingsWindow? _settings;
     // True from the moment a settings-open is requested until the window is
     // actually shown. During this window the docks are fading out, so the edge
@@ -207,13 +207,6 @@ public partial class App : Application
         // Keep registry startup state in sync with config on launch.
         StartupManager.SetEnabled(_config.Settings.RunAtStartup);
 
-        // GPU main dock — STAGE A static-render validation (POLARIS_GPU_MAINDOCK=1):
-        // shows the D2D liquid-glass slab + pinned icon grid bottom-docked for eyeballing.
-        if (Environment.GetEnvironmentVariable("POLARIS_GPU_MAINDOCK") == "1")
-            Dispatcher.BeginInvoke(new Action(() =>
-                new Polaris.Views.MainDockWindowGpu(_config).Show()),
-                DispatcherPriority.ApplicationIdle);
-
         // One-time migration: the resident / inner-ring count used to be a single
         // shared value. Seed the currently-active theme's per-theme count from
         // the legacy shared value so it isn't lost; the other theme starts at
@@ -231,7 +224,12 @@ public partial class App : Application
         ThemeRegistry.LoadAppearance(_config.Settings);
         ConfigStore.Save(_config);
 
-        _panel = new RadialWindow(_config, Persist);
+        // Pick the main-dock implementation. The GPU (DirectComposition + Direct2D)
+        // liquid-glass dock is opt-in behind POLARIS_GPU_MAINDOCK=1; the WPF dock
+        // stays the default. Both implement IMainDock so the host wiring is identical.
+        _panel = Environment.GetEnvironmentVariable("POLARIS_GPU_MAINDOCK") == "1"
+            ? new Polaris.Views.MainDockWindowGpu(_config)
+            : new RadialWindow(_config, Persist);
         _panel.RequestOpenSettings += OpenSettings;
         _panel.Realize();   // realise once (stays shown, fully transparent) to avoid show/hide flicker
 
