@@ -74,6 +74,9 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     private float[] _waveOffX = Array.Empty<float>();  // smoothed spread offset (DIP)
     private float[] _waveOffY = Array.Empty<float>();
     private int _hover = -1;
+    private float _runSweep;              // running-icon sweep gradient angle (deg)
+    private float _runPulse = 0.5f;       // running-icon glow pulse (0.35..0.8)
+    private bool _anyRunning;             // a glass running icon is present (drives sweep render)
 
     // ---- Stage D interaction state ----
     private int _pressIdx = -1;          // slot under the mouse-down, or -1
@@ -173,7 +176,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     {
         _slots.Clear();
         // Reset scroll/resident state; the glass branch recomputes, Saturn leaves off.
-        _scrollable = false; _glassScrollMax = 0; _barTrackH = 0; _hasResident = false;
+        _scrollable = false; _glassScrollMax = 0; _barTrackH = 0; _hasResident = false; _anyRunning = false;
         var mon = MonitorLayout.ActiveBounds;
         var wa = MonitorLayout.ActiveWorkArea;
         double sw = mon.Width, sh = mon.Height;
@@ -273,6 +276,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             var entry = apps[i];
             var img = IconExtractor.GetCached(entry.EffectiveIconSource, _iconCache);
             bool run = RunningAppTracker.IsEntryRunning(entry, running, noTitles, noAumids);
+            if (run) _anyRunning = true;
             _slots.Add(new IconSlot(new Vector2((float)slots[i].X, (float)slots[i].Y),
                 entry.EffectiveIconSource, entry.Name, run, img, entry));
         }
@@ -687,8 +691,16 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             _outerAngle = (_outerAngle + dt * 360.0 / (PlanetSpinSeconds * OuterOrbitRatio)) % 360.0;
         }
 
+        // Running-icon sweep + glow pulse (glass): rotate the gradient (4.2s/rev) and
+        // breathe the halo (2.2s) so running apps show a flowing border, like the WPF dock.
+        if (!_saturn && _anyRunning)
+        {
+            _runSweep = (_runSweep + 16f * 360f / 4200f) % 360f;
+            double ph = Environment.TickCount64 / 1000.0 * 2.0 * Math.PI / 2.2;
+            _runPulse = 0.575f + 0.225f * MathF.Sin((float)ph);
+        }
         if (_saturn || animating || active || _dragging || bouncing || scrolling || _barDrag || maxDelta > 0.001f
-            || _gearHover || MathF.Abs(_gearScale - 1f) > 0.002f
+            || _gearHover || MathF.Abs(_gearScale - 1f) > 0.002f || _anyRunning
             || (!_saturn && _visible && DateTime.Now.Minute != _lastClockMin))
             Render();
     }
@@ -997,22 +1009,35 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         var center = new Vector2(cx, cy);
         var wave = Matrix3x2.CreateScale(scale, scale, center);
 
-        // Running indicator (glass theme): a soft blue glow border hugging the icon,
-        // mirroring RadialIcon's RunningGlowBorder (#3FA9FF, rounded, blurred). Drawn
-        // under the icon and scaled with the wave so a magnified running app keeps its
-        // ring. Static (no breathe/sweep) to stay idle-friendly, matching the GPU side
-        // dock. A few concentric strokes of falling alpha fake the Gaussian halo.
+        // Running indicator (glass theme): a soft pulsing glow halo plus a flowing
+        // sweep border — a rounded-rect stroke painted with a linear gradient whose
+        // axis rotates (4.2s/rev), mirroring RadialIcon's RunningBorder/RunningGlow.
         if (s.Running && !_saturn)
         {
             ctx.Transform = wave;
             float box = g * 0.9f, rr = box * 0.24f;
             var rect = new Vortice.Mathematics.Rect(cx - box / 2f, cy - box / 2f, box, box);
-            (float w, byte a)[] ring = { (7f, 0x1E), (4.5f, 0x3A), (2.4f, 0x80) };
+            var rrect = new RoundedRectangle { Rect = rect, RadiusX = rr, RadiusY = rr };
+            // Pulsing cool halo (a few falling-alpha strokes fake the blurred glow).
+            float pulse = _runPulse;
+            (float w, byte a)[] ring = { (7f, (byte)(0x22 * pulse)), (4.5f, (byte)(0x44 * pulse)) };
             foreach (var (sw, a) in ring)
                 using (var br = ctx.CreateSolidColorBrush(Col(a, 0x3F, 0xA9, 0xFF)))
-                    ctx.DrawRoundedRectangle(new RoundedRectangle { Rect = rect, RadiusX = rr, RadiusY = rr }, br, sw);
-            using (var hot = ctx.CreateSolidColorBrush(Col(0xC8, 0x6F, 0xD3, 0xFF)))
-                ctx.DrawRoundedRectangle(new RoundedRectangle { Rect = rect, RadiusX = rr, RadiusY = rr }, hot, 1.2f);
+                    ctx.DrawRoundedRectangle(rrect, br, sw);
+            // Flowing sweep: a rotating linear gradient stroked around the icon.
+            float ang = _runSweep * MathF.PI / 180f, R = box * 0.6f;
+            var dir = new Vector2(MathF.Cos(ang) * R, MathF.Sin(ang) * R);
+            using (var stops = ctx.CreateGradientStopCollection(new[]
+            {
+                new Vortice.Direct2D1.GradientStop { Position = 0f,    Color = Col(0x10, 0x3D, 0xA9, 0xFF) },
+                new Vortice.Direct2D1.GradientStop { Position = 0.28f, Color = Col(0x66, 0x57, 0xC8, 0xFF) },
+                new Vortice.Direct2D1.GradientStop { Position = 0.5f,  Color = Col(0xFF, 0x6F, 0xD3, 0xFF) },
+                new Vortice.Direct2D1.GradientStop { Position = 0.72f, Color = Col(0x66, 0x57, 0xC8, 0xFF) },
+                new Vortice.Direct2D1.GradientStop { Position = 1f,    Color = Col(0x10, 0x3D, 0xA9, 0xFF) },
+            }))
+            using (var sweep = ctx.CreateLinearGradientBrush(
+                new LinearGradientBrushProperties { StartPoint = new Vector2(cx - dir.X, cy - dir.Y), EndPoint = new Vector2(cx + dir.X, cy + dir.Y) }, stops))
+                ctx.DrawRoundedRectangle(rrect, sweep, 2.5f);
             ctx.Transform = Matrix3x2.Identity;
         }
 
