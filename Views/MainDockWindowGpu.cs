@@ -42,7 +42,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
 
     private readonly AppConfig _config;
     private IntPtr _hwnd;
-    private OleDropTarget? _oleDrop;   // OLE drop target for Explorer/desktop drags
+    private DropShimWindow? _dropShim;   // overlay that catches external drags + forwards them
     private CompositionHost? _host;
     private readonly Dictionary<string, ID2D1Bitmap?> _bmpCache = new();
     private readonly Dictionary<string, BitmapSource?> _iconCache = new();
@@ -414,12 +414,13 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         int px = (int)Math.Round(_winX * _dpi), py = (int)Math.Round(_winY * _dpi);
         SetWindowPos(_hwnd, HWND_TOPMOST, px, py, pw, ph, SWP_NOACTIVATE);
         if (visible) ShowWindow(_hwnd, SW_SHOWNOACTIVATE);
-        DragAcceptFiles(_hwnd, true);   // accept desktop shortcuts / files dropped to pin
-        // Also register a full OLE drop target so Explorer/desktop drags (which use the
-        // OLE IDropTarget protocol, not WM_DROPFILES) can drop files AND shell items
-        // onto the dock — parity with the WPF dock's AllowDrop. Runs on the STA UI thread.
-        _oleDrop = new OleDropTarget(_hwnd, HandleOleDrop);
-        _oleDrop.Register();
+        // Composition-only windows (WS_EX_NOREDIRECTIONBITMAP) can't be OLE drop targets
+        // nor receive WM_DROPFILES, so external drags (Explorer / desktop) are caught by a
+        // near-invisible overlay above the dock that forwards drops + the initial mouse
+        // press back to us (see DropShimWindow). DragAcceptFiles is harmless to keep.
+        DragAcceptFiles(_hwnd, true);
+        _dropShim = new DropShimWindow(_hwnd, ForwardShimInput, HandleOleDrop);
+        if (visible) { SyncShim(); _dropShim.Show(); }
         _host = new CompositionHost(_hwnd, pw, ph, (float)(96.0 * _dpi));
 
         _dwrite = DWrite.DWriteCreateFactory<IDWriteFactory>();
@@ -1510,6 +1511,39 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     // ---- Stage D: interaction (click-launch, drag reorder / drag-out delete,
     //       right-click menu, drop-files-to-pin) -------------------------------
 
+    /// <summary>Re-maps a mouse message that landed on the drop-shim overlay (in SCREEN
+    /// pixels) into this dock's client space and runs it through <see cref="HandleMessage"/>,
+    /// so a click on the shim behaves exactly as a click on the dock (the dock's SetCapture
+    /// then routes the rest of a drag straight here, bypassing the shim).</summary>
+    internal (bool handled, IntPtr result) ForwardShimInput(uint msg, IntPtr wParam, int screenX, int screenY)
+    {
+        IntPtr lParam;
+        if (msg == 0x020A) // WM_MOUSEWHEEL keeps screen coords in lParam
+            lParam = (IntPtr)(((screenY & 0xFFFF) << 16) | (screenX & 0xFFFF));
+        else
+        {
+            int cx = screenX - (int)Math.Round(_winX * _dpi);
+            int cy = screenY - (int)Math.Round(_winY * _dpi);
+            lParam = (IntPtr)(((cy & 0xFFFF) << 16) | (cx & 0xFFFF));
+        }
+        bool handled = HandleMessage(msg, wParam, lParam, out var res);
+        if (msg == 0x0201 || msg == 0x0205)
+            Log.Warn("MainDockGpu", $"ForwardShimInput msg=0x{msg:X} -> handled={handled}");
+        return (handled, res);
+    }
+
+    /// <summary>Positions the drop-shim overlay over this dock's interactive box (the slab
+    /// / ring hit region) so external drags landing on the visible dock reach the shim.</summary>
+    private void SyncShim()
+    {
+        if (_dropShim == null) return;
+        int sx = (int)Math.Round((_winX + _slabX) * _dpi);
+        int sy = (int)Math.Round((_winY + _slabY) * _dpi);
+        int sw = (int)Math.Ceiling(_slabW * _dpi);
+        int sh = (int)Math.Ceiling(_slabH * _dpi);
+        _dropShim.SetBounds(sx, sy, sw, sh);
+    }
+
     /// <summary>Routes the window messages this dock cares about. Returns true (with
     /// <paramref name="result"/>) when handled; false defers to DefWindowProc.</summary>
     private bool HandleMessage(uint msg, IntPtr wParam, IntPtr lParam, out IntPtr result)
@@ -2272,7 +2306,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         ClosePreview();
         if (_hwnd != IntPtr.Zero) s_instances.Remove(_hwnd);
         DisposeSaturnCache();
-        _oleDrop?.Revoke(); _oleDrop = null;
+        _dropShim?.Dispose(); _dropShim = null;
         _host?.Dispose(); _host = null;
         _labelFormat?.Dispose(); _labelFormat = null;
         _clockFormat?.Dispose(); _clockFormat = null;
@@ -2514,6 +2548,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     {
         if (_hwnd != IntPtr.Zero)
             ShowWindow(_hwnd, SW_HIDE);
+        _dropShim?.Hide();
         _visible = false;
         _timer?.Stop();
         var cb = _onFaded;
@@ -2537,7 +2572,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         foreach (var b in _bmpCache.Values) b?.Dispose();
         _bmpCache.Clear();
         DisposeSaturnCache();
-        _oleDrop?.Revoke(); _oleDrop = null;
+        _dropShim?.Dispose(); _dropShim = null;
         _host?.Dispose();
         if (_hwnd != IntPtr.Zero) { s_instances.Remove(_hwnd); DestroyWindow(_hwnd); }
     }
