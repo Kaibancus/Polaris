@@ -77,6 +77,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     private float _runSweep;              // running-icon sweep gradient angle (deg)
     private float _runPulse = 0.5f;       // running-icon glow pulse (0.35..0.8)
     private bool _anyRunning;             // a glass running icon is present (drives sweep render)
+    private float _orbitAngle;            // glass orbit-light angle (deg, 36s/rev clockwise)
 
     // ---- Stage D interaction state ----
     private int _pressIdx = -1;          // slot under the mouse-down, or -1
@@ -699,9 +700,12 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             double ph = Environment.TickCount64 / 1000.0 * 2.0 * Math.PI / 2.2;
             _runPulse = 0.575f + 0.225f * MathF.Sin((float)ph);
         }
+        // Glass orbit light: a cool lamp drifts around the slab, one rev / 36s.
+        if (!_saturn && _visible)
+            _orbitAngle = (_orbitAngle + 16f * 360f / 36000f) % 360f;
         if (_saturn || animating || active || _dragging || bouncing || scrolling || _barDrag || maxDelta > 0.001f
             || _gearHover || MathF.Abs(_gearScale - 1f) > 0.002f || _anyRunning
-            || (!_saturn && _visible && DateTime.Now.Minute != _lastClockMin))
+            || (!_saturn && _visible))
             Render();
     }
 
@@ -782,9 +786,14 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         // the desktop rather than being flush to a screen edge).
         GlassSlab.DrawGlass(ctx, _slabX, _slabY, _slabW, _slabH, _radius, _opacity, _frost, shadowExtent: 26f);
 
+        // Orbit light: a cool lamp circling the slab centre casts an inward glow.
+        // Filling the rounded slab with the lamp's radial gradient clips it to the
+        // glass automatically (parity with GlassOrbitLight, 36s/rev).
+        var slab = new RoundedRectangle { Rect = new Vortice.Mathematics.Rect(_slabX, _slabY, _slabW, _slabH), RadiusX = _radius, RadiusY = _radius };
+        DrawOrbitLight(ctx, slab);
+
         // Stereoscopic rim: a soft cool glow + crisp dark/bright double rim, mirroring
         // DrawGlassPanel's slabGlow/slabShade/slabRim strokes.
-        var slab = new RoundedRectangle { Rect = new Vortice.Mathematics.Rect(_slabX, _slabY, _slabW, _slabH), RadiusX = _radius, RadiusY = _radius };
         using (var glow = ctx.CreateSolidColorBrush(Col(0x73, 0xBF, 0xE0, 0xFF)))
             ctx.DrawRoundedRectangle(slab, glow, 5f);
         using (var shade = ctx.CreateSolidColorBrush(Col(0x80, 0x06, 0x0B, 0x16)))
@@ -891,6 +900,28 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         using (var fg = ctx.CreateSolidColorBrush(Col(0xF0, 0xFF, 0xFF, 0xFF)))
             ctx.DrawText("\u2699", _gearFormat, rect, fg);
         ctx.Transform = saved;
+    }
+
+    /// <summary>Orbit light: a cool radial lamp circling the slab centre (36s/rev),
+    /// painted by filling the rounded slab with the lamp's radial gradient so the
+    /// glow is clipped to the glass (parity with GlassOrbitLight).</summary>
+    private void DrawOrbitLight(ID2D1DeviceContext ctx, in RoundedRectangle slab)
+    {
+        float cx = _slabX + _slabW / 2f, cy = _slabY + _slabH / 2f;
+        float orbitR = MathF.Max(_slabW, _slabH) * 0.5f + _effIcon * 1.4f;
+        float lampR = orbitR * 1.3f;                 // lampD = orbitR*2.6
+        float th = _orbitAngle * MathF.PI / 180f;
+        var lamp = new Vector2(cx + orbitR * MathF.Sin(th), cy - orbitR * MathF.Cos(th));
+        using var stops = ctx.CreateGradientStopCollection(new[]
+        {
+            new Vortice.Direct2D1.GradientStop { Position = 0f,    Color = Col(0x3C, 0xCF, 0xEC, 0xFF) },
+            new Vortice.Direct2D1.GradientStop { Position = 0.34f, Color = Col(0x22, 0x76, 0xC4, 0xFF) },
+            new Vortice.Direct2D1.GradientStop { Position = 0.62f, Color = Col(0x0A, 0x4C, 0x9E, 0xF0) },
+            new Vortice.Direct2D1.GradientStop { Position = 1f,    Color = Col(0x00, 0x3A, 0x86, 0xE0) },
+        });
+        using var brush = ctx.CreateRadialGradientBrush(
+            new RadialGradientBrushProperties { Center = lamp, RadiusX = lampR, RadiusY = lampR }, stops);
+        ctx.FillRoundedRectangle(slab, brush);
     }
 
     /// <summary>Top-left date/time bar on the glass slab (parity with RadialWindow's
