@@ -1625,23 +1625,44 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         if (dt > 0.1f) dt = 0.1f;   // clamp after a stall so we don't snap
         float k = 1f - MathF.Exp(-dt / 0.045f);   // tau 45ms
 
-        // Where each icon should sit while the dragged icon hovers its target cell.
-        int[]? arr = null;
-        if (_dragging && !_saturn && _pressIdx >= 0 && _pressIdx < _slots.Count)
+        // Per-icon target offsets while dragging: glass reflows in reading-order grid
+        // slots; saturn reflows along its two rings (re-spaced for the prospective
+        // inner-ring count) so neighbours make room as the dragged icon orbits.
+        int[]? arr = null;          // glass: entry -> slot over the current layout
+        int[]? satSlot = null;      // saturn: entry -> flat slot
+        int satN = 0, satR0 = 0;
+        if (_dragging && _pressIdx >= 0 && _pressIdx < _slots.Count)
         {
-            float dropY = _scrollable ? _dragY + (float)_glassScroll : _dragY;
-            int tgt = ComputeGridTarget(_dragX, dropY, _pressIdx);
-            arr = GridArrangement(_pressIdx, tgt);
+            if (_saturn)
+            {
+                var (ring, pos) = ComputeSaturnDragTarget(_dragX, _dragY, _pressIdx);
+                (satSlot, satR0) = ComputeSaturnArrangement(_pressIdx, ring, pos);
+                satN = _slots.Count;
+            }
+            else
+            {
+                float dropY = _scrollable ? _dragY + (float)_glassScroll : _dragY;
+                int tgt = ComputeGridTarget(_dragX, dropY, _pressIdx);
+                arr = GridArrangement(_pressIdx, tgt);
+            }
         }
 
         float maxDelta = 0f;
         for (int i = 0; i < _slots.Count && i < _waveOffX.Length; i++)
         {
             float tx = 0f, ty = 0f;
-            if (arr != null && i != _pressIdx && i < arr.Length)
+            if (i != _pressIdx)
             {
-                Vector2 d = _slots[arr[i]].Center - _slots[i].Center;
-                tx = d.X; ty = d.Y;
+                if (arr != null && i < arr.Length)
+                {
+                    Vector2 d = _slots[arr[i]].Center - _slots[i].Center;
+                    tx = d.X; ty = d.Y;
+                }
+                else if (satSlot != null && i < satSlot.Length)
+                {
+                    Vector2 d = SaturnSlotCenter(satN, satR0, satSlot[i]) - _slots[i].Center;
+                    tx = d.X; ty = d.Y;
+                }
             }
             _waveOffX[i] += (tx - _waveOffX[i]) * k;
             _waveOffY[i] += (ty - _waveOffY[i]) * k;
@@ -1649,6 +1670,137 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             maxDelta = Math.Max(maxDelta, Math.Abs(ty - _waveOffY[i]));
         }
         return maxDelta;
+    }
+
+    /// <summary>Saturn: window-local centre of flat slot <paramref name="flatSlot"/> in
+    /// a layout of <paramref name="n"/> icons with <paramref name="r0"/> on the inner
+    /// ring (mirrors WPF SlotPositionsFor / RingPoint).</summary>
+    private Vector2 SaturnSlotCenter(int n, int r0, int flatSlot)
+    {
+        r0 = Math.Clamp(r0, 1, Math.Max(1, n));
+        int ring1 = n - r0;
+        bool inner = flatSlot < r0;
+        int k = inner ? flatSlot : flatSlot - r0;
+        int cnt = inner ? r0 : ring1;
+        float radius = inner ? _sg.InnerRadius : _sg.OuterRadius;
+        double angle = -Math.PI / 2 + 2 * Math.PI * k / Math.Max(1, cnt);
+        float sx = _sg.Cx + (float)(radius * Math.Cos(angle));
+        float sy = _sg.Cy + (float)(radius * Math.Sin(angle) * RingTiltY);
+        return new Vector2(sx, sy);
+    }
+
+    /// <summary>Saturn: which ring (0 inner / 1 outer) and angular slot the dragged
+    /// icon <paramref name="src"/> targets at window-local point (<paramref name="px"/>,
+    /// <paramref name="py"/>). Port of WPF <c>ComputeDragTarget</c>.</summary>
+    private (int ring, int pos) ComputeSaturnDragTarget(float px, float py, int src)
+    {
+        int n = _config.Apps.Count;
+        int r0 = EffectiveRing0Count(n);
+        int o0 = (src >= 0 && src < r0) ? r0 - 1 : r0;   // other inner-ring icons
+        int m = Math.Max(0, n - 1);
+        int ring1Others = m - o0;
+
+        double dx = px - _sg.Cx, dy = py - _sg.Cy;
+        double dist = Math.Sqrt(dx * dx + dy * dy);
+        double ringMid = (_sg.InnerRadius + _sg.OuterRadius) / 2.0;
+        int ring = dist <= ringMid ? 0 : 1;
+
+        // Respect caps: redirect to the other ring if the chosen one is full.
+        if (ring == 0 && o0 + 1 > Ring0Cap) ring = 1;
+        if (ring == 1 && ring1Others + 1 > Ring1Cap) ring = 0;
+
+        int slotsAfter = ring == 0 ? o0 + 1 : ring1Others + 1;
+        double ang = Math.Atan2(dy, dx);
+        double fromTop = ang + Math.PI / 2.0;   // 0 at 12 o'clock, clockwise
+        fromTop = ((fromTop % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
+        int pos = (int)Math.Round(fromTop / (2 * Math.PI) * slotsAfter);
+        pos = Math.Clamp(pos, 0, Math.Max(0, slotsAfter - 1));
+        return (ring, pos);
+    }
+
+    /// <summary>Saturn: maps each entry index to its flat slot when the dragged entry
+    /// <paramref name="src"/> is reinserted into <paramref name="ring"/> at angular
+    /// position <paramref name="pos"/>; also returns the new inner-ring count. Port of
+    /// WPF <c>ComputeArrangement</c>.</summary>
+    private (int[] slotOfEntry, int newR0) ComputeSaturnArrangement(int src, int ring, int pos)
+    {
+        int n = _config.Apps.Count;
+        int r0 = EffectiveRing0Count(n);
+        int srcRing = src < r0 ? 0 : 1;
+
+        var inner = new List<int>();
+        for (int i = 0; i < r0; i++) inner.Add(i);
+        var outer = new List<int>();
+        for (int i = r0; i < n; i++) outer.Add(i);
+
+        int newR0;
+        if (ring == srcRing)
+        {
+            // Same ring: shift only the shorter arc between the dragged icon's
+            // current angular slot and the target so crossing 12 o'clock nudges
+            // neighbours instead of rotating the whole ring.
+            var seq = ring == 0 ? inner : outer;
+            int len = seq.Count;
+            int cur = seq.IndexOf(src);
+            int tgt = Math.Clamp(pos, 0, Math.Max(0, len - 1));
+            int[] newIdx = ShortestArcShift(len, cur, tgt);
+            var newSeq = new int[len];
+            for (int j = 0; j < len; j++) newSeq[newIdx[j]] = seq[j];
+            seq.Clear(); seq.AddRange(newSeq);
+            newR0 = r0;
+        }
+        else
+        {
+            // Cross ring: remove from the source ring and insert into the target.
+            if (srcRing == 0) inner.Remove(src); else outer.Remove(src);
+            var tgt = ring == 0 ? inner : outer;
+            int insertAt = Math.Clamp(pos, 0, tgt.Count);
+            tgt.Insert(insertAt, src);
+            newR0 = inner.Count;
+        }
+
+        int[] slotOfEntry = new int[n];
+        int slot = 0;
+        foreach (int e in inner) slotOfEntry[e] = slot++;
+        foreach (int e in outer) slotOfEntry[e] = slot++;
+        return (slotOfEntry, newR0);
+    }
+
+    /// <summary>For a ring of <paramref name="len"/> slots, the new angular index of
+    /// each current index when the icon at <paramref name="cur"/> moves to
+    /// <paramref name="tgt"/>, shifting only the shorter arc by one. Port of WPF
+    /// <c>ShortestArcShift</c>.</summary>
+    private static int[] ShortestArcShift(int len, int cur, int tgt)
+    {
+        int[] newIdx = new int[Math.Max(0, len)];
+        if (len <= 0) return newIdx;
+        cur = Math.Clamp(cur, 0, len - 1);
+        tgt = Math.Clamp(tgt, 0, len - 1);
+        newIdx[cur] = tgt;
+
+        int df = ((tgt - cur) % len + len) % len;   // forward steps cur -> tgt
+        int db = len - df;                            // backward steps
+        bool forward = df <= db;
+
+        for (int j = 0; j < len; j++)
+        {
+            if (j == cur) continue;
+            int ns = j;
+            if (forward)
+            {
+                int rel = ((j - cur) % len + len) % len;   // 1..len-1
+                if (rel >= 1 && rel <= df)
+                    ns = (j - 1 + len) % len;
+            }
+            else
+            {
+                int relT = ((j - tgt) % len + len) % len;   // 0..len-1
+                if (relT >= 0 && relT < db)
+                    ns = (j + 1) % len;
+            }
+            newIdx[j] = ns;
+        }
+        return newIdx;
     }
 
     private void ClickSlot(int idx)
@@ -1694,6 +1846,27 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         if (outside)
         {
             UnpinPinned(s.Entry);
+            return;
+        }
+
+        // Saturn: reorder on the two rings by nearest ring + angular slot (mirrors
+        // WPF ComputeDragTarget / ComputeArrangement) so the icon lands where the
+        // pointer is on the ring, not in glass reading order.
+        if (_saturn)
+        {
+            var (ring, pos) = ComputeSaturnDragTarget(lx, ly, idx);
+            var (slotOfEntry, newR0) = ComputeSaturnArrangement(idx, ring, pos);
+            int sn = _config.Apps.Count;
+            if (slotOfEntry.Length == sn && sn > 0)
+            {
+                var ordered = new AppEntry[sn];
+                for (int i = 0; i < sn; i++) ordered[slotOfEntry[i]] = _config.Apps[i];
+                _config.Apps.Clear();
+                foreach (var a in ordered) _config.Apps.Add(a);
+                _config.Settings.Ring0Count = Math.Clamp(newR0, 0, sn);
+                PersistAndRelayout();
+            }
+            else Render();
             return;
         }
 
