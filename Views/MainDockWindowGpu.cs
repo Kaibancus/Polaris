@@ -1495,8 +1495,9 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         var s = _slots[hover];
         if (s.Entry == null || string.IsNullOrWhiteSpace(s.Entry.Path))
             return;
-        var path = s.Entry.Path; var args = s.Entry.Arguments;
-        _previewSource = () => WindowPreviewService.GetWindowsForEntry(path, args);
+        var path = s.Entry.Path; var args = s.Entry.Arguments; var name = s.Entry.Name;
+        var excl = SiblingShellNames(s.Entry);
+        _previewSource = () => WindowPreviewService.GetWindowsForEntry(path, args, name, excl);
         EnsureAnchor();
         AnchorOverSlot(s);
         _preview!.Placement = PreviewPlacement.Above;   // main dock is bottom-anchored
@@ -2656,6 +2657,18 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         if (_slotMenu != null) { _slotMenu.IsOpen = false; _slotMenu = null; }
     }
 
+    /// <summary>Names of OTHER pinned shell-namespace folders (This PC, Recycle Bin…) so the
+    /// generic File Explorer preview can drop the windows those sibling pins already claim.</summary>
+    private List<string> SiblingShellNames(AppEntry self)
+    {
+        var names = new List<string>();
+        foreach (var a in _config.Apps)
+            if (!ReferenceEquals(a, self) && WindowPreviewService.IsShellFolderPath(a.Path)
+                && !string.IsNullOrWhiteSpace(a.Name))
+                names.Add(a.Name);
+        return names;
+    }
+
     /// <summary>Closes every window of the slot's app (right-click "关闭窗口").</summary>
     private void CloseSlotWindows(in IconSlot s)
     {
@@ -2665,7 +2678,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         try
         {
             wins = !string.IsNullOrWhiteSpace(s.Entry.Path)
-                ? WindowPreviewService.GetWindowsForEntry(s.Entry.Path, s.Entry.Arguments)
+                ? WindowPreviewService.GetWindowsForEntry(s.Entry.Path, s.Entry.Arguments, s.Entry.Name, SiblingShellNames(s.Entry))
                 : new List<WindowPreview>();
         }
         catch { wins = new List<WindowPreview>(); }

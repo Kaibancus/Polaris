@@ -334,11 +334,45 @@ public static class WindowPreviewService
     /// the entry is one of these launchers we match by the window's Application
     /// User Model ID instead; otherwise we fall back to process-path matching.
     /// </summary>
-    public static List<WindowPreview> GetWindowsForEntry(string path, string? arguments)
+    /// <summary>True when <paramref name="path"/> is a shell-namespace folder pin (This PC,
+    /// Recycle Bin, Control Panel… — a "::{CLSID}" or non-AppsFolder "shell:" target) rather
+    /// than a real exe or the generic File Explorer launcher.</summary>
+    public static bool IsShellFolderPath(string? path) =>
+        !string.IsNullOrEmpty(path) && (path!.StartsWith("::", StringComparison.Ordinal)
+            || (path.StartsWith("shell:", StringComparison.OrdinalIgnoreCase)
+                && path.IndexOf("AppsFolder", StringComparison.OrdinalIgnoreCase) < 0));
+
+    public static List<WindowPreview> GetWindowsForEntry(string path, string? arguments,
+        string? displayName = null, IReadOnlyCollection<string>? excludeTitles = null)
     {
+        // Shell-namespace folder pins (This PC, Recycle Bin, Control Panel…) open as
+        // explorer.exe windows that are indistinguishable by process/AUMID from every other
+        // File Explorer window, so process/AUMID matching would surface ALL Explorer windows.
+        // Match by the window TITLE instead: a shell folder's window title contains the folder
+        // name, which is exactly the name we pinned it under (mirrors the running-dot's
+        // IsShellItemRunning), so e.g. "This PC" previews only its own window. The AppsFolder
+        // launcher (generic "File Explorer") is excluded here — its window title is the current
+        // folder, not its pin name — so it keeps the AUMID match below.
+        if (!string.IsNullOrEmpty(displayName) && IsShellFolderPath(path))
+            return GetExplorerWindowsByTitle(displayName!);
+
         string? aumid = TryGetLauncherAumid(path, arguments);
         if (aumid != null)
         {
+            // The generic File Explorer launcher (Microsoft.Windows.Explorer) owns EVERY
+            // Explorer window. Its windows don't reliably carry the AUMID, so resolve them by
+            // process (explorer.exe) and drop the ones a sibling shell-folder pin (This PC,
+            // Recycle Bin…) already claims, so File Explorer previews only generic browsing
+            // windows. Handled before the generic AUMID path because the AUMID match is empty
+            // and the exe fallback below would otherwise return ALL explorer windows unfiltered.
+            if (string.Equals(aumid, "Microsoft.Windows.Explorer", StringComparison.OrdinalIgnoreCase))
+            {
+                var all = GetAllExplorerWindows();
+                if (excludeTitles != null && excludeTitles.Count > 0)
+                    all = FilterOutTitles(all, excludeTitles);
+                return all;
+            }
+
             var byAumid = GetWindowsByAumid(aumid);
             if (byAumid.Count > 0)
                 return byAumid;
@@ -993,6 +1027,87 @@ public static class WindowPreviewService
             return true;
         }, IntPtr.Zero);
         return titles;
+    }
+
+    /// <summary>The explorer.exe alt-tab windows whose title exactly matches
+    /// <paramref name="title"/> — i.e. the open windows currently showing that shell
+    /// folder. Used to preview a shell-namespace pin (This PC, Recycle Bin…) with only
+    /// its own window, since such pins share explorer's process/AUMID with every other
+    /// File Explorer window and can only be told apart by the folder name in the title.</summary>
+    public static List<WindowPreview> GetExplorerWindowsByTitle(string title)
+    {
+        var result = new List<WindowPreview>();
+        if (string.IsNullOrWhiteSpace(title))
+            return result;
+        int ownPid = Environment.ProcessId;
+        EnumWindows((hWnd, _) =>
+        {
+            if (!IsAltTabWindow(hWnd))
+                return true;
+            if (GetWindowThreadProcessId(hWnd, out uint pid) == 0 || pid == ownPid)
+                return true;
+            string winTitle = GetWindowTitle(hWnd);
+            if (string.IsNullOrWhiteSpace(winTitle) ||
+                !winTitle.Contains(title, StringComparison.OrdinalIgnoreCase))
+                return true;
+            string? path = GetProcessInfo(pid, out string? _aumid);
+            if (string.IsNullOrWhiteSpace(path) ||
+                !string.Equals(Path.GetFileName(path), "explorer.exe", StringComparison.OrdinalIgnoreCase))
+                return true;
+            result.Add(new WindowPreview { Handle = hWnd, Title = winTitle });
+            return true;
+        }, IntPtr.Zero);
+        return result;
+    }
+
+    /// <summary>Every explorer.exe alt-tab window (any folder). Used to preview the generic
+    /// File Explorer launcher, whose windows share explorer's process and don't reliably carry
+    /// the launcher AUMID.</summary>
+    public static List<WindowPreview> GetAllExplorerWindows()
+    {
+        var result = new List<WindowPreview>();
+        int ownPid = Environment.ProcessId;
+        EnumWindows((hWnd, _) =>
+        {
+            if (!IsAltTabWindow(hWnd))
+                return true;
+            if (GetWindowThreadProcessId(hWnd, out uint pid) == 0 || pid == ownPid)
+                return true;
+            string winTitle = GetWindowTitle(hWnd);
+            if (string.IsNullOrWhiteSpace(winTitle))
+                return true;
+            string? path = GetProcessInfo(pid, out string? _aumid);
+            if (string.IsNullOrWhiteSpace(path) ||
+                !string.Equals(Path.GetFileName(path), "explorer.exe", StringComparison.OrdinalIgnoreCase))
+                return true;
+            result.Add(new WindowPreview { Handle = hWnd, Title = winTitle });
+            return true;
+        }, IntPtr.Zero);
+        return result;
+    }
+
+    /// <summary>Returns the windows whose title contains NONE of <paramref name="excludeTitles"/>
+    /// (case-insensitive). Used to drop the windows a sibling shell-folder pin already claims
+    /// from the generic File Explorer preview.</summary>
+    private static List<WindowPreview> FilterOutTitles(List<WindowPreview> windows, IReadOnlyCollection<string> excludeTitles)
+    {
+        var kept = new List<WindowPreview>(windows.Count);
+        foreach (var w in windows)
+        {
+            bool excluded = false;
+            foreach (var n in excludeTitles)
+            {
+                if (!string.IsNullOrEmpty(n) && !string.IsNullOrEmpty(w.Title) &&
+                    w.Title.Contains(n, StringComparison.OrdinalIgnoreCase))
+                {
+                    excluded = true;
+                    break;
+                }
+            }
+            if (!excluded)
+                kept.Add(w);
+        }
+        return kept;
     }
 
 

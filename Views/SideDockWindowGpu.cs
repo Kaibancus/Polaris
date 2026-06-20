@@ -2106,14 +2106,27 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     [DllImport("user32.dll")] private static extern int GetWindowLongW(IntPtr h, int idx);
     [DllImport("user32.dll")] private static extern int SetWindowLongW(IntPtr h, int idx, int val);
 
+    /// <summary>Names of OTHER pinned shell-namespace folders (This PC, Recycle Bin…) so the
+    /// generic File Explorer preview can drop the windows those sibling pins already claim.</summary>
+    private List<string> SiblingShellNames(AppEntry self)
+    {
+        var names = new List<string>();
+        foreach (var a in _config.Apps)
+            if (!ReferenceEquals(a, self) && WindowPreviewService.IsShellFolderPath(a.Path)
+                && !string.IsNullOrWhiteSpace(a.Name))
+                names.Add(a.Name);
+        return names;
+    }
+
     /// <summary>Builds the windows-source delegate for a slot, or null when the slot
     /// has no previewable windows (overflow, or our own Polaris tile).</summary>
     private Func<List<WindowPreview>>? PreviewSourceFor(in Slot s)
     {
         if (s.Kind == SlotKind.Pinned && s.Entry != null && !string.IsNullOrWhiteSpace(s.Entry.Path))
         {
-            var path = s.Entry.Path; var args = s.Entry.Arguments;
-            return () => WindowPreviewService.GetWindowsForEntry(path, args);
+            var path = s.Entry.Path; var args = s.Entry.Arguments; var name = s.Entry.Name;
+            var excl = SiblingShellNames(s.Entry);
+            return () => WindowPreviewService.GetWindowsForEntry(path, args, name, excl);
         }
         if (s.Kind == SlotKind.Run)
         {
