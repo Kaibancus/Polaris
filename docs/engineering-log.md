@@ -100,7 +100,7 @@
     释放停止集合（D2D 中 brush 创建时已 AddRef 该集合，本地句柄可安全释放、brush 仍有效）；
     9 处渐变创建（DrawGlass 7 + DrawDark 2）全部改走辅助方法。
   - **效果**：active 悬停 priv 由泄漏到 2.7 GB → **全程稳定 ~400 MB（降幅 ~85%）**；并且消除每帧
-    原生纹理 churn 后，FrameClock 帧率由 ~38fps → **44-53fps**（逼近本机 59Hz 显示上限）。旁证：
+    原生纹理 churn 后，FrameClock 帧率由 ~38fps → **44-53fps**（**虚拟 GPU/共享 VM 环境实测**，逼近该环境 59Hz 虚拟显示上限；为软件 vs GPU 的相对值，非真实硬件绝对值）。旁证：
     SaturnScene 与侧 Dock 内其余 `CreateGradientStopCollection` 调用方均已用 `using`、不泄漏；
     `GlassPrototypeWindow.cs` 有同样模式但仅 `POLARIS_GLASS_PROTO=1` dev 标志启用，非生产路径。
   - 配套：新增 `Services/GpuFrameStats.cs`（`POLARIS_GPUFPS=1` 开启的逐 Dock fps/帧间最差 gap/
