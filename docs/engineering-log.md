@@ -59,6 +59,17 @@
 
 ## 🐛 BUG 修复
 
+- **从桌面拖图标进 GPU Dock 时图标抓不起来（鼠标按下被 Dock 吞掉）**（`5e8db52`）：GPU
+  Dock 是合成窗口（`WS_EX_NOREDIRECTIONBITMAP`），且窗口尺寸远大于可见内容（含拖拽/阴影
+  留白，土星主题几乎全屏）。这圈透明余量属于置顶窗口，**会拦截本该落到下方桌面图标的鼠标
+  按下**，导致桌面图标无法被抓起拖入 Dock；现象呈"偶发"（实为按下点是否落在余量内 + 渲染
+  线程是否繁忙的叠加）。根因：合成窗口无法用 `WS_EX_TRANSPARENT`（需配 `WS_EX_LAYERED`，
+  与合成互斥，故为 no-op），而逐消息 `WM_NCHITTEST→HTTRANSPARENT` 穿透在渲染线程繁忙时
+  回应延迟、被 OS 当作不透明。**修复**：用 `SetWindowRgn` 把窗口裁切到可见内容（slab/土星
+  盘 + 放大/标签留白），余量直接不属于窗口——OS 级、与渲染线程无关的穿透，等价于 WPF Dock
+  逐像素 alpha 命中测试（`MainDockWindowGpu.ApplyWindowRegion`，`SyncShim` 内随布局更新）。
+  排查中确认 `WS_EX_TRANSPARENT`、鼠标捕获、OLE 注册、shim z-order、UI 线程阻塞均非根因。
+
 - **进程保护应用（UU加速器）的常驻图标不亮绿色运行灯**：UU加速器固定的是
   `uu_launcher.exe`（启动器，拉起主程序后自身无窗口），而真正有窗口的主进程 `uu`
   开启了反调试保护，**`Process.MainModule.FileName` 读不到其 exe 路径**，导致
