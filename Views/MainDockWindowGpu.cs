@@ -110,6 +110,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     private long _bounceStart;
     private const long BounceDurMs = 480;
     private System.Windows.Controls.Primitives.Popup? _slotMenu;
+    private int _menuIdx = -1;   // slot the right-click menu is anchored to (-1 = none)
 
     // ---- Glass grid scrolling state (liquid-glass theme, >VisibleRows rows) ----
     private double _glassScroll;          // committed vertical scroll offset (DIP, >=0 scrolls content up)
@@ -1487,6 +1488,10 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     {
         if (hover == _prevHover)
             return;
+        // A right-click menu is anchored to one icon; moving the pointer onto a different
+        // icon dismisses it (parity with WPF / standard menu behaviour).
+        if (_slotMenu != null && hover != _menuIdx)
+            CloseSlotMenu();
         if (_prevHover >= 0)
             _preview?.OnPointerLeave();
         _prevHover = hover;
@@ -2572,6 +2577,16 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         };
         if (s.Running)
             items.Add(("关闭窗口", () => CloseSlotWindows(s)));
+        _menuIdx = idx;
+        // If the hover thumbnail preview is open, fade it out first and show the menu only
+        // once the animation has finished, so the two never overlap (parity with the WPF
+        // dock's ShowDockMenu(fadePreview)).
+        var slot = s;
+        if (_preview != null && _preview.IsOpen)
+        {
+            _preview.CloseAnimated(() => BuildAndShowSlotMenu(slot, items));
+            return;
+        }
         BuildAndShowSlotMenu(s, items);
     }
 
@@ -2634,7 +2649,10 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         // offsets are screen DIPs → screen-DIP icon centre = _winX + s.Center.
         shell.Measure(new System.Windows.Size(double.PositiveInfinity, double.PositiveInfinity));
         var ds = shell.DesiredSize;
-        double half = _gIcon / 2.0; const double gap = 4.0;
+        // Clear the HOVER-MAGNIFIED icon: the right-clicked icon is under the cursor and so
+        // popped to ~MagnifyPeak, extending well above its resting top. Anchor above that
+        // (not the base half) plus a small gap, so the menu sits clearly over the icon.
+        double half = _gIcon / 2.0 * MagnifyPeak; const double gap = 6.0;
         double px = _winX + s.Center.X - ds.Width / 2.0;
         double py = _winY + s.Center.Y - half - gap - ds.Height;
         var popup = new System.Windows.Controls.Primitives.Popup
@@ -2654,6 +2672,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
 
     private void CloseSlotMenu()
     {
+        _menuIdx = -1;
         if (_slotMenu != null) { _slotMenu.IsOpen = false; _slotMenu = null; }
     }
 

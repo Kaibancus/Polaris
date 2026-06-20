@@ -631,8 +631,12 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         float l = _sx - m, r = _sx + _sw + m, t = _sy - m, b = _sy + _sh + m;
         switch (_side)
         {
-            case DockSide.Left: r = _sx + _sw + mPop; break;
-            case DockSide.Right: l = _sx - mPop; break;
+            // Vertical docks: the hover name label extends along the cross axis (the window
+            // thickness) toward the interior and can be long, so cover the FULL thickness on
+            // that side — otherwise the window region clips the label. (The main-axis reserve
+            // above/below the icon column is still carved by t/b for desktop passthrough.)
+            case DockSide.Left: r = _winW; break;
+            case DockSide.Right: l = 0f; break;
             case DockSide.Top: b = _sy + _sh + mPop; break;
             default: t = _sy - mPop; break;
         }
@@ -1448,6 +1452,16 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
             _ => (s.Center.X, s.Center.Y - reach - h / 2f),
         };
         var rect = new Rect(lx - w / 2f, ly - h / 2f, w, h);
+        // Hug the icon edge: for vertical docks the label grows toward the interior, so align
+        // the text to the icon side of its box (leading on the left dock, trailing on the
+        // right) instead of centring it — centred text in the width-estimated box reads as
+        // floating too far from the icon. Horizontal docks stay centred over the icon.
+        _hoverFormat.TextAlignment = _side switch
+        {
+            DockSide.Left => TextAlignment.Leading,
+            DockSide.Right => TextAlignment.Trailing,
+            _ => TextAlignment.Center,
+        };
         byte A(byte a) => (byte)Math.Clamp(a * labelOp, 0, 255);
         // The real hover label is just floating text on a barely-there dark tint
         // (ARGB 0x05,1A1A1A) — no visible plate.
@@ -1920,6 +1934,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     // ---- Right-click context menu (parity with the WPF dock) -----------------
 
     private System.Windows.Controls.Primitives.Popup? _slotMenu;
+    private int _menuIdx = -1;   // slot the right-click menu is anchored to (-1 = none)
 
     /// <summary>Shows a dock-styled right-click menu for the slot under the cursor:
     /// pinned icons offer unpin (+ close window when running); running-strip tiles
@@ -1947,6 +1962,18 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         }
         if (items.Count == 0)
             return;
+        _menuIdx = idx;
+        // If the hover thumbnail preview is open, fade it out first and show the menu only
+        // once the animation finishes, so the two never overlap (parity with WPF
+        // ShowDockMenu(fadePreview)). Hold the dock open across the fade gap.
+        var slot = s;
+        if (_preview != null && _preview.IsOpen)
+        {
+            _byMenu = true;
+            UpdateVisibility();
+            _preview.CloseAnimated(() => BuildAndShowSlotMenu(slot, items));
+            return;
+        }
         BuildAndShowSlotMenu(s, items);
     }
 
@@ -2012,9 +2039,16 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         // shell so we can centre / offset it without a WPF placement target.
         shell.Measure(new System.Windows.Size(double.PositiveInfinity, double.PositiveInfinity));
         var ds = shell.DesiredSize;
-        double half = _gIcon / 2.0; const double gap = 4.0;
-        double cxDip = _winX + s.Center.X;
-        double cyDip = _winY + s.Center.Y;
+        // Anchor relative to the HOVER-MAGNIFIED + popped icon (same box the thumbnail preview
+        // anchors to in AnchorOverSlot), opening toward the screen interior, and clamp to the
+        // work area so the menu stays fully on-screen no matter which edge the dock is on. The
+        // pop factor is dialled back from the icon's full visual pop (1.18) so the menu sits a
+        // touch closer to the icon (the full pop reads as slightly too far).
+        float scale = HoverScale;
+        Vector2 po = PopOffset((scale - 1f) * _gIcon * 0.6f);
+        double half = _gIcon * scale / 2.0; const double gap = 6.0;
+        double cxDip = _winX + s.Center.X + po.X;
+        double cyDip = _winY + s.Center.Y + po.Y;
         double px, py;
         switch (_side)
         {
@@ -2023,6 +2057,10 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
             case DockSide.Top:    px = cxDip - ds.Width / 2.0;        py = cyDip + half + gap; break;
             default:              px = cxDip - ds.Width / 2.0;        py = cyDip - half - gap - ds.Height; break;  // Bottom → above
         }
+        var wa = MonitorLayout.ActiveWorkArea;   // DIPs — keep the menu within the visible work area
+        const double edge = 6.0;
+        px = Math.Clamp(px, wa.Left + edge, Math.Max(wa.Left + edge, wa.Right - ds.Width - edge));
+        py = Math.Clamp(py, wa.Top + edge, Math.Max(wa.Top + edge, wa.Bottom - ds.Height - edge));
         var popup = new System.Windows.Controls.Primitives.Popup
         {
             Child = shell,
@@ -2042,6 +2080,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
 
     private void CloseSlotMenu()
     {
+        _menuIdx = -1;
         if (_slotMenu != null) { _slotMenu.IsOpen = false; _slotMenu = null; }
     }
 
@@ -2148,6 +2187,10 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     {
         if (hover == _prevHover)
             return;
+        // A right-click menu is anchored to one icon; moving the pointer onto a different
+        // icon dismisses it (parity with WPF / standard menu behaviour).
+        if (_slotMenu != null && hover != _menuIdx)
+            CloseSlotMenu();
         if (_prevHover >= 0)
             _preview?.OnPointerLeave();
         _prevHover = hover;
