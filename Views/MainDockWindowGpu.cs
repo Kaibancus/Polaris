@@ -1121,6 +1121,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             ctx.Transform = System.Numerics.Matrix3x2.Identity;
         ctx.EndDraw();
         _host.Present();
+        Polaris.Services.GpuFrameStats.Frame("main");
     }
 
     // BackEase-out (soft overshoot, mirrors the WPF glass-rise settle).

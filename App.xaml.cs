@@ -171,6 +171,9 @@ public partial class App : Application
         // Opt-in frame-rate profiler (POLARIS_FPS=1). No-op otherwise.
         FpsProfiler.StartIfRequested();
 
+        // Opt-in GPU-dock frame meter (POLARIS_GPUFPS=1). No-op otherwise.
+        Polaris.Services.GpuFrameStats.StartIfRequested();
+
         // Single-instance guard: if another Polaris is already running,
         // notify the user and exit immediately.
         _singleInstanceMutex = new Mutex(true, @"Global\Polaris_SingleInstance", out bool createdNew);

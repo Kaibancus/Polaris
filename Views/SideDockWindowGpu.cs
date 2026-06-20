@@ -212,6 +212,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     private void DoShow()
     {
         _shown = true;
+        _timer?.Start();   // re-arm the vsync render loop (it is stopped while hidden to avoid idle churn)
         if (!_realized) { Realize(); StartIntro(); return; }
         // Recreate so the running strip + layout reflect the latest state, then
         // ensure the window is visible and on top.
@@ -822,6 +823,11 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         if (!_shown)
         {
             if (intro) Render();
+            else _timer?.Stop();   // Hide animation finished: stop the vsync render loop so
+                                   // CompositionTarget.Rendering no longer fires every frame
+                                   // while the dock is hidden (fixes the idle memory growth the
+                                   // FrameClock introduced — an unconditionally-running clock
+                                   // kept allocating per frame even with nothing shown).
             return;
         }
         bool vertical = _side is DockSide.Left or DockSide.Right;
@@ -1416,6 +1422,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         _host.Present();
         satBlur?.Dispose();
         satSrc?.Dispose();
+        Polaris.Services.GpuFrameStats.Frame("side");
     }
 
     /// <summary>Glass orbit light: a cool lamp drifts around the slab (one rev / 36s),

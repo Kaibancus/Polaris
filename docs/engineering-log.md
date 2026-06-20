@@ -16,6 +16,29 @@
 
 ## ⚠️ 调查结论 / 已知限制
 
+### GPU Dock 帧率上限 ~38-40fps 的根因 = UI 线程定时器 / WPF 渲染时钟；60fps 需独立渲染线程
+- **背景**：本机为 59Hz 共享 VM（Intel Arc）。GPU Dock 单帧 draw 仅 4-5ms、`Present(1)` 仅 0.1ms
+  （DComp flip 交换链 2 缓冲，低于刷新率时队列不满故不阻塞、不起节流作用），帧预算充裕但帧率仍只
+  ~38fps。瓶颈在「谁以多高频率调用 Render」，而非 GPU 绘制本身。
+- **逐方案实测**（`POLARIS_GPUFPS=1`，含 worst_gap 与内存列）：
+  | 渲染驱动 | 帧率 | 帧间最差 gap | 结论 |
+  |---------|------|-------------|------|
+  | DispatcherTimer(16ms) | ~32fps | 78ms | WM_TIMER ~15.6ms 粒度，16ms 别名成 ~31ms |
+  | + timeBeginPeriod(1) | ~30-35fps | 47-78ms | **timeBeginPeriod 对 WM_TIMER 无效** |
+  | + DispatcherPriority.Render | ~30-40fps | 47ms | 抬优先级躲开鼠标 Input 饿死，仍卡 ~47ms=3×15.6ms |
+  | FrameClock(CompositionTarget.Rendering) | ~38fps（修内存泄漏后 44-53fps） | — | vsync 对齐，最平滑 |
+- **根因**：①`DispatcherTimer` 由 `WM_TIMER` 驱动，分辨率被系统 ~15.6ms tick 钳制，`timeBeginPeriod(1)`
+  只影响 Sleep/多媒体/可等待定时器、**不影响 WM_TIMER**；②`CompositionTarget.Rendering` 走 WPF
+  `MediaContext` 渲染时钟，在虚拟/受限 GPU 上被降频到 ~38Hz。两者都在 UI 线程，且与鼠标消息泵竞争。
+- **其他应用如何做到 60fps/刷新率**：独立渲染线程 + DXGI 可等待交换链
+  （`FRAME_LATENCY_WAITABLE_OBJECT`+`WaitForSingleObject`）或 `DCompositionWaitForCompositorClock`，
+  或专用线程上真正阻塞的 `Present(1)`，把节拍对齐到 GPU/显示 vblank，脱离 UI 线程与 WPF 时钟。
+- **结论**：UI 线程任何定时器方案在本机封顶 ~38-40fps；修复 GlassSlab 内存泄漏（去掉每帧原生纹理
+  churn）后 FrameClock 已升到 44-53fps、**已逼近本机 59Hz 上限**，故本机再上 60fps 边际收益很小；要在
+  高刷机达屏幕刷新率仍需「独立渲染线程 + 可等待交换链」（方案③，较大改造，待评估）。
+- **命令冻结排查附记**：本环境同步 `dotnet build` 偶发被中断（exe 不更新且无残留进程），实测给足
+  等待时间的同步增量构建（~2-3s）可稳定落盘；`edit/create` 改动与 `git commit/push` 均正常持久化。
+
 ### 液态玻璃主 Dock 帧率瓶颈 = 轨道光大面积半透明 blend（软件渲染固有成本）
 - **背景**：玻璃主 Dock 是 `AllowsTransparency=True` 的分层窗口（`UpdateLayeredWindow`
   软件逐像素 alpha 合成，无脏矩形）。实测空闲仅 ~10 FPS、悬停 ~14 FPS。
@@ -58,6 +81,24 @@
   匹配退化为极端兜底。
 
 ## 🐛 BUG 修复
+
+- **GPU 双 Dock 悬停时私有内存持续暴涨（GB 级原生泄漏）**：
+  - **现象**：悬停/活动渲染时进程私有字节（priv）以 ~120 MB/s 持续增长，20 秒涨到 ~2.7 GB 且
+    隐藏后不回落；空闲（隐藏）则稳定。`POLARIS_GPUFPS=1` 实测 active 段 priv 169→2666 MB，而
+    托管堆（GC）全程平稳 3-7 MB、Gen2 仅 7 次——**纯原生泄漏，非托管堆**。
+  - **根因**：`Services/Gpu/GlassSlab.cs` 的玻璃 slab 每帧绘制 ~9 个渐变层，每层都新建一个原生
+    `ID2D1GradientStopCollection`（`Stops(ctx,...)`），但该集合被**直接当实参传给
+    `Create*GradientBrush` 而从未 Dispose**——只释放了 brush。每个渐变停止集合在 Intel Arc 上会
+    分配一块渐变 ramp 纹理（计入 priv），每帧泄漏 ~9 个 × 双 Dock，累积成 GB 级。
+  - **修复**：新增 `RadialBrush`/`LinearBrush` 辅助方法，用 `using var stops` 创建 brush 后立即
+    释放停止集合（D2D 中 brush 创建时已 AddRef 该集合，本地句柄可安全释放、brush 仍有效）；
+    9 处渐变创建（DrawGlass 7 + DrawDark 2）全部改走辅助方法。
+  - **效果**：active 悬停 priv 由泄漏到 2.7 GB → **全程稳定 ~400 MB（降幅 ~85%）**；并且消除每帧
+    原生纹理 churn 后，FrameClock 帧率由 ~38fps → **44-53fps**（逼近本机 59Hz 显示上限）。旁证：
+    SaturnScene 与侧 Dock 内其余 `CreateGradientStopCollection` 调用方均已用 `using`、不泄漏；
+    `GlassPrototypeWindow.cs` 有同样模式但仅 `POLARIS_GLASS_PROTO=1` dev 标志启用，非生产路径。
+  - 配套：新增 `Services/GpuFrameStats.cs`（`POLARIS_GPUFPS=1` 开启的逐 Dock fps/帧间最差 gap/
+    内存 CSV 采集器）；侧 Dock 隐藏后 `_timer?.Stop()` 停掉 vsync 渲染循环，避免空闲 churn。
 
 - **GPU 双 Dock 点击启动动画与原版不一致**：
   - **现象**：①侧边 Dock 点击图标后图标卡在放大弹出状态，弹跳回落后又被重新放大；弹跳又矮又慢、
