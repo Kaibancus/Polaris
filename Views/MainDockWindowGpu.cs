@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Globalization;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using System.Windows;
@@ -58,6 +60,13 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     // UI-thread FrameClock path runs unchanged (_loop stays null).
     private static readonly bool UseRenderThread =
         Environment.GetEnvironmentVariable("POLARIS_GPU_RENDERTHREAD") == "1";
+    // The drag ghost is a tiny, short-lived follow-the-cursor window. Re-creating a full
+    // DComp/D2D host for it on EVERY drag start can accumulate visible jank after several
+    // drags on high-refresh hardware, while the classic WPF ghost only ever moves an icon-
+    // sized layered window and is therefore cheap enough. Keep the GPU ghost behind its
+    // original explicit spike flag, but default GPU docks back to the stable WPF ghost.
+    private static readonly bool UseGpuGhost =
+        Environment.GetEnvironmentVariable("POLARIS_GPU_GHOST") == "1";
     private RenderLoop? _loop;
     // Guards the interaction scalars written by the UI-thread WndProc and read by the
     // render thread inside Tick/Render (drag point, scroll target, launch + show/hide
@@ -117,6 +126,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     private long _attnLast;               // last attention poll tick (throttle to ~800ms)
     private volatile bool _attnBusy;      // an attention poll task is in flight
     private float _orbitAngle;            // glass orbit-light angle (deg, 36s/rev clockwise)
+    private long _animLastMs;             // last frame timestamp for dt-based (refresh-rate independent) animation
 
     // ---- Stage D interaction state ----
     private int _pressIdx = -1;          // slot under the mouse-down, or -1
@@ -124,6 +134,8 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     private float _pressX, _pressY;      // mouse-down point (window-local DIP)
     private float _dragX, _dragY;        // current drag point (window-local DIP)
     private long _dragArrangeLastMs;     // last drag-reflow advance (time-based ease)
+    private int _dragDiagSession;        // DragPerfStats session id for the current drag gesture
+    private double _dragArrangeDiagMs;   // AdvanceDragArrange duration recorded for the next presented frame
     // Launch animation: the clicked icon first eases back to its REST size (a visible
     // de-magnify), THEN swells past rest (an "enlarge" pop) before the dock fades — the
     // original main-dock launch order ("restore to normal size, then enlarge, then close").
@@ -132,6 +144,9 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     private float _pressFromScale = 1f;  // the icon's magnify scale captured at click
     private bool _launching;             // a launch animation is in flight (suppress hover-magnify)
     private const long PressLaunchMs = 260;
+    private DispatcherTimer? _persistTimer;   // debounce config writes so repeated drags don't block the UI thread
+    private DispatcherTimer? _appsChangedTimer;   // debounce host side-dock refresh notifications across rapid drags
+    private bool _appsChangedPending;        // side dock needs one refresh once this main-dock session ends
     private System.Windows.Controls.Primitives.Popup? _slotMenu;
     private int _menuIdx = -1;   // slot the right-click menu is anchored to (-1 = none)
     // Hover-name label fade: eased opacity + the retained anchor slot so the focal name
@@ -502,6 +517,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     {
         int pw = (int)Math.Ceiling(_winW * _dpi), ph = (int)Math.Ceiling(_winH * _dpi);
         _host = new CompositionHost(_hwnd, pw, ph, (float)(96.0 * _dpi), waitable: UseRenderThread);
+        _animLastMs = 0;
 
         _dwrite = DWrite.DWriteCreateFactory<IDWriteFactory>();
         // Match WPF ShowGlassHoverLabel: a fixed 11.5pt label that lived inside the
@@ -529,23 +545,65 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         }
     }
 
+    private void NotifyAppsChangedSoon()
+    {
+        if (AppsChanged == null)
+            return;
+        _appsChangedPending = true;
+        // Do NOT refresh the side dock while this main-dock session is still on screen.
+        // The latest drag diagnostics showed the true remaining culprit: every drag drop
+        // ended with a side-dock refresh request that fired ~300ms later *during the same
+        // open main-dock session*, costing ~70-80ms and making the next drag feel heavier.
+        // While the main dock is shown, just remember that a refresh is pending; the existing
+        // FlushAppsChanged() path runs on dismiss/teardown and applies the latest state once.
+        if (_shown)
+            return;
+        if (_appsChangedTimer == null)
+        {
+            _appsChangedTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(300) };
+            _appsChangedTimer.Tick += (_, _) =>
+            {
+                _appsChangedTimer!.Stop();
+                if (!_appsChangedPending)
+                    return;
+                _appsChangedPending = false;
+                try { AppsChanged?.Invoke(); } catch { }
+            };
+        }
+        _appsChangedTimer.Stop();
+        _appsChangedTimer.Start();
+    }
+
+    private void FlushAppsChanged()
+    {
+        if (_appsChangedTimer is { IsEnabled: true })
+            _appsChangedTimer.Stop();
+        if (_appsChangedPending)
+        {
+            _appsChangedPending = false;
+            try { AppsChanged?.Invoke(); } catch { }
+        }
+    }
+
     /// <summary>Lazily creates the dedicated render thread. Its per-frame callback paces to
     /// the display vblank then runs <see cref="Tick"/> (advance animation + render + present)
-    /// under <see cref="_stateLock"/> so it never observes a half-written interaction state.</summary>
+    /// lock-free. The old whole-frame <c>lock(_stateLock)</c> kept the render thread at 144Hz,
+    /// but also made hot UI input paths contend with an entire frame's worth of work — exactly
+    /// the kind of hidden "input feels sticky even though fps is high" problem we saw on the
+    /// high-refresh machine. The lock is now reserved only for rare UI-side multi-field state
+    /// transitions; drag/move input is scalar and can tolerate a transient cross-frame read.</summary>
     private void EnsureLoop()
     {
         _loop ??= new RenderLoop("PolarisMainDockGpu", RenderThreadFrame);
     }
 
     /// <summary>Render-thread frame: block until the compositor is ready (refresh-rate
-    /// paced), then advance + draw. The whole tick is taken under <see cref="_stateLock"/>;
-    /// the UI thread only ever holds that lock for trivial scalar writes, so contention is
-    /// sub-millisecond.</summary>
+    /// paced), then advance + draw. Runs lock-free so UI-thread input never waits for a whole
+    /// frame of GPU-dock work.</summary>
     private void RenderThreadFrame()
     {
         _host?.WaitForVBlank();
-        lock (_stateLock)
-            Tick();
+        Tick();
     }
 
     /// <summary>Disposes all render-thread-owned GPU resources (host, text formats, Saturn
@@ -712,6 +770,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             var entry = apps[i];
             var img = IconExtractor.GetCached(entry.EffectiveIconSource, _iconCache);
             bool run = RunningAppTracker.IsEntryRunning(entry, running, explorerTitles, runningAumids);
+            if (run) _anyRunning = true;
             _slots.Add(new IconSlot(new Vector2(sx, sy),
                 entry.EffectiveIconSource, entry.Name, run, img, entry));
             sizes.Add(icon * (inner ? SaturnInnerIconScale : SaturnOuterIconScale));
@@ -812,6 +871,9 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     {
         if (_host == null || _slots.Count == 0)
             return;
+        long frameNow = Environment.TickCount64;
+        float frameDt = _animLastMs == 0 ? 0.016f : Math.Clamp((frameNow - _animLastMs) / 1000f, 0f, 0.1f);
+        _animLastMs = frameNow;
 
         // Keep the drop-shim reliably above the dock: various rebuild / resize / DComp
         // operations can momentarily raise the bare composition dock above the shim, and an
@@ -901,7 +963,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         if (!_saturn)
         {
             if (_gearHover)
-                _gearAngle = (_gearAngle + 16f * 360f / 1700f) % 360f;
+                _gearAngle = (_gearAngle + frameDt * 360f / 1.7f) % 360f;
             float gearTarget = (_pressGear && !_dragging) ? 0.8f : 1f;
             _gearScale += (gearTarget - _gearScale) * 0.25f;
         }
@@ -923,7 +985,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             fp = _slots[focal].Center;
         }
 
-        float k = 1f - (float)Math.Exp(-0.016 / 0.045);    // tau 45ms
+        float k = 1f - (float)Math.Exp(-frameDt / 0.045f);    // tau 45ms, refresh-rate independent
         float influence = _iconRaw * SpreadInfluence;
         float push = _iconRaw * SpreadPush;
         float maxDelta = 0f;
@@ -959,7 +1021,11 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             maxDelta = Math.Max(maxDelta, Math.Abs(ty - _waveOffY[i]));
         }
         if (_dragging)
+        {
+            long t0 = Stopwatch.GetTimestamp();
             maxDelta = Math.Max(maxDelta, AdvanceDragArrange());
+            _dragArrangeDiagMs = (Stopwatch.GetTimestamp() - t0) * 1000.0 / Stopwatch.Frequency;
+        }
 
         // Launch press: override the clicked icon's scale with the button-press curve
         // (compress past rest, then spring back to 1.0) while the launch hold runs, so the
@@ -1008,7 +1074,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         bool scrolling = false;
         if (_scrollable && Math.Abs(_glassScrollTarget - _glassScroll) > 0.05)
         {
-            _glassScroll += (_glassScrollTarget - _glassScroll) * (1.0 - Math.Exp(-0.016 / 0.07));
+            _glassScroll += (_glassScrollTarget - _glassScroll) * (1.0 - Math.Exp(-frameDt / 0.07f));
             scrolling = true;
         }
         else if (_scrollable)
@@ -1020,16 +1086,16 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         if (_saturn && _visible)
         {
             long now = Environment.TickCount64;
-            double dt = _saturnLastMs == 0 ? 0.016 : Math.Clamp((now - _saturnLastMs) / 1000.0, 0, 0.1);
+            double satDt = _saturnLastMs == 0 ? 0.016 : Math.Clamp((now - _saturnLastMs) / 1000.0, 0, 0.1);
             _saturnLastMs = now;
-            _saturnTime += dt;
+            _saturnTime += satDt;
             // Ease the spin multiplier toward the hover target (accelerate on planet
             // hover, coast back to ambient on leave) — tau ~0.4s for a smooth ramp.
             double spinTarget = planetHover ? PlanetHoverSpinMul : 1.0;
-            _spinRate += (spinTarget - _spinRate) * (1.0 - Math.Exp(-dt / 0.4));
-            _spinAngle = (_spinAngle + _spinRate * dt * 360.0 / PlanetSpinSeconds) % 360.0;
-            _innerAngle = (_innerAngle + dt * 360.0 / (PlanetSpinSeconds * InnerOrbitRatio)) % 360.0;
-            _outerAngle = (_outerAngle + dt * 360.0 / (PlanetSpinSeconds * OuterOrbitRatio)) % 360.0;
+            _spinRate += (spinTarget - _spinRate) * (1.0 - Math.Exp(-satDt / 0.4));
+            _spinAngle = (_spinAngle + _spinRate * satDt * 360.0 / PlanetSpinSeconds) % 360.0;
+            _innerAngle = (_innerAngle + satDt * 360.0 / (PlanetSpinSeconds * InnerOrbitRatio)) % 360.0;
+            _outerAngle = (_outerAngle + satDt * 360.0 / (PlanetSpinSeconds * OuterOrbitRatio)) % 360.0;
         }
 
         // Running-icon sweep + glow pulse: rotate the gradient (4.2s/rev) and breathe the
@@ -1037,13 +1103,13 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         // RadialIcon RunningBorder is not theme-gated).
         if (_anyRunning)
         {
-            _runSweep = (_runSweep + 16f * 360f / 4200f) % 360f;
+            _runSweep = (_runSweep + frameDt * 360f / 4.2f) % 360f;
             double ph = Environment.TickCount64 / 1000.0 * 2.0 * Math.PI / 2.2;
             _runPulse = 0.575f + 0.225f * MathF.Sin((float)ph);
         }
         // Glass orbit light: a cool lamp drifts around the slab, one rev / 36s.
         if (!_saturn && _visible)
-            _orbitAngle = (_orbitAngle + 16f * 360f / 36000f) % 360f;
+            _orbitAngle = (_orbitAngle + frameDt * 360f / 36f) % 360f;
         // New-message badges: poll the flashing window set off-thread (~800ms) and
         // breathe the dot (1.0->1.18, 1.4s) so it pulses like the WPF taskbar flash.
         if (_visible && _shown && _anyRunning && Environment.TickCount64 - _attnLast > 800)
@@ -1275,6 +1341,8 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         ctx.EndDraw();
         _host.Present();
         Polaris.Services.GpuFrameStats.Frame("main");
+        if (_dragging && _dragDiagSession != 0)
+            DragPerfStats.Frame(_dragDiagSession, _dragArrangeDiagMs);
     }
 
     // BackEase-out (soft overshoot, mirrors the WPF glass-rise settle).
@@ -1890,25 +1958,40 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         if (img == null) return;   // no bitmap (text icon) — keep the in-window draw
         try
         {
+            long t0 = Stopwatch.GetTimestamp();
             double dip = _gIcon * 1.12;                       // matches the lifted drag size
-            int targetPx = Math.Max(1, (int)Math.Round(dip * _dpi));
-            // DragGhostWindowGpu sizes its window to the snapshot's PIXEL dimensions and draws
-            // it 1:1, so feed it a bitmap already scaled to the display size (not the icon's
-            // native full-res), otherwise the ghost renders oversized + mis-centred.
             BitmapSource src = img;
-            if (src.PixelWidth != targetPx)
+            if (UseGpuGhost)
             {
-                double sx = targetPx / (double)src.PixelWidth, sy = targetPx / (double)src.PixelHeight;
-                var scaled = new TransformedBitmap(src, new System.Windows.Media.ScaleTransform(sx, sy));
-                scaled.Freeze();
-                src = scaled;
+                int targetPx = Math.Max(1, (int)Math.Round(dip * _dpi));
+                // The GPU ghost sizes its window to the snapshot's PIXEL dimensions and draws
+                // it 1:1, so feed it a bitmap already scaled to the display size (not the icon's
+                // native full-res), otherwise the ghost renders oversized + mis-centred.
+                if (src.PixelWidth != targetPx)
+                {
+                    double sx = targetPx / (double)src.PixelWidth, sy = targetPx / (double)src.PixelHeight;
+                    var scaled = new TransformedBitmap(src, new System.Windows.Media.ScaleTransform(sx, sy));
+                    scaled.Freeze();
+                    src = scaled;
+                }
+                // Pass the DIP size that makes the ghost's internal scale == _dpi, so MoveCenterTo
+                // maps a DIP cursor point to the correct physical centre.
+                double dipW = src.PixelWidth / _dpi, dipH = src.PixelHeight / _dpi;
+                _ghost = new DragGhostWindowGpu(src, dipW, dipH);
             }
-            // Pass the DIP size that makes the ghost's internal scale == _dpi, so MoveCenterTo
-            // maps a DIP cursor point to the correct physical centre.
-            double dipW = src.PixelWidth / _dpi, dipH = src.PixelHeight / _dpi;
-            _ghost = new DragGhostWindowGpu(src, dipW, dipH);
+            else
+            {
+                // The WPF ghost is an Image Stretch.Fill inside a tiny layered window, so it
+                // can scale the already-cached BitmapSource itself. Avoid creating a fresh
+                // TransformedBitmap on every drag start — repeated drags were allocating one
+                // more WIC/WPF bitmap each time, which is exactly the kind of cumulative churn
+                // that makes later drags feel progressively heavier.
+                _ghost = new DragGhostWindow(src, dip, dip);
+            }
             MoveDragGhost(_dragX, _dragY);
             _ghost.Show();
+            double ms = (Stopwatch.GetTimestamp() - t0) * 1000.0 / Stopwatch.Frequency;
+            DragPerfStats.GhostCreated(_dragDiagSession, UseGpuGhost ? "gpu" : "wpf", ms);
         }
         catch (Exception ex) { Log.Warn("MainDockGpu", "drag ghost start failed: " + ex.Message); _ghost = null; }
     }
@@ -1934,20 +2017,17 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     /// a drag-follow marker, mirroring the WPF dock's live drag feedback.</summary>
     private void OnExternalDragMove((int x, int y)? screenPt)
     {
-        lock (_stateLock)
+        if (screenPt is { } p)
         {
-            if (screenPt is { } p)
-            {
-                float lx = (float)(p.x / _dpi - _winX);
-                float ly = (float)(p.y / _dpi - _winY);
-                // Only show the follow marker where a drop will actually register (the slab /
-                // ring box). Over the transparent headroom the drag falls through to the desktop,
-                // so a marker there would be misleading.
-                _extDragPt = InDropRegion(lx, ly) ? new Vector2(lx, ly) : (Vector2?)null;
-            }
-            else
-                _extDragPt = null;
+            float lx = (float)(p.x / _dpi - _winX);
+            float ly = (float)(p.y / _dpi - _winY);
+            // Only show the follow marker where a drop will actually register (the slab /
+            // ring box). Over the transparent headroom the drag falls through to the desktop,
+            // so a marker there would be misleading.
+            _extDragPt = InDropRegion(lx, ly) ? new Vector2(lx, ly) : (Vector2?)null;
         }
+        else
+            _extDragPt = null;
         // OLE callbacks run on the STA UI thread; repaint so the marker tracks the cursor
         // (synchronous on the default path, next vblank on the render-thread path).
         try { RequestRender(); } catch { }
@@ -1985,13 +2065,15 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
                 float hitR = _saturn ? _planetHitR : _gearR;
                 bool gear = Vector2.Distance(new Vector2(lx, ly), _gearC) <= hitR + 2f;
                 int hit = gear ? -1 : HitSlot(lx, ly);
-                lock (_stateLock)
-                {
-                    _pressX = lx; _pressY = ly; _dragX = lx; _dragY = ly;
-                    _pressGear = gear;
-                    _pressIdx = hit;
-                    _dragging = false;
-                }
+                // Hot input path: these are simple scalar writes (float/int/bool) and on the
+                // 64-bit target machine are atomic enough for a render-thread consumer to read
+                // without taking the giant whole-frame _stateLock. Contending with that lock on
+                // every drag mouse-down/move was causing perceptible input stickiness even while
+                // the render thread itself stayed at 140+ fps.
+                _pressX = lx; _pressY = ly; _dragX = lx; _dragY = ly;
+                _pressGear = gear;
+                _pressIdx = hit;
+                _dragging = false;
                 if (_pressIdx >= 0 || _pressGear)
                     SetCapture(_hwnd);
                 return true;
@@ -2001,29 +2083,27 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
                 (float lx, float ly) = ClientDip(lParam);
                 if (_barDrag)
                 {
-                    lock (_stateLock) BarDragTo(ly);
+                    BarDragTo(ly);
                     RequestRender();
                     return true;
                 }
                 if (_pressIdx < 0)
                     return false;
                 bool startDrag = false;
-                lock (_stateLock)
+                _dragX = lx; _dragY = ly;
+                if (!_dragging)
                 {
-                    _dragX = lx; _dragY = ly;
-                    if (!_dragging)
+                    float mdx = lx - _pressX, mdy = ly - _pressY;
+                    if (mdx * mdx + mdy * mdy > DragThreshold * DragThreshold)
                     {
-                        float mdx = lx - _pressX, mdy = ly - _pressY;
-                        if (mdx * mdx + mdy * mdy > DragThreshold * DragThreshold)
-                        {
-                            _dragging = true;
-                            _dragArrangeLastMs = Environment.TickCount64;   // seed the time-based reflow ease
-                            startDrag = true;
-                        }
+                        _dragging = true;
+                        _dragArrangeLastMs = Environment.TickCount64;   // seed the time-based reflow ease
+                        startDrag = true;
                     }
                 }
                 if (startDrag)
                 {
+                    _dragDiagSession = DragPerfStats.Begin("main", _slots.Count, UseRenderThread, UseGpuGhost);
                     GlassDragActiveChanged?.Invoke(true);   // keep the side dock shown as a drop target
                     StartDragGhost(_pressIdx);   // lift the icon into an independent desktop overlay
                 }
@@ -2032,7 +2112,13 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
                     MoveDragGhost(lx, ly);
                     // Default path: keep neighbours in step between ticks + repaint inline. On
                     // the render-thread path the loop runs AdvanceDragArrange + draws each frame.
-                    if (!UseRenderThread) { AdvanceDragArrange(); Render(); }
+                    if (!UseRenderThread)
+                    {
+                        long t0 = Stopwatch.GetTimestamp();
+                        AdvanceDragArrange();
+                        _dragArrangeDiagMs = (Stopwatch.GetTimestamp() - t0) * 1000.0 / Stopwatch.Frequency;
+                        Render();
+                    }
                 }
                 return true;
             }
@@ -2041,8 +2127,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
                 if (_saturn || !_scrollable)
                     return false;
                 int delta = unchecked((short)(((long)wParam >> 16) & 0xFFFF));
-                lock (_stateLock)
-                    _glassScrollTarget = Math.Clamp(_glassScrollTarget - _glassCellH * (delta / 120.0), 0, _glassScrollMax);
+                _glassScrollTarget = Math.Clamp(_glassScrollTarget - _glassCellH * (delta / 120.0), 0, _glassScrollMax);
                 RequestRender();
                 return true;
             }
@@ -2051,7 +2136,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
                 ReleaseCapture();
                 if (_barDrag)
                 {
-                    lock (_stateLock) _barDrag = false;
+                    _barDrag = false;
                     RequestRender();
                     return true;
                 }
@@ -2059,12 +2144,9 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
                 bool wasDrag = _dragging;
                 bool gear = _pressGear;
                 (float lx, float ly) = ClientDip(lParam);
-                lock (_stateLock)
-                {
-                    _pressIdx = -1;
-                    _dragging = false;
-                    _pressGear = false;
-                }
+                _pressIdx = -1;
+                _dragging = false;
+                _pressGear = false;
                 EndDragGhost();   // dismiss the desktop overlay before committing the drop
                 if (gear)
                 {
@@ -2079,6 +2161,12 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
                 }
                 if (_hwnd != IntPtr.Zero)
                     RequestRender();
+                if (wasDrag)
+                {
+                    DragPerfStats.End(_dragDiagSession, "mouse-up");
+                    _dragDiagSession = 0;
+                    _dragArrangeDiagMs = 0;
+                }
                 return true;
             }
             case WM_RBUTTONUP:
@@ -2465,24 +2553,18 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         // de-magnify), then swells past rest to an "enlarge" peak, and only THEN does the dock
         // launch + fade — so the restore→enlarge plays out fully instead of being cut off. The
         // animation is scale-only and centred (no hop), so it never drifts off the icon centre.
-        lock (_stateLock)
-        {
-            _pressLaunchIdx = idx;
-            _pressLaunchStart = Environment.TickCount64;
-            _pressFromScale = idx < _waveCur.Length ? _waveCur[idx] : 1f;
-            _launching = true;
-        }
+        _pressLaunchIdx = idx;
+        _pressLaunchStart = Environment.TickCount64;
+        _pressFromScale = idx < _waveCur.Length ? _waveCur[idx] : 1f;
+        _launching = true;
         StartDriver();
         var entry = s.Entry;
         var hold = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(PressLaunchMs) };
         hold.Tick += (_, _) =>
         {
             hold.Stop();
-            lock (_stateLock)
-            {
-                _launching = false;
-                _pressLaunchIdx = -1;
-            }
+            _launching = false;
+            _pressLaunchIdx = -1;
             try { AppLauncher.Launch(entry, () => HidePanel()); }
             catch (Exception ex) { Log.Warn("MainDockGpu", "launch failed: " + ex.Message); }
         };
@@ -2714,6 +2796,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
 
     private void UnpinPinned(AppEntry entry)
     {
+        DragPerfStats.Event("main", _dragDiagSession, "drop-delete", entry.Name);
         int idx = _config.Apps.FindIndex(e => DockSync.Matches(e, entry));
         if (idx >= 0)
         {
@@ -2728,17 +2811,18 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
 
     private void PersistAndRebuild()
     {
-        try
-        {
-            DockSync.MirrorResidentToLeft(_config);
-            ThemeRegistry.SaveAppearance(_config.Settings);   // keep the per-theme resident count in sync so it survives restart
-            ConfigStore.Save(_config);
-        }
-        catch (Exception ex) { Log.Warn("MainDockGpu", "persist failed: " + ex.Message); }
-        AppsChanged?.Invoke();   // let the host re-mirror the resident region
-        // Relayout in place (resizes the window/swap chain without a teardown) so adding /
-        // removing an icon doesn't flash. Falls back to a full Rebuild only if the host is
-        // gone or the in-place resize fails.
+        long t0 = Stopwatch.GetTimestamp();
+        try { DockSync.MirrorResidentToLeft(_config); }
+        catch (Exception ex) { Log.Warn("MainDockGpu", "mirror failed: " + ex.Message); }
+        ThemeRegistry.SaveAppearance(_config.Settings);   // keep the per-theme resident count in sync for the pending save
+        PersistSoon();
+        NotifyAppsChangedSoon();
+        // Count-changing operations (add/delete) should stay visually smooth: relayout in
+        // place, resizing the existing swap chain/window instead of tearing the whole dock
+        // down. The later drag-stutter bug turned out to be input/render-thread contention,
+        // not an inherent "count change must rebuild" issue, so keep the original no-flash UX.
+        DragPerfStats.Event("main", _dragDiagSession, "persist-rebuild",
+            ((Stopwatch.GetTimestamp() - t0) * 1000.0 / Stopwatch.Frequency).ToString("0.000", CultureInfo.InvariantCulture) + "ms");
         RelayoutInPlace();
     }
 
@@ -2747,14 +2831,14 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     /// the window geometry — is unchanged.</summary>
     private void PersistAndRelayout()
     {
-        try
-        {
-            DockSync.MirrorResidentToLeft(_config);
-            ThemeRegistry.SaveAppearance(_config.Settings);   // persist the per-theme resident count
-            ConfigStore.Save(_config);
-        }
-        catch (Exception ex) { Log.Warn("MainDockGpu", "persist failed: " + ex.Message); }
-        AppsChanged?.Invoke();
+        long t0 = Stopwatch.GetTimestamp();
+        try { DockSync.MirrorResidentToLeft(_config); }
+        catch (Exception ex) { Log.Warn("MainDockGpu", "mirror failed: " + ex.Message); }
+        ThemeRegistry.SaveAppearance(_config.Settings);   // persist the per-theme resident count in the pending save
+        PersistSoon();
+        NotifyAppsChangedSoon();
+        DragPerfStats.Event("main", _dragDiagSession, "persist-relayout",
+            ((Stopwatch.GetTimestamp() - t0) * 1000.0 / Stopwatch.Frequency).ToString("0.000", CultureInfo.InvariantCulture) + "ms");
         RelayoutInPlace();
     }
 
@@ -2763,6 +2847,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     /// if the host is gone or the window rect would change.</summary>
     private void RelayoutInPlace()
     {
+        long t0All = Stopwatch.GetTimestamp();
         if (_host == null || _hwnd == IntPtr.Zero) { Rebuild(); return; }
         int ow = _winW, oh = _winH, ox = _winX, oy = _winY;
         // Quiesce the render thread before mutating _slots / geometry (it reads them every
@@ -2790,13 +2875,20 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
                 InvokeOnRender(() =>
                 {
                     _host!.Resize(pw, ph);
-                    foreach (var b in _bmpCache.Values) b?.Dispose();
-                    _bmpCache.Clear();
+                    // Keep the icon bitmap cache across an in-place relayout/resize: the D3D/D2D
+                    // device stays the SAME (only the swap-chain back buffer is resized), so the
+                    // cached icon bitmaps remain valid. Clearing them here forces every icon to be
+                    // re-uploaded from BitmapSource on the next drag/hover frame, which is exactly
+                    // what made drag-out deletes degrade into a very stuttery "cold cache" drag
+                    // afterwards. Full Rebuild/Dispose still tears the host down and clears the
+                    // cache there; only the cheap in-place relayout keeps it hot.
                     if (_saturn) { _saturnLastMs = 0; BuildSaturnCache(); }
                     Render();
                 });
                 SyncShim();
                 StartDriver();
+                DragPerfStats.Event("main", _dragDiagSession, "relayout-resize",
+                    ((Stopwatch.GetTimestamp() - t0All) * 1000.0 / Stopwatch.Frequency).ToString("0.000", CultureInfo.InvariantCulture) + "ms");
                 return;
             }
             catch (Exception ex)
@@ -2809,10 +2901,13 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         if (_saturn) { _saturnLastMs = 0; }   // cache is window-sized, unchanged; just resume
         InvokeOnRender(Render);
         StartDriver();
+        DragPerfStats.Event("main", _dragDiagSession, "relayout-same-size",
+            ((Stopwatch.GetTimestamp() - t0All) * 1000.0 / Stopwatch.Frequency).ToString("0.000", CultureInfo.InvariantCulture) + "ms");
     }
 
     private void Rebuild()
     {
+        long t0 = Stopwatch.GetTimestamp();
         bool wasVisible = _visible;
         StopDriver();
         CloseSlotMenu();
@@ -2830,6 +2925,8 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         _hover = -1; _pressIdx = -1; _dragging = false;
         try { Build(wasVisible); }
         catch (Exception ex) { Log.Warn("MainDockGpu", "rebuild failed: " + ex); }
+        DragPerfStats.Event("main", _dragDiagSession, "rebuild",
+            ((Stopwatch.GetTimestamp() - t0) * 1000.0 / Stopwatch.Frequency).ToString("0.000", CultureInfo.InvariantCulture) + "ms");
     }
 
     // ---- Right-click context menu (dock-styled WPF popup, parity with WPF dock) ----
@@ -3002,15 +3099,12 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     private void Summon(bool pinned)
     {
         Realize();
-        lock (_stateLock)
-        {
-            _shown = true;
-            _pinned = pinned;
-            // Start fully dismissed (off-screen + transparent) so the very first frame after
-            // the rebuild slides + fades in rather than popping at rest.
-            _summon = 0f; _summonDir = +1; _summonLast = Environment.TickCount64;
-            _fadeOpacity = 0f; _fadeFrom = 0f; _fadeDir = +1; _fadeStart = Environment.TickCount64;
-        }
+        _shown = true;
+        _pinned = pinned;
+        // Start fully dismissed (off-screen + transparent) so the very first frame after
+        // the rebuild slides + fades in rather than popping at rest.
+        _summon = 0f; _summonDir = +1; _summonLast = Environment.TickCount64;
+        _fadeOpacity = 0f; _fadeFrom = 0f; _fadeDir = +1; _fadeStart = Environment.TickCount64;
         if (!_visible)
         {
             ShowWindow(_hwnd, SW_SHOWNOACTIVATE);
@@ -3062,10 +3156,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         _shown = false;
         _pinned = false;
         // Cancel any in-flight drag / menu so they don't outlive the dismiss.
-        lock (_stateLock)
-        {
-            _pressIdx = -1; _dragging = false; _hover = -1;
-        }
+        _pressIdx = -1; _dragging = false; _hover = -1;
         CloseSlotMenu();
         ClosePreview();
         _notch?.HideNotch();        // retract the Saturn notch with the dock
@@ -3074,11 +3165,8 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         // Dismiss is a PURE fade-out in both themes (no slide / scale) — mirrors the
         // WPF RootGrid 170ms opacity animation. Leave _summon at rest so the scene holds
         // its docked position while the compositor fades the whole visual to transparent.
-        lock (_stateLock)
-        {
-            _summonDir = 0;
-            _fadeFrom = _fadeOpacity; _fadeDir = -1; _fadeStart = Environment.TickCount64;
-        }
+        _summonDir = 0;
+        _fadeFrom = _fadeOpacity; _fadeDir = -1; _fadeStart = Environment.TickCount64;
         StartDriver();
     }
 
@@ -3093,6 +3181,43 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     public void SetAmbientPaused(bool paused) { }
 
     public void Close() => Dispose();
+
+    /// <summary>Coalesces repeated dock mutations (especially drag reorders) into one disk
+    /// write ~300ms after the last change, instead of serializing config.json synchronously on
+    /// every mouse-up. Mirrors App.Persist() and keeps rapid drag sequences smooth.</summary>
+    private void PersistSoon()
+    {
+        if (_persistTimer == null)
+        {
+            _persistTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(300) };
+            _persistTimer.Tick += (_, _) =>
+            {
+                _persistTimer!.Stop();
+                try
+                {
+                    ThemeRegistry.SaveAppearance(_config.Settings);
+                    ConfigStore.Save(_config);
+                }
+                catch (Exception ex) { Log.Warn("MainDockGpu", "persist failed: " + ex.Message); }
+            };
+        }
+        _persistTimer.Stop();
+        _persistTimer.Start();
+    }
+
+    private void FlushPersist()
+    {
+        if (_persistTimer is { IsEnabled: true })
+        {
+            _persistTimer.Stop();
+            try
+            {
+                ThemeRegistry.SaveAppearance(_config.Settings);
+                ConfigStore.Save(_config);
+            }
+            catch (Exception ex) { Log.Warn("MainDockGpu", "persist failed: " + ex.Message); }
+        }
+    }
 
     /// <summary>Called once a dismiss slide reaches the bottom: hide the window so a
     /// dismissed dock costs nothing, then run any deferred callback.</summary>
@@ -3121,6 +3246,8 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         StopDriver();
         _timer?.Stop();
         _timer = null;
+        FlushPersist();
+        FlushAppsChanged();
         if (_weatherHooked) { _weather.Updated -= OnWeatherUpdated; _weatherHooked = false; }
         CloseSlotMenu();
         ClosePreview();

@@ -84,6 +84,22 @@
 
 ## 🐛 BUG 修复
 
+- **拖拽越拖越卡（高刷屏）根因 = 渲染线程整帧持锁饿死 UI 输入**：
+  - **现象**：在高刷新率机器上拖动图标，越拖越涩、发粘，但帧率诊断显示渲染线程稳定 140+ fps（worst gap 16ms），并非掉帧。
+  - **根因**：`RenderThreadFrame()` 用 `lock(_stateLock)` 包住整个 `Tick()`（推进+渲染+Present，144Hz 下数毫秒）；而 UI 线程的 `WM_MOUSEMOVE`/拖拽输入写状态也要拿同一把 `_stateLock`，于是每次鼠标输入都要等渲染线程放锁——等满一整帧 → 即便高帧率，输入也"粘手"。先前为绕过此问题把计数变更路径从 `RelayoutInPlace()` 换成 `Rebuild()`，只是症状掩盖。
+  - **修复**：①从拖拽输入热路径（LBUTTONDOWN/MOUSEMOVE/LBUTTONUP、运行栏拖动、UpdateDragGap）移除 `_stateLock`；②`RenderThreadFrame()` 去锁（`Tick()` 直接调用）；③移除启动/弹跳/intro/显隐/外部拖入/滚轮等标量状态转换里残留的 `_stateLock`。x64 上 float/int/bool 单字写入足够原子，可容忍跨帧瞬时读取。两 Dock 同步处理。
+  - **验证**：用户确认拖拽不再卡。后续把计数变更路径从 `Rebuild()` 改回 `RelayoutInPlace()`，消除增删图标闪烁、并修复侧 Dock 删除图标后短时间内无法再次呼出的问题（`Rebuild()` 会拆建 host/swapchain/DComp → 闪一帧黑 + 打断边缘呼出状态机）。
+
+- **高刷新率下动画周期被压缩（液态玻璃轨道光/流动蓝光/齿轮加速）**：
+  - **现象**：144Hz 屏上液态玻璃轨道冷光、运行图标流动蓝光、设置齿轮旋转周期大幅缩短（约 2.4× 加速）。
+  - **根因**：这些动画用「每帧固定步进」推进（如 `_orbitAngle += 16f*360f/36000f`），隐含假设 60fps（16ms/帧）；144Hz 下每秒推进 2.4 倍。土星行星/星环用真实 `dt` 积分，已正确。
+  - **修复**：两 Dock 的 `Tick()` 引入 `_animLastMs` + 每帧 `frameDt`（钳 0–0.1s），把 `_orbitAngle`、`_runSweep`、`_gearAngle`、玻璃滚动缓动 tau、缓动常数 k 全改为按 `frameDt` 积分，周期恢复（36s/4.2s/1.7s）；在 `CreateHostResources` 把 `_animLastMs=0` 清零，避免重建后首帧拿到超大 dt 跳变。
+
+- **土星主题主 Dock 运行图标蓝色流动光环静止**：
+  - **现象**：土星主题下主 Dock 运行图标周围的蓝色 sweep 光环不转动（液态玻璃主题正常）。
+  - **根因**：主 Dock 有两条独立布局路径——液态玻璃分支会在检测到运行应用时设 `_anyRunning = true`，但土星分支 `BuildSaturnLayout()` 算了 `run` 标志、图标也标成 running，却**漏设 `_anyRunning`**。而 `_runSweep`（sweep 角度）只在 `if (_anyRunning)` 内推进，故土星主题下角度永不更新 → 静止。与刷新率无关，是独立遗漏。
+  - **修复**：在 `BuildSaturnLayout()` 的图标循环里补 `if (run) _anyRunning = true;`，与液态玻璃分支一致。
+
 - **侧 Dock 悬停图标后 `errors.log` 每帧刷 `SideDockWindowGpu.Tick → NRE`（与主 Dock 同一半初始化陷阱）**：
   - **现象**：悬停侧 Dock 图标后，`errors.log` 高频（单次会话达 441 次）刷
     `SideDockWindowGpu.Tick → NullReferenceException`，渲染 Tick 被异常中断。

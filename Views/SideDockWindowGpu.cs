@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Globalization;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using System.Windows.Media;
@@ -74,6 +76,8 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     private readonly Dictionary<string, ID2D1Bitmap?> _bmpCache = new();
     private readonly Dictionary<string, BitmapSource?> _iconCache = new();
     private Polaris.Services.Gpu.FrameClock? _timer;
+    private DispatcherTimer? _persistTimer;   // debounce config writes so repeated drags don't block the UI thread
+    private DispatcherTimer? _mainDockChangedTimer;   // debounce host main-dock refresh notifications across rapid drags
 
     // ---- Independent render thread (POLARIS_GPU_RENDERTHREAD=1; default OFF) ----
     // Mirrors MainDockWindowGpu: when enabled, the CompositionHost + Direct2D/DirectComposition
@@ -83,6 +87,11 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     // UI-thread FrameClock path runs unchanged (_loop stays null).
     private static readonly bool UseRenderThread =
         Environment.GetEnvironmentVariable("POLARIS_GPU_RENDERTHREAD") == "1";
+    // See MainDockWindowGpu: the drag ghost is tiny and short-lived, so the stable WPF
+    // ghost is the better default. The GPU ghost stays available behind POLARIS_GPU_GHOST=1
+    // for explicit A/B experiments.
+    private static readonly bool UseGpuGhost =
+        Environment.GetEnvironmentVariable("POLARIS_GPU_GHOST") == "1";
     private RenderLoop? _loop;
     // Guards the interaction scalars written by the UI-thread WndProc and read by the render
     // thread in Tick/Render (drag point, intro animation phase). Layout/_slots/host/device are
@@ -117,6 +126,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     // ---- Running-icon glow pulse + glass orbit light (parity with the GPU main dock) ----
     private float _runPulse = 0.5f;       // running-icon glow pulse (0.35..0.8, 4.0s breathe)
     private float _orbitAngle;            // glass orbit-light angle (deg, 36s/rev clockwise)
+    private long _animLastMs;             // last frame timestamp for dt-based (refresh-rate independent) animation
     private bool _anyRunning;             // any slot is running (gates the pulse/orbit)
 
     // ---- Show/hide slide + fade (parity with WPF SideDockWindow.DoShow/DoHide) -------
@@ -171,6 +181,10 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     private bool _realized;
     private bool _byMain, _byEdge, _byDrag, _byPinned, _byMenu, _byBounce;
     private bool _dismissing;   // launch committed: block hover re-magnify through the dismiss fade (WPF parity)
+    private bool _refreshPending;             // one or more RefreshFromConfig requests are queued
+    private DispatcherTimer? _refreshTimer;   // coalesces repeated main-dock updates across rapid drags
+    private bool _suspendRefreshWhileDrag;    // hard block: main-dock drag sequence owns the side dock's timing
+    private bool _layoutDirty;                // config changed while hidden/blocked; consume on next non-drag show
 
     /// <summary>Raised after the dock mutates the shared main-dock app list, so the
     /// host can refresh the main dock (parity with the WPF side dock).</summary>
@@ -195,10 +209,38 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     /// dock hidden, ready to be summoned by the host.</summary>
     public void Show() => Realize();
 
-    public void SetMainShown(bool shown) { _byMain = shown; UpdateVisibility(); }
+    public void SetMainShown(bool shown)
+    {
+        _byMain = shown;
+        UpdateVisibility();
+        // Main-dock-originated refreshes are intentionally deferred for the whole lifetime of
+        // the main dock being shown. Flush them only once that interaction has fully ended.
+        if (!shown && _refreshPending && !_byDrag)
+            ScheduleRefresh();
+    }
     public void SetPinnedShown(bool shown) { _byPinned = shown; UpdateVisibility(); }
     public void SetEdgeShown(bool shown) { _byEdge = shown; UpdateVisibility(); }
-    public void SetDragActive(bool active) { _byDrag = active; UpdateVisibility(); }
+    public void SetDragActive(bool active)
+    {
+        _byDrag = active;
+        UpdateVisibility();
+        // Main-dock drag sequences own the side dock completely: a 65-75ms side-dock refresh
+        // landing anywhere between two quick drags is exactly what made later drags feel
+        // progressively heavier. Therefore, once a drag begins, HARD-suspend all side-dock
+        // refresh execution (including already queued timers). When the drag releases, flush the
+        // accumulated pending refreshes once via the normal debounce path.
+        if (active)
+        {
+            _suspendRefreshWhileDrag = true;
+            _refreshTimer?.Stop();
+        }
+        else
+        {
+            _suspendRefreshWhileDrag = false;
+            if (_refreshPending && !_byMain)
+                ScheduleRefresh();
+        }
+    }
 
     public void HideAll()
     {
@@ -229,9 +271,24 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         _shown = true;
         StartDriver();   // re-arm the render loop (it is paused while hidden to avoid idle churn)
         if (!_realized) { Realize(); StartIntro(); return; }
-        // Recreate so the running strip + layout reflect the latest state, then
-        // ensure the window is visible and on top.
-        Rebuild();
+        // Drag-only summons happen every time the user starts dragging a main-dock icon, so
+        // rebuilding here means a quick sequence of drag attempts repeatedly tears the side
+        // dock down and recreates it. That heavy path is exactly the sort of cumulative work
+        // that can make later drags feel progressively more sluggish even when nothing was
+        // deleted. For the drag-target use case we only need the ALREADY-synchronised hidden
+        // dock to become visible; RefreshFromConfig/AppsChanged keeps the content up to date.
+        //
+        // Keep the full rebuild for non-drag summons (edge/main/pinned/menu/bounce), where
+        // the user is actually looking at the side dock and expects the running strip/layout
+        // to reflect the latest state right at show time.
+        bool dragOnly = _byDrag && !_byMain && !_byEdge && !_byPinned && !_byMenu && !_byBounce;
+        DragPerfStats.Event("side", 0, "do-show", dragOnly ? "dragOnly" : "full");
+        if (!dragOnly || _layoutDirty)
+        {
+            _layoutDirty = false;
+            _refreshPending = false;
+            Rebuild();
+        }
         if (_hwnd != IntPtr.Zero)
         {
             ShowWindow(_hwnd, SW_SHOWNOACTIVATE);
@@ -253,11 +310,8 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         // mode 2). If there's no live host yet, just hide immediately.
         if (_host != null && _hwnd != IntPtr.Zero)
         {
-            lock (_stateLock)
-            {
-                _introStart = Environment.TickCount64;
-                _introMode = 2;
-            }
+            _introStart = Environment.TickCount64;
+            _introMode = 2;
             StartDriver();   // ensure the loop runs to animate the fade-out
             if (!UseRenderThread) DriveIntro();
         }
@@ -270,12 +324,9 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     private void StartIntro()
     {
         if (!_shown || _host == null) return;
-        lock (_stateLock)
-        {
-            _introSlidePx = (_slabCrossLen + 40f) * (float)_dpi;
-            _introStart = Environment.TickCount64;
-            _introMode = 1;
-        }
+        _introSlidePx = (_slabCrossLen + 40f) * (float)_dpi;
+        _introStart = Environment.TickCount64;
+        _introMode = 1;
         if (!UseRenderThread) DriveIntro();
     }
 
@@ -312,10 +363,51 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
 
     public void RefreshFromConfig()
     {
+        _refreshPending = true;
+        bool block = _suspendRefreshWhileDrag || _byMain || _byDrag || !_shown;
+        if (block)
+        {
+            _layoutDirty = true;
+            DragPerfStats.Event("side", 0, "refresh-deferred",
+                _suspendRefreshWhileDrag ? "suspended-by-drag"
+                : _byMain ? "while-main-shown"
+                : _byDrag ? "while-dragging"
+                : "while-hidden");
+            return;
+        }
+        DragPerfStats.Event("side", 0, "refresh-request", "visible-idle");
+        ScheduleRefresh();
+    }
+
+    private void RefreshFromConfigCore()
+    {
+        long t0 = Stopwatch.GetTimestamp();
+        _refreshPending = false;
+        _layoutDirty = false;
         try { DockSync.MirrorResidentToLeft(_config); } catch { }
         // Relayout in place (no window teardown) so the resident count updates without the
         // side dock flashing/vanishing — used on every main-dock resident change.
         if (_realized) RelayoutInPlace();
+        DragPerfStats.Event("side", 0, "refresh-from-config",
+            ((Stopwatch.GetTimestamp() - t0) * 1000.0 / Stopwatch.Frequency).ToString("0.000", CultureInfo.InvariantCulture) + "ms");
+    }
+
+    private void ScheduleRefresh()
+    {
+        if (_refreshTimer == null)
+        {
+            _refreshTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(300) };
+            _refreshTimer.Tick += (_, _) =>
+            {
+                _refreshTimer!.Stop();
+                if (_suspendRefreshWhileDrag || _byDrag || !_refreshPending)
+                    return;
+                _refreshPending = false;
+                RefreshFromConfigCore();
+            };
+        }
+        _refreshTimer.Stop();
+        _refreshTimer.Start();
     }
 
     public void RefreshLayout()
@@ -533,6 +625,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
                     SlotKind.Run, it.IconKey, it.Image, null, it.Window, it.Path, it.Aumid));
             }
         }
+
         _seamMain = (float)seamMain;
         _bodyCross = (float)bodyCross;
         _bodyCrossLen = (float)bodyCrossLen;
@@ -610,6 +703,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     {
         int pw = (int)Math.Ceiling(_winW * _dpi), ph = (int)Math.Ceiling(_winH * _dpi);
         _host = new CompositionHost(_hwnd, pw, ph, (float)(96.0 * _dpi), waitable: UseRenderThread);
+        _animLastMs = 0;
         _dwrite = DWrite.DWriteCreateFactory<IDWriteFactory>();
         _labelFormat?.Dispose();
         _hoverFormat?.Dispose();
@@ -637,19 +731,21 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     }
 
     /// <summary>Lazily creates the dedicated render thread (frame callback paces to the display
-    /// vblank then runs <see cref="Tick"/> under <see cref="_stateLock"/>).</summary>
+    /// vblank then runs <see cref="Tick"/> lock-free). The old whole-frame lock guaranteed a
+    /// coherent read of UI-written scalars, but it also let a 144Hz render loop block hot
+    /// input paths for a whole frame. We now accept a transient cross-frame read on those
+    /// scalar inputs instead; the device/layout state is still render-thread-owned.</summary>
     private void EnsureLoop()
     {
         _loop ??= new RenderLoop("PolarisSideDockGpu", RenderThreadFrame);
     }
 
     /// <summary>Render-thread frame: block until the compositor is ready (refresh-rate paced),
-    /// then advance + draw under the state lock.</summary>
+    /// then advance + draw lock-free so UI-thread input never waits for a full render frame.</summary>
     private void RenderThreadFrame()
     {
         _host?.WaitForVBlank();
-        lock (_stateLock)
-            Tick();
+        Tick();
     }
 
     /// <summary>Disposes all render-thread-owned GPU resources (host, text formats, icon +
@@ -829,17 +925,24 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         try
         {
             double dip = _gIcon * 1.12;
-            int targetPx = Math.Max(1, (int)Math.Round(dip * _dpi));
             BitmapSource src = img;
-            if (src.PixelWidth != targetPx)
+            if (UseGpuGhost)
             {
-                double sx = targetPx / (double)src.PixelWidth, sy = targetPx / (double)src.PixelHeight;
-                var scaled = new TransformedBitmap(src, new System.Windows.Media.ScaleTransform(sx, sy));
-                scaled.Freeze();
-                src = scaled;
+                int targetPx = Math.Max(1, (int)Math.Round(dip * _dpi));
+                if (src.PixelWidth != targetPx)
+                {
+                    double sx = targetPx / (double)src.PixelWidth, sy = targetPx / (double)src.PixelHeight;
+                    var scaled = new TransformedBitmap(src, new System.Windows.Media.ScaleTransform(sx, sy));
+                    scaled.Freeze();
+                    src = scaled;
+                }
+                double dipW = src.PixelWidth / _dpi, dipH = src.PixelHeight / _dpi;
+                _ghost = new DragGhostWindowGpu(src, dipW, dipH);
             }
-            double dipW = src.PixelWidth / _dpi, dipH = src.PixelHeight / _dpi;
-            _ghost = new DragGhostWindowGpu(src, dipW, dipH);
+            else
+            {
+                _ghost = new DragGhostWindow(src, dip, dip);
+            }
             MoveDragGhost(_dragMain, _dragCross);
             _ghost.Show();
         }
@@ -874,17 +977,14 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     /// marker where a drop will register.</summary>
     private void OnExternalDragMove((int x, int y)? screenPt)
     {
-        lock (_stateLock)
+        if (screenPt is { } p)
         {
-            if (screenPt is { } p)
-            {
-                float lx = (float)(p.x / _dpi - _winX);
-                float ly = (float)(p.y / _dpi - _winY);
-                _extDragPt = InDropRegion(lx, ly) ? new Vector2(lx, ly) : (Vector2?)null;
-            }
-            else
-                _extDragPt = null;
+            float lx = (float)(p.x / _dpi - _winX);
+            float ly = (float)(p.y / _dpi - _winY);
+            _extDragPt = InDropRegion(lx, ly) ? new Vector2(lx, ly) : (Vector2?)null;
         }
+        else
+            _extDragPt = null;
         try { RequestRender(); } catch { }
     }
 
@@ -953,6 +1053,9 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     {
         if (_host == null)
             return;
+        long frameNow = Environment.TickCount64;
+        float dt = _animLastMs == 0 ? 0.016f : Math.Clamp((frameNow - _animLastMs) / 1000f, 0f, 0.1f);
+        _animLastMs = frameNow;
         EnsureShimTopmost();
         // Drive the show/hide slide+fade. During the hide outro _shown is already
         // false but the fade is still playing, so animate-and-render then bail.
@@ -984,7 +1087,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         // the WPF dock's ResetWave + _dismissing on launch).
         if (_byBounce || _dismissing || !_shown) active = false;
 
-        float k = 1f - (float)Math.Exp(-0.016 / 0.045);   // tau 45ms
+        float k = 1f - (float)Math.Exp(-dt / 0.045f);   // tau 45ms, refresh-rate independent
         float maxDelta = 0f;
         int focal = -1; float best = float.MaxValue;
         for (int i = 0; i < _slots.Count; i++)
@@ -1087,7 +1190,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
             _runPulse = 0.575f + 0.225f * MathF.Sin((float)rph);
         }
         if (!_saturn && _shown)
-            _orbitAngle = (_orbitAngle + 16f * 360f / 36000f) % 360f;
+            _orbitAngle = (_orbitAngle + dt * 360f / 36f) % 360f;
 
         if (active || bouncing || maxDelta > 0.001f || (_saturn && _shown) || (!_saturn && _shown) || anyFlash || intro)
             Render();
@@ -2013,6 +2116,9 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     {
         StopDriver();
         _timer?.Stop();
+        _refreshTimer?.Stop();
+        FlushPersist();
+        FlushMainDockChanged();
         CloseSlotMenu();
         ClosePreview();
         if (_anchorWin != null) { try { _anchorWin.Close(); } catch { } _anchorWin = null; _anchorEl = null; _preview = null; }
@@ -2078,13 +2184,10 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
             {
                 (float lx, float ly) = ClientDip(lParam);
                 int hit = HitSlot(lx, ly);
-                lock (_stateLock)
-                {
-                    _pressMain = lx; _pressCross = ly;
-                    _dragMain = lx; _dragCross = ly;
-                    _pressIdx = hit;
-                    _dragging = false;
-                }
+                _pressMain = lx; _pressCross = ly;
+                _dragMain = lx; _dragCross = ly;
+                _pressIdx = hit;
+                _dragging = false;
                 if (_pressIdx >= 0)
                 {
                     // Pin the dock for the whole press-drag-release gesture (parity
@@ -2102,18 +2205,15 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
                     return false;
                 (float lx, float ly) = ClientDip(lParam);
                 bool startDrag = false;
-                lock (_stateLock)
+                _dragMain = lx; _dragCross = ly;
+                if (!_dragging)
                 {
-                    _dragMain = lx; _dragCross = ly;
-                    if (!_dragging)
+                    float ddx = lx - _pressMain, ddy = ly - _pressCross;
+                    if (ddx * ddx + ddy * ddy > DragThreshold * DragThreshold)
                     {
-                        float ddx = lx - _pressMain, ddy = ly - _pressCross;
-                        if (ddx * ddx + ddy * ddy > DragThreshold * DragThreshold)
-                        {
-                            _dragging = true;
-                            _dragShiftLastMs = Environment.TickCount64;   // seed so first advance dt is small
-                            startDrag = true;
-                        }
+                        _dragging = true;
+                        _dragShiftLastMs = Environment.TickCount64;   // seed so first advance dt is small
+                        startDrag = true;
                     }
                 }
                 if (startDrag)
@@ -2121,7 +2221,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
                 if (_dragging)
                 {
                     MoveDragGhost(lx, ly);
-                    lock (_stateLock) UpdateDragGap(lx, ly);
+                    UpdateDragGap(lx, ly);
                     // Default path: keep neighbours in step between ticks + repaint inline. On
                     // the render-thread path the loop runs AdvanceDragShift + draws each frame.
                     if (!UseRenderThread) { AdvanceDragShift(); Render(); }
@@ -2136,12 +2236,9 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
                 int idx = _pressIdx;
                 bool wasDrag = _dragging;
                 (float lx, float ly) = ClientDip(lParam);
-                lock (_stateLock)
-                {
-                    _pressIdx = -1;
-                    _dragging = false;
-                    _dragInsert = -1;
-                }
+                _pressIdx = -1;
+                _dragging = false;
+                _dragInsert = -1;
                 if (idx >= 0 && idx < _slots.Count)
                 {
                     if (!wasDrag) ClickSlot(idx);
@@ -2222,11 +2319,8 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         // visible de-magnify), THEN hops up and falls back. _byBounce forces the magnify wave
         // off (Tick) so it settles to 1.0 during the settle window, and the hop only begins
         // once _bounceStart is reached (BounceT returns -1 until then).
-        lock (_stateLock)
-        {
-            _bounceIdx = idx; _bounceStart = Environment.TickCount64 + SideSettleMs;   // settle, then hop
-            _byBounce = true;                                            // hold the dock open through the hop
-        }
+        _bounceIdx = idx; _bounceStart = Environment.TickCount64 + SideSettleMs;   // settle, then hop
+        _byBounce = true;                                            // hold the dock open through the hop
         UpdateVisibility();
         StartDriver();
         RequestRender();
@@ -2235,17 +2329,14 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         {
             hold.Stop();
             act();
-            lock (_stateLock)
-            {
-                _byBounce = false;
-                // Retract the dock after the hop (parity with the WPF dock's
-                // SetEdgeShown(false) on launch) and latch _dismissing so the wave cannot
-                // re-magnify the clicked icon under the still-stationary cursor while the
-                // dock fades out. _dismissing clears once the dock is hidden (DriveIntro) or
-                // any fresh show reason appears (UpdateVisibility).
-                _byEdge = false;
-                _dismissing = true;
-            }
+            _byBounce = false;
+            // Retract the dock after the hop (parity with the WPF dock's
+            // SetEdgeShown(false) on launch) and latch _dismissing so the wave cannot
+            // re-magnify the clicked icon under the still-stationary cursor while the
+            // dock fades out. _dismissing clears once the dock is hidden (DriveIntro) or
+            // any fresh show reason appears (UpdateVisibility).
+            _byEdge = false;
+            _dismissing = true;
             UpdateVisibility();
         };
         hold.Start();
@@ -2802,18 +2893,15 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     /// (parity with the WPF side dock's MainDockChanged).</summary>
     private void PersistAndRebuild()
     {
-        try
-        {
-            DockSync.MirrorResidentToLeft(_config);
-            ThemeRegistry.SaveAppearance(_config.Settings);   // keep the per-theme resident count in sync so it survives restart
-            ConfigStore.Save(_config);
-        }
-        catch (Exception ex) { Log.Warn("SideDockGpu", "persist failed: " + ex.Message); }
-        // Relayout in place (resizes the window/swap chain without a teardown) so adding /
-        // removing an icon doesn't make the side dock vanish and pop back. Falls back to a
-        // full Rebuild only if the host is gone or the in-place resize fails.
+        try { DockSync.MirrorResidentToLeft(_config); }
+        catch (Exception ex) { Log.Warn("SideDockGpu", "mirror failed: " + ex.Message); }
+        ThemeRegistry.SaveAppearance(_config.Settings);
+        PersistSoon();
+        // Count-changing operations should not make the side dock vanish/pop back or delay the
+        // next edge summon. Keep the existing host/window alive and relayout in place so add /
+        // delete is visually stable and the edge trigger remains immediately responsive.
         RelayoutInPlace();
-        MainDockChanged?.Invoke();
+        NotifyMainDockChangedSoon();
     }
 
     /// <summary>Persists then relayouts in place (no window/host recreation) so a
@@ -2822,21 +2910,79 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     /// PersistAndRelayout).</summary>
     private void PersistAndRelayout()
     {
-        try
-        {
-            DockSync.MirrorResidentToLeft(_config);
-            ThemeRegistry.SaveAppearance(_config.Settings);   // persist the per-theme resident count
-            ConfigStore.Save(_config);
-        }
-        catch (Exception ex) { Log.Warn("SideDockGpu", "persist failed: " + ex.Message); }
+        try { DockSync.MirrorResidentToLeft(_config); }
+        catch (Exception ex) { Log.Warn("SideDockGpu", "mirror failed: " + ex.Message); }
+        ThemeRegistry.SaveAppearance(_config.Settings);
+        PersistSoon();
         RelayoutInPlace();
-        MainDockChanged?.Invoke();
+        NotifyMainDockChangedSoon();
+    }
+
+    private void PersistSoon()
+    {
+        if (_persistTimer == null)
+        {
+            _persistTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(300) };
+            _persistTimer.Tick += (_, _) =>
+            {
+                _persistTimer!.Stop();
+                try
+                {
+                    ThemeRegistry.SaveAppearance(_config.Settings);
+                    ConfigStore.Save(_config);
+                }
+                catch (Exception ex) { Log.Warn("SideDockGpu", "persist failed: " + ex.Message); }
+            };
+        }
+        _persistTimer.Stop();
+        _persistTimer.Start();
+    }
+
+    private void FlushPersist()
+    {
+        if (_persistTimer is { IsEnabled: true })
+        {
+            _persistTimer.Stop();
+            try
+            {
+                ThemeRegistry.SaveAppearance(_config.Settings);
+                ConfigStore.Save(_config);
+            }
+            catch (Exception ex) { Log.Warn("SideDockGpu", "persist failed: " + ex.Message); }
+        }
+    }
+
+    private void NotifyMainDockChangedSoon()
+    {
+       if (MainDockChanged == null)
+           return;
+       if (_mainDockChangedTimer == null)
+       {
+           _mainDockChangedTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(300) };
+           _mainDockChangedTimer.Tick += (_, _) =>
+           {
+               _mainDockChangedTimer!.Stop();
+               try { MainDockChanged?.Invoke(); } catch { }
+           };
+       }
+       _mainDockChangedTimer.Stop();
+       _mainDockChangedTimer.Start();
+    }
+
+    private void FlushMainDockChanged()
+    {
+       if (_mainDockChangedTimer is { IsEnabled: true })
+       {
+           _mainDockChangedTimer.Stop();
+           try { MainDockChanged?.Invoke(); } catch { }
+       }
     }
 
     /// <summary>Recomputes the slots/geometry in the existing window. Falls back to a
     /// full Rebuild only when the window geometry actually changed.</summary>
     private void RelayoutInPlace()
     {
+        long t0All = Stopwatch.GetTimestamp();
         if (_host == null || _hwnd == IntPtr.Zero) { Rebuild(); return; }
         int ow = _winW, oh = _winH, ox = _winX, oy = _winY;
         // Quiesce the render thread before mutating _slots / geometry (it reads them every
@@ -2862,8 +3008,11 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
                 InvokeOnRender(() =>
                 {
                     _host!.Resize(pw, ph);
-                    foreach (var b in _bmpCache.Values) b?.Dispose();
-                    _bmpCache.Clear();
+                    // Same rationale as MainDockWindowGpu.RelayoutInPlace: an in-place resize keeps
+                    // the same D3D/D2D device alive, so icon bitmaps stay valid. Clearing them here
+                    // needlessly forces a full icon re-upload after every resident-count / pin-list
+                    // relayout, which amplifies the main-dock drag-out-delete jank because each
+                    // delete also refreshes the side dock via AppsChanged.
                     DisposeRockResources();   // debris cache is window-sized; rebuilt lazily on render
                     Render();                  // paint the new content into the resized swap chain
                 });
@@ -2872,6 +3021,8 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
                 SetWindowPos(_hwnd, IntPtr.Zero, px, py, pw, ph, SWP_NOACTIVATE | SWP_NOZORDER);
                 InvokeOnRender(Render);   // final crisp paint at the exact new size
                 StartDriver();
+                DragPerfStats.Event("side", 0, "relayout-resize",
+                    ((Stopwatch.GetTimestamp() - t0All) * 1000.0 / Stopwatch.Frequency).ToString("0.000", CultureInfo.InvariantCulture) + "ms");
                 return;
             }
             catch (Exception ex)
@@ -2883,10 +3034,13 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         }
         InvokeOnRender(Render);
         StartDriver();
+        DragPerfStats.Event("side", 0, "relayout-same-size",
+            ((Stopwatch.GetTimestamp() - t0All) * 1000.0 / Stopwatch.Frequency).ToString("0.000", CultureInfo.InvariantCulture) + "ms");
     }
 
     private void Rebuild()
     {
+        long t0 = Stopwatch.GetTimestamp();
         StopDriver();
         CloseSlotMenu();
         ClosePreview();
@@ -2902,6 +3056,8 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         _hover = -1; _pressIdx = -1; _dragging = false;
         try { Build(); }
         catch (Exception ex) { Log.Warn("SideDockGpu", "rebuild failed: " + ex); }
+        DragPerfStats.Event("side", 0, "rebuild",
+            ((Stopwatch.GetTimestamp() - t0) * 1000.0 / Stopwatch.Frequency).ToString("0.000", CultureInfo.InvariantCulture) + "ms");
     }
 
     [DllImport("user32.dll")] private static extern IntPtr SetCapture(IntPtr h);
