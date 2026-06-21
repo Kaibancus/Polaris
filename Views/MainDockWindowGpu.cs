@@ -49,6 +49,23 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     private readonly Dictionary<string, ID2D1Bitmap?> _bmpCache = new();
     private readonly Dictionary<string, BitmapSource?> _iconCache = new();
 
+    // ---- Independent render thread (POLARIS_GPU_RENDERTHREAD=1; default OFF) ----
+    // When enabled, the dock's CompositionHost + Direct2D/DirectComposition device, the
+    // icon/Saturn caches, the laid-out _slots and all animation/wave state are owned and
+    // driven by a dedicated render thread (RenderLoop) paced to the display refresh rate
+    // via the swap chain's frame-latency waitable object — reaching the true refresh rate
+    // (60/120/144Hz) and freeing the UI thread for input. When disabled, the original
+    // UI-thread FrameClock path runs unchanged (_loop stays null).
+    private static readonly bool UseRenderThread =
+        Environment.GetEnvironmentVariable("POLARIS_GPU_RENDERTHREAD") == "1";
+    private RenderLoop? _loop;
+    // Guards the interaction scalars written by the UI-thread WndProc and read by the
+    // render thread inside Tick/Render (drag point, scroll target, launch + show/hide
+    // animation phases). Layout/_slots/host/device are NOT under this lock — they are
+    // mutated only on the render thread (or while it is quiesced during rebuild), so the
+    // render thread is their single owner. Held briefly; never across WPF/Win32/Launch.
+    private readonly object _stateLock = new();
+
     private int _winX, _winY, _winW, _winH;   // DIP
     private double _dpi = 1.0;
 
@@ -79,6 +96,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     private float[] _waveOffX = Array.Empty<float>();  // smoothed spread offset (DIP)
     private float[] _waveOffY = Array.Empty<float>();
     private int _hover = -1;
+    private int _lastPreviewHover = -2;   // last hover marshaled to DrivePreview (render-thread path)
     // Hover window-thumbnail preview (parity with the WPF dock / GPU side dock): a
     // tiny transparent click-through anchor window is parked over the hovered icon and
     // used as WindowPreviewPopup's placement target. The popup's own dwell timers drive
@@ -449,12 +467,41 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             _dropShim = new DropShimWindow(_hwnd, ForwardShimInput, HandleOleDrop, OnExternalDragMove);
         else
             _dropShim.SetOwner(_hwnd);
-        _host = new CompositionHost(_hwnd, pw, ph, (float)(96.0 * _dpi));
+        _visible = visible;
+
+        // The GPU device + its Direct2D/DirectComposition resources have hard thread
+        // affinity, so on the render-thread path they are created and driven ONLY on the
+        // render thread; the UI thread never touches the host. Invoke runs the creation
+        // there and waits, so the shim re-top + first SetIntro below see a live host.
+        if (UseRenderThread)
+        {
+            EnsureLoop();
+            _loop!.Invoke(() => CreateHostResources(visible));
+        }
+        else
+        {
+            CreateHostResources(visible);
+        }
+
         // Top the shim AFTER creating the CompositionHost: building the DComp swap chain /
         // visual re-raises the dock window above the shim, so raising the shim last keeps it
         // on top for every rebuild path (not just summon), which is required for an external
         // drag to land on the shim's drop target rather than the bare composition dock.
         if (visible && _dropShim != null) { SyncShim(); _dropShim.Show(); }
+
+        if (UseRenderThread)
+            _loop!.SetActive(visible);
+    }
+
+    /// <summary>Creates the GPU host + Direct2D/DirectWrite resources and renders the first
+    /// frame. On the render-thread path this runs ON the render thread (posted from
+    /// <see cref="CreateWindowAndHost"/>); on the default path it runs inline on the UI
+    /// thread and also starts the <see cref="FrameClock"/>. Window creation and the drop
+    /// shim stay on the UI thread either way.</summary>
+    private void CreateHostResources(bool visible)
+    {
+        int pw = (int)Math.Ceiling(_winW * _dpi), ph = (int)Math.Ceiling(_winH * _dpi);
+        _host = new CompositionHost(_hwnd, pw, ph, (float)(96.0 * _dpi), waitable: UseRenderThread);
 
         _dwrite = DWrite.DWriteCreateFactory<IDWriteFactory>();
         // Match WPF ShowGlassHoverLabel: a fixed 11.5pt label that lived inside the
@@ -474,10 +521,94 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
 
         Render();
 
-        _timer = new Polaris.Services.Gpu.FrameClock();
-        _timer.Tick += Tick;
-        _visible = visible;
-        if (visible) _timer.Start();
+        if (!UseRenderThread)
+        {
+            _timer = new Polaris.Services.Gpu.FrameClock();
+            _timer.Tick += Tick;
+            if (visible) _timer.Start();
+        }
+    }
+
+    /// <summary>Lazily creates the dedicated render thread. Its per-frame callback paces to
+    /// the display vblank then runs <see cref="Tick"/> (advance animation + render + present)
+    /// under <see cref="_stateLock"/> so it never observes a half-written interaction state.</summary>
+    private void EnsureLoop()
+    {
+        _loop ??= new RenderLoop("PolarisMainDockGpu", RenderThreadFrame);
+    }
+
+    /// <summary>Render-thread frame: block until the compositor is ready (refresh-rate
+    /// paced), then advance + draw. The whole tick is taken under <see cref="_stateLock"/>;
+    /// the UI thread only ever holds that lock for trivial scalar writes, so contention is
+    /// sub-millisecond.</summary>
+    private void RenderThreadFrame()
+    {
+        _host?.WaitForVBlank();
+        lock (_stateLock)
+            Tick();
+    }
+
+    /// <summary>Disposes all render-thread-owned GPU resources (host, text formats, Saturn
+    /// + icon bitmap caches). MUST run on the render thread (it owns the device); the caller
+    /// quiesces the loop and Invokes this before the UI thread destroys the HWND.</summary>
+    private void DisposeHostResources()
+    {
+        DisposeSaturnCache();
+        _host?.Dispose(); _host = null;
+        _labelFormat?.Dispose(); _labelFormat = null;
+        _clockFormat?.Dispose(); _clockFormat = null;
+        _dwrite?.Dispose(); _dwrite = null;
+        foreach (var b in _bmpCache.Values) b?.Dispose();
+        _bmpCache.Clear();
+    }
+
+    /// <summary>Resume per-frame rendering: the render loop on the render-thread path, or
+    /// the UI-thread FrameClock otherwise.</summary>
+    private void StartDriver()
+    {
+        if (UseRenderThread) _loop?.SetActive(true);
+        else _timer?.Start();
+    }
+
+    /// <summary>Pause per-frame rendering (a hidden/settled dock costs nothing).</summary>
+    private void StopDriver()
+    {
+        if (UseRenderThread) _loop?.SetActive(false);
+        else _timer?.Stop();
+    }
+
+    /// <summary>Runs <paramref name="a"/> where the GPU device lives: posted to the render
+    /// thread (fire-and-forget, FIFO) on the render-thread path, inline otherwise.</summary>
+    private void RunOnRender(Action a)
+    {
+        if (UseRenderThread && _loop != null) _loop.Post(a);
+        else a();
+    }
+
+    /// <summary>Runs <paramref name="a"/> on the render thread and waits (ordering-critical
+    /// device work, e.g. host teardown before the HWND is destroyed); inline otherwise.</summary>
+    private void InvokeOnRender(Action a)
+    {
+        if (UseRenderThread && _loop != null) _loop.Invoke(a);
+        else a();
+    }
+
+    /// <summary>Marshals a UI-thread-only operation (Win32 on UI-owned windows, WPF popups)
+    /// to the Dispatcher when called from the render thread; runs inline on the default path
+    /// (already on the UI thread).</summary>
+    private void OnUi(Action a)
+    {
+        if (UseRenderThread) Dispatcher.BeginInvoke(a);
+        else a();
+    }
+
+    /// <summary>Requests a repaint after a UI-thread interaction (drag/scroll). On the
+    /// default path it renders synchronously; on the render-thread path the active loop
+    /// already redraws every frame, so the state change is picked up on the next vblank
+    /// (sub-frame latency) and no UI-thread device access is needed.</summary>
+    private void RequestRender()
+    {
+        if (!UseRenderThread) Render();
     }
 
     private static Color4 Col(byte a, byte r, byte g, byte b) => new(r / 255f, g / 255f, b / 255f, a / 255f);
@@ -857,8 +988,20 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             _labelOp += (tgtL - _labelOp) * kL;
             if (_labelOp < 0.01f && tgtL == 0f) { _labelOp = 0f; _labelIdx = -1; }
         }
-        // Drive the hover thumbnail preview (suppressed while dragging or dismissing).
-        DrivePreview(_dragging || !_shown ? -1 : _hover);
+        // Drive the hover thumbnail preview (suppressed while dragging or dismissing). The
+        // preview is a WPF popup, so on the render-thread path marshal it to the UI thread,
+        // and only when the target changes (DrivePreview is a no-op for an unchanged hover).
+        int wantPreview = _dragging || !_shown ? -1 : _hover;
+        if (UseRenderThread)
+        {
+            if (wantPreview != _lastPreviewHover)
+            {
+                _lastPreviewHover = wantPreview;
+                Dispatcher.BeginInvoke(new Action(() => DrivePreview(wantPreview)));
+            }
+        }
+        else
+            DrivePreview(wantPreview);
 
         // Ease the grid scroll toward its wheel/scrollbar target (tau ~70ms) so the
         // whole grid glides rather than jumping a row at a time.
@@ -1644,15 +1787,21 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         long now = Environment.TickCount64;
         if (now - _shimCheckMs < 150) return;
         _shimCheckMs = now;
-        try
+        // _dropShim.Show() is Win32 on a UI-thread-owned window, so marshal the check off the
+        // render thread (the 150ms throttle above keeps this to a few BeginInvokes/sec).
+        OnUi(() =>
         {
-            int cx = (int)Math.Round((_winX + _slabX + _slabW / 2f) * _dpi);
-            int cy = (int)Math.Round((_winY + _slabY + _slabH / 2f) * _dpi);
-            IntPtr top = WindowFromPoint(new POINT { X = cx, Y = cy });
-            if (top == _hwnd)   // the dock itself is covering the shim → re-raise the shim
-                _dropShim.Show();
-        }
-        catch { }
+            try
+            {
+                if (_dropShim == null || !_visible) return;
+                int cx = (int)Math.Round((_winX + _slabX + _slabW / 2f) * _dpi);
+                int cy = (int)Math.Round((_winY + _slabY + _slabH / 2f) * _dpi);
+                IntPtr top = WindowFromPoint(new POINT { X = cx, Y = cy });
+                if (top == _hwnd)   // the dock itself is covering the shim → re-raise the shim
+                    _dropShim.Show();
+            }
+            catch { }
+        });
     }
     private long _shimCheckMs;
 
@@ -1785,20 +1934,23 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     /// a drag-follow marker, mirroring the WPF dock's live drag feedback.</summary>
     private void OnExternalDragMove((int x, int y)? screenPt)
     {
-        if (screenPt is { } p)
+        lock (_stateLock)
         {
-            float lx = (float)(p.x / _dpi - _winX);
-            float ly = (float)(p.y / _dpi - _winY);
-            // Only show the follow marker where a drop will actually register (the slab /
-            // ring box). Over the transparent headroom the drag falls through to the desktop,
-            // so a marker there would be misleading.
-            _extDragPt = InDropRegion(lx, ly) ? new Vector2(lx, ly) : (Vector2?)null;
+            if (screenPt is { } p)
+            {
+                float lx = (float)(p.x / _dpi - _winX);
+                float ly = (float)(p.y / _dpi - _winY);
+                // Only show the follow marker where a drop will actually register (the slab /
+                // ring box). Over the transparent headroom the drag falls through to the desktop,
+                // so a marker there would be misleading.
+                _extDragPt = InDropRegion(lx, ly) ? new Vector2(lx, ly) : (Vector2?)null;
+            }
+            else
+                _extDragPt = null;
         }
-        else
-            _extDragPt = null;
-        // Marshal to the UI thread (OLE callbacks already run on the STA UI thread, but be
-        // safe) and repaint so the marker tracks the cursor.
-        try { Render(); } catch { }
+        // OLE callbacks run on the STA UI thread; repaint so the marker tracks the cursor
+        // (synchronous on the default path, next vblank on the render-thread path).
+        try { RequestRender(); } catch { }
     }
 
     /// <summary>Routes the window messages this dock cares about. Returns true (with
@@ -1830,11 +1982,16 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
                 (float lx, float ly) = ClientDip(lParam);
                 if (TryBarPress(lx, ly))
                     return true;
-                _pressX = lx; _pressY = ly; _dragX = lx; _dragY = ly;
                 float hitR = _saturn ? _planetHitR : _gearR;
-                _pressGear = Vector2.Distance(new Vector2(lx, ly), _gearC) <= hitR + 2f;
-                _pressIdx = _pressGear ? -1 : HitSlot(lx, ly);
-                _dragging = false;
+                bool gear = Vector2.Distance(new Vector2(lx, ly), _gearC) <= hitR + 2f;
+                int hit = gear ? -1 : HitSlot(lx, ly);
+                lock (_stateLock)
+                {
+                    _pressX = lx; _pressY = ly; _dragX = lx; _dragY = ly;
+                    _pressGear = gear;
+                    _pressIdx = hit;
+                    _dragging = false;
+                }
                 if (_pressIdx >= 0 || _pressGear)
                     SetCapture(_hwnd);
                 return true;
@@ -1844,29 +2001,38 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
                 (float lx, float ly) = ClientDip(lParam);
                 if (_barDrag)
                 {
-                    BarDragTo(ly);
-                    Render();
+                    lock (_stateLock) BarDragTo(ly);
+                    RequestRender();
                     return true;
                 }
                 if (_pressIdx < 0)
                     return false;
-                _dragX = lx; _dragY = ly;
-                if (!_dragging)
+                bool startDrag = false;
+                lock (_stateLock)
                 {
-                    float mdx = lx - _pressX, mdy = ly - _pressY;
-                    if (mdx * mdx + mdy * mdy > DragThreshold * DragThreshold)
+                    _dragX = lx; _dragY = ly;
+                    if (!_dragging)
                     {
-                        _dragging = true;
-                        _dragArrangeLastMs = Environment.TickCount64;   // seed the time-based reflow ease
-                        GlassDragActiveChanged?.Invoke(true);   // keep the side dock shown as a drop target
-                        StartDragGhost(_pressIdx);   // lift the icon into an independent desktop overlay
+                        float mdx = lx - _pressX, mdy = ly - _pressY;
+                        if (mdx * mdx + mdy * mdy > DragThreshold * DragThreshold)
+                        {
+                            _dragging = true;
+                            _dragArrangeLastMs = Environment.TickCount64;   // seed the time-based reflow ease
+                            startDrag = true;
+                        }
                     }
+                }
+                if (startDrag)
+                {
+                    GlassDragActiveChanged?.Invoke(true);   // keep the side dock shown as a drop target
+                    StartDragGhost(_pressIdx);   // lift the icon into an independent desktop overlay
                 }
                 if (_dragging)
                 {
                     MoveDragGhost(lx, ly);
-                    AdvanceDragArrange();   // keep neighbours in step with the cursor between ticks
-                    Render();
+                    // Default path: keep neighbours in step between ticks + repaint inline. On
+                    // the render-thread path the loop runs AdvanceDragArrange + draws each frame.
+                    if (!UseRenderThread) { AdvanceDragArrange(); Render(); }
                 }
                 return true;
             }
@@ -1875,8 +2041,9 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
                 if (_saturn || !_scrollable)
                     return false;
                 int delta = unchecked((short)(((long)wParam >> 16) & 0xFFFF));
-                _glassScrollTarget = Math.Clamp(_glassScrollTarget - _glassCellH * (delta / 120.0), 0, _glassScrollMax);
-                Render();
+                lock (_stateLock)
+                    _glassScrollTarget = Math.Clamp(_glassScrollTarget - _glassCellH * (delta / 120.0), 0, _glassScrollMax);
+                RequestRender();
                 return true;
             }
             case WM_LBUTTONUP:
@@ -1884,17 +2051,20 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
                 ReleaseCapture();
                 if (_barDrag)
                 {
-                    _barDrag = false;
-                    Render();
+                    lock (_stateLock) _barDrag = false;
+                    RequestRender();
                     return true;
                 }
                 int idx = _pressIdx;
                 bool wasDrag = _dragging;
                 bool gear = _pressGear;
                 (float lx, float ly) = ClientDip(lParam);
-                _pressIdx = -1;
-                _dragging = false;
-                _pressGear = false;
+                lock (_stateLock)
+                {
+                    _pressIdx = -1;
+                    _dragging = false;
+                    _pressGear = false;
+                }
                 EndDragGhost();   // dismiss the desktop overlay before committing the drop
                 if (gear)
                 {
@@ -1908,7 +2078,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
                     else DropSlot(idx, lx, ly);
                 }
                 if (_hwnd != IntPtr.Zero)
-                    Render();
+                    RequestRender();
                 return true;
             }
             case WM_RBUTTONUP:
@@ -2295,18 +2465,24 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         // de-magnify), then swells past rest to an "enlarge" peak, and only THEN does the dock
         // launch + fade — so the restore→enlarge plays out fully instead of being cut off. The
         // animation is scale-only and centred (no hop), so it never drifts off the icon centre.
-        _pressLaunchIdx = idx;
-        _pressLaunchStart = Environment.TickCount64;
-        _pressFromScale = idx < _waveCur.Length ? _waveCur[idx] : 1f;
-        _launching = true;
-        _timer?.Start();
+        lock (_stateLock)
+        {
+            _pressLaunchIdx = idx;
+            _pressLaunchStart = Environment.TickCount64;
+            _pressFromScale = idx < _waveCur.Length ? _waveCur[idx] : 1f;
+            _launching = true;
+        }
+        StartDriver();
         var entry = s.Entry;
         var hold = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(PressLaunchMs) };
         hold.Tick += (_, _) =>
         {
             hold.Stop();
-            _launching = false;
-            _pressLaunchIdx = -1;
+            lock (_stateLock)
+            {
+                _launching = false;
+                _pressLaunchIdx = -1;
+            }
             try { AppLauncher.Launch(entry, () => HidePanel()); }
             catch (Exception ex) { Log.Warn("MainDockGpu", "launch failed: " + ex.Message); }
         };
@@ -2321,7 +2497,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         GlassDragActiveChanged?.Invoke(false);
 
         var s = _slots[idx];
-        if (s.Entry == null) { Render(); return; }
+        if (s.Entry == null) { RequestRender(); return; }
 
         // Dropping onto the left-edge side dock pins it there (the main-dock entry
         // stays); checked first so a drag toward the dock adds rather than deletes.
@@ -2330,7 +2506,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             var screen = new Point(_winX + lx, _winY + ly);
             if (DropToSideDock(screen, s.Entry))
             {
-                Render();   // snap the dragged icon back into its slot
+                RequestRender();   // snap the dragged icon back into its slot
                 return;
             }
         }
@@ -2374,7 +2550,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
                 _config.Settings.Ring0Count = Math.Clamp(newR0, 0, sn);
                 PersistAndRelayout();
             }
-            else Render();
+            else RequestRender();
             return;
         }
 
@@ -2407,7 +2583,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         if (changed)
             PersistAndRelayout();
         else
-            Render();
+            RequestRender();
     }
 
     /// <summary>Pins shortcuts / executables dropped from Explorer / the desktop,
@@ -2589,6 +2765,10 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     {
         if (_host == null || _hwnd == IntPtr.Zero) { Rebuild(); return; }
         int ow = _winW, oh = _winH, ox = _winX, oy = _winY;
+        // Quiesce the render thread before mutating _slots / geometry (it reads them every
+        // frame). On the default path StopDriver is a no-op pause; InvokeOnRender runs inline.
+        StopDriver();
+        InvokeOnRender(() => { });   // barrier: ensure the render thread is idle (not mid-frame)
         _pressIdx = -1; _dragging = false; _hover = -1;
         LayoutContent();
         if (_winW != ow || _winH != oh || _winX != ox || _winY != oy)
@@ -2606,12 +2786,17 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
                 // shim until SyncShim runs, and an external drag started in that window would
                 // hit the bare dock (no drop target) and fail.
                 SetWindowPos(_hwnd, IntPtr.Zero, px, py, pw, ph, SWP_NOACTIVATE | SWP_NOZORDER);
-                _host.Resize(pw, ph);
-                foreach (var b in _bmpCache.Values) b?.Dispose();
-                _bmpCache.Clear();
-                if (_saturn) { _saturnLastMs = 0; BuildSaturnCache(); }
+                // Swap-chain resize + bitmap caches + first repaint are device work → render thread.
+                InvokeOnRender(() =>
+                {
+                    _host!.Resize(pw, ph);
+                    foreach (var b in _bmpCache.Values) b?.Dispose();
+                    _bmpCache.Clear();
+                    if (_saturn) { _saturnLastMs = 0; BuildSaturnCache(); }
+                    Render();
+                });
                 SyncShim();
-                Render();
+                StartDriver();
                 return;
             }
             catch (Exception ex)
@@ -2622,27 +2807,26 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             }
         }
         if (_saturn) { _saturnLastMs = 0; }   // cache is window-sized, unchanged; just resume
-        Render();
+        InvokeOnRender(Render);
+        StartDriver();
     }
 
     private void Rebuild()
     {
         bool wasVisible = _visible;
-        _timer?.Stop();
+        StopDriver();
         CloseSlotMenu();
         ClosePreview();
         EndDragGhost();
         if (_hwnd != IntPtr.Zero) s_instances.Remove(_hwnd);
-        DisposeSaturnCache();
+        // Dispose all GPU resources ON the render thread (it owns the device) and WAIT, so
+        // the host is gone before the UI thread destroys the HWND below — and the render
+        // thread is guaranteed idle (not mid-frame) before we relayout _slots. On the default
+        // path this runs inline (unchanged ordering).
+        InvokeOnRender(DisposeHostResources);
         // NOTE: keep _dropShim alive across the rebuild (re-owned in CreateWindowAndHost) so
         // an external drag started right after a drop never hits a no-drop-target gap.
-        _host?.Dispose(); _host = null;
-        _labelFormat?.Dispose(); _labelFormat = null;
-        _clockFormat?.Dispose(); _clockFormat = null;
-        _dwrite?.Dispose(); _dwrite = null;
         if (_hwnd != IntPtr.Zero) { DestroyWindow(_hwnd); _hwnd = IntPtr.Zero; }
-        foreach (var b in _bmpCache.Values) b?.Dispose();
-        _bmpCache.Clear();
         _hover = -1; _pressIdx = -1; _dragging = false;
         try { Build(wasVisible); }
         catch (Exception ex) { Log.Warn("MainDockGpu", "rebuild failed: " + ex); }
@@ -2818,12 +3002,15 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     private void Summon(bool pinned)
     {
         Realize();
-        _shown = true;
-        _pinned = pinned;
-        // Start fully dismissed (off-screen + transparent) so the very first frame after
-        // the rebuild slides + fades in rather than popping at rest.
-        _summon = 0f; _summonDir = +1; _summonLast = Environment.TickCount64;
-        _fadeOpacity = 0f; _fadeFrom = 0f; _fadeDir = +1; _fadeStart = Environment.TickCount64;
+        lock (_stateLock)
+        {
+            _shown = true;
+            _pinned = pinned;
+            // Start fully dismissed (off-screen + transparent) so the very first frame after
+            // the rebuild slides + fades in rather than popping at rest.
+            _summon = 0f; _summonDir = +1; _summonLast = Environment.TickCount64;
+            _fadeOpacity = 0f; _fadeFrom = 0f; _fadeDir = +1; _fadeStart = Environment.TickCount64;
+        }
         if (!_visible)
         {
             ShowWindow(_hwnd, SW_SHOWNOACTIVATE);
@@ -2831,11 +3018,11 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         }
         SetWindowPos(_hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE);
         Rebuild();                 // pick up config / running changes; rebuilds visible
-        _host?.SetIntro(0f, 0f, 0f);   // first frame fully transparent before the fade-in
+        RunOnRender(() => _host?.SetIntro(0f, 0f, 0f));   // first frame fully transparent before the fade-in
         ShowNotchIfSaturn();
         if (!_weatherHooked) { _weather.Updated += OnWeatherUpdated; _weatherHooked = true; }
         _ = _weather.RefreshAsync();   // fetch weather promptly on show (self-throttled)
-        _timer?.Start();
+        StartDriver();
         // Re-assert the drop-shim as the topmost window AFTER every other summon-time window
         // op (dock rebuild, notch, side dock) so an external drag right after opening always
         // finds the shim (not the bare composition dock) under the cursor.
@@ -2875,7 +3062,10 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         _shown = false;
         _pinned = false;
         // Cancel any in-flight drag / menu so they don't outlive the dismiss.
-        _pressIdx = -1; _dragging = false; _hover = -1;
+        lock (_stateLock)
+        {
+            _pressIdx = -1; _dragging = false; _hover = -1;
+        }
         CloseSlotMenu();
         ClosePreview();
         _notch?.HideNotch();        // retract the Saturn notch with the dock
@@ -2884,9 +3074,12 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         // Dismiss is a PURE fade-out in both themes (no slide / scale) — mirrors the
         // WPF RootGrid 170ms opacity animation. Leave _summon at rest so the scene holds
         // its docked position while the compositor fades the whole visual to transparent.
-        _summonDir = 0;
-        _fadeFrom = _fadeOpacity; _fadeDir = -1; _fadeStart = Environment.TickCount64;
-        _timer?.Start();
+        lock (_stateLock)
+        {
+            _summonDir = 0;
+            _fadeFrom = _fadeOpacity; _fadeDir = -1; _fadeStart = Environment.TickCount64;
+        }
+        StartDriver();
     }
 
     public void HideIfNotPinned()
@@ -2905,19 +3098,27 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     /// dismissed dock costs nothing, then run any deferred callback.</summary>
     private void OnDismissComplete()
     {
-        if (_hwnd != IntPtr.Zero)
-            ShowWindow(_hwnd, SW_HIDE);
-        _dropShim?.Hide();
         _visible = false;
-        _timer?.Stop();
+        StopDriver();
         var cb = _onFaded;
         _onFaded = null;
+        // SW_HIDE + shim hide are Win32 on UI-thread-owned windows; marshal off the render
+        // thread. Guard on !_shown so a re-summon that lands before this runs isn't hidden.
+        OnUi(() =>
+        {
+            if (!_shown)
+            {
+                if (_hwnd != IntPtr.Zero) ShowWindow(_hwnd, SW_HIDE);
+                _dropShim?.Hide();
+            }
+        });
         if (cb != null)
             Dispatcher.BeginInvoke(cb, DispatcherPriority.Background);
     }
 
     public void Dispose()
     {
+        StopDriver();
         _timer?.Stop();
         _timer = null;
         if (_weatherHooked) { _weather.Updated -= OnWeatherUpdated; _weatherHooked = false; }
@@ -2925,15 +3126,13 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         ClosePreview();
         if (_anchorWin != null) { try { _anchorWin.Close(); } catch { } _anchorWin = null; _anchorEl = null; _preview = null; }
         _notch?.HideNotch();
-        _labelFormat?.Dispose();
-        _clockFormat?.Dispose();
-        _dwrite?.Dispose();
-        foreach (var b in _bmpCache.Values) b?.Dispose();
-        _bmpCache.Clear();
-        DisposeSaturnCache();
+        // Dispose all GPU resources on the render thread (their owner) and wait, then stop +
+        // join the render thread, all BEFORE the HWND is destroyed. On the default path this
+        // runs inline. DisposeHostResources covers host, text formats, Saturn + bitmap caches.
+        InvokeOnRender(DisposeHostResources);
+        if (UseRenderThread) { _loop?.Stop(); _loop = null; }
         EndDragGhost();
         _dropShim?.Dispose(); _dropShim = null;
-        _host?.Dispose();
         if (_hwnd != IntPtr.Zero) { s_instances.Remove(_hwnd); DestroyWindow(_hwnd); }
     }
 

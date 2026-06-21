@@ -33,10 +33,24 @@ internal sealed class CompositionHost : IDisposable
     private ID2D1Bitmap1 _targetBitmap;
     private float _dpi;
 
+    // Frame-latency waitable object (independent render-thread path only). When the
+    // swap chain is created with FrameLatencyWaitableObject, the DWM/compositor signals
+    // this handle when it is ready to accept the next frame; a render thread waits on it
+    // (instead of a UI-thread timer) to pace itself to the DISPLAY refresh rate. NULL on
+    // the default (UI-thread FrameClock) path, where pacing is CompositionTarget.Rendering.
+    private readonly IDXGISwapChain2? _swapChain2;
+    private readonly IntPtr _frameLatencyWaitable;
+    private readonly SwapChainFlags _swapFlags;
+
     public ID2D1DeviceContext Context => _d2d;
     public int Width { get; private set; }
     public int Height { get; private set; }
+    /// <summary>True when this host owns a frame-latency waitable object (render-thread
+    /// path): callers should pace frames with <see cref="WaitForVBlank"/> + Present(1).</summary>
+    public bool IsWaitable => _frameLatencyWaitable != IntPtr.Zero;
 
+    private const uint WAIT_TIMEOUT_MS = 1000;
+    [DllImport("kernel32.dll")] private static extern uint WaitForSingleObject(IntPtr handle, uint ms);
     [DllImport("user32.dll")] private static extern uint GetDpiForWindow(IntPtr hwnd);
     [DllImport("user32.dll")] private static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint flags);
     [DllImport("Shcore.dll")] private static extern int GetDpiForMonitor(IntPtr hmon, int dpiType, out uint dpiX, out uint dpiY);
@@ -63,7 +77,7 @@ internal sealed class CompositionHost : IDisposable
         return dpi >= 48 ? dpi / 96.0 : 1.0;
     }
 
-    public CompositionHost(IntPtr hwnd, int width, int height, float dpi = 96f)
+    public CompositionHost(IntPtr hwnd, int width, int height, float dpi = 96f, bool waitable = false)
     {
         Width = Math.Max(1, width);
         Height = Math.Max(1, height);
@@ -87,6 +101,10 @@ internal sealed class CompositionHost : IDisposable
         _dxgiDevice = _d3d.QueryInterface<IDXGIDevice>();
         _factory = DXGI.CreateDXGIFactory2<IDXGIFactory2>(false);
 
+        // The render-thread path adds FrameLatencyWaitableObject so a dedicated thread can
+        // block on the compositor's "ready for next frame" signal (refresh-rate paced),
+        // instead of the UI-thread CompositionTarget.Rendering clock that caps ~38-53fps.
+        _swapFlags = waitable ? SwapChainFlags.FrameLatencyWaitableObject : SwapChainFlags.None;
         var desc = new SwapChainDescription1
         {
             Width = (uint)Width,
@@ -99,9 +117,21 @@ internal sealed class CompositionHost : IDisposable
             Scaling = Scaling.Stretch,
             SwapEffect = SwapEffect.FlipSequential,
             AlphaMode = DXGIAlphaMode.Premultiplied,
-            Flags = SwapChainFlags.None,
+            Flags = _swapFlags,
         };
         _swapChain = _factory.CreateSwapChainForComposition(_d3d, desc);
+        if (waitable)
+        {
+            try
+            {
+                _swapChain2 = _swapChain.QueryInterface<IDXGISwapChain2>();
+                // Latency 1 = at most one frame queued, so each WaitForVBlank returns as
+                // soon as the just-presented frame is consumed → minimal input-to-photon lag.
+                _swapChain2.MaximumFrameLatency = 1;
+                _frameLatencyWaitable = _swapChain2.FrameLatencyWaitableObject;
+            }
+            catch { _swapChain2 = null; _frameLatencyWaitable = IntPtr.Zero; }
+        }
 
         _dcomp = DComp.DCompositionCreateDevice<IDCompositionDevice>(_dxgiDevice);
         _dcomp.CreateTargetForHwnd(hwnd, true, out _target).CheckError();
@@ -144,7 +174,7 @@ internal sealed class CompositionHost : IDisposable
         // Release the D2D target that holds a back-buffer reference before resizing.
         _d2d.Target = null;
         _targetBitmap.Dispose();
-        _swapChain.ResizeBuffers(2, (uint)w, (uint)h, Format.B8G8R8A8_UNorm, SwapChainFlags.None).CheckError();
+        _swapChain.ResizeBuffers(2, (uint)w, (uint)h, Format.B8G8R8A8_UNorm, _swapFlags).CheckError();
         Width = w; Height = h;
         using var surface = _swapChain.GetBuffer<IDXGISurface>(0);
         var props = new BitmapProperties1(
@@ -192,6 +222,18 @@ internal sealed class CompositionHost : IDisposable
     /// themselves, e.g. an interleaved command-list shadow pass).</summary>
     public void Present() => _swapChain.Present(1, PresentFlags.None);
 
+    /// <summary>Blocks until the compositor is ready to accept the next frame
+    /// (render-thread path only). With MaximumFrameLatency=1 this returns once per
+    /// display refresh after the last present is consumed, so a render thread that
+    /// loops <c>WaitForVBlank(); render; Present(1);</c> self-paces to the monitor's
+    /// refresh rate — 60Hz, 144Hz, etc. — with no UI-thread timer. No-op (returns
+    /// immediately) when this host has no waitable object.</summary>
+    public void WaitForVBlank()
+    {
+        if (_frameLatencyWaitable != IntPtr.Zero)
+            WaitForSingleObject(_frameLatencyWaitable, WAIT_TIMEOUT_MS);
+    }
+
     /// <summary>Clears to fully transparent, runs the caller's draw, presents.</summary>
     public void Render(Action<ID2D1DeviceContext> draw)
     {
@@ -212,6 +254,7 @@ internal sealed class CompositionHost : IDisposable
         _visual3?.Dispose();
         _target?.Dispose();
         _dcomp?.Dispose();
+        _swapChain2?.Dispose();
         _swapChain?.Dispose();
         _factory?.Dispose();
         _dxgiDevice?.Dispose();
