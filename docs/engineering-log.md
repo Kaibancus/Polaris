@@ -83,6 +83,11 @@
 
 ## 🐛 BUG 修复
 
+- **主 Dock 悬停某些图标后无法点击、伴随系统报错提示音**：
+  - **现象**：悬停到（某状态下的）图标后，主 Dock 点击无响应并发出系统报错音；`errors.log` 每帧刷 `MainDockWindowGpu.DrivePreview → NullReferenceException`（经 FrameClock/MediaContext 渲染回调），渲染 Tick 被异常中断，连带吞掉点击。
+  - **根因**：`EnsureAnchor()` 以 `_anchorWin != null` 作为「已初始化」判据，但 `_preview` 是该方法**最后**才创建的。若 `_anchorWin.Show()` 或其后步骤抛异常（`_anchorWin` 字段已赋值、`_preview` 仍为 null），下次进入 `EnsureAnchor` 因 `_anchorWin!=null` 直接 return → `_preview` 永远为 null → `DrivePreview` 里 `_preview!.Placement` 的强制解引用每帧 NRE。属预先存在的半初始化时序陷阱（最早 22:43 即出现，与同日的渲染表面裁剪改动无关）。
+  - **修复**：①`EnsureAnchor` 改以 `_preview` 为「完成」标志、整段包 try-catch，失败时回滚半成品状态（`_anchorWin?.Close()`、三字段置 null）以便后续悬停干净重试，并 `Log.Warn` 记录原始异常；②`DrivePreview` 在用 `_preview`/`_anchorWin` 前加 null 守卫，去掉不安全的 `_preview!`。
+
 - **设置滑块拖动卡顿、且无法点击滑轨定位**：
   - **现象**：拖动「面板透明度 / 图标大小 / 字体大小」滑块时不流畅、发涩；点击滑轨某处不会跳到该百分比。
   - **根因**：① 滑块样式未设 `IsMoveToPointEnabled`，点击滑轨只触发 `DecreaseLarge/IncreaseLarge` 翻页而非定位。② `OnSettingChanged`（滑块 `ValueChanged`）每次变化都同步调用 `CommitSettings → _persist()` **把 config.json 写盘**；拖动每像素触发一次磁盘 I/O 阻塞 UI 线程 → 拖动发卡。
@@ -209,6 +214,12 @@
 - **possible-null-argument 警告**（`efec931`，`ApplyPinnedRunning`）。
 
 ## ⚡ 性能优化
+
+- **高刷新率机输入延迟缓解：启动离线化 + 缩小 GPU 主 Dock 渲染表面**（GPU 渲染移植在 4K@144 上的输入响应退化）：
+  - **背景**：GPU 双 Dock 的渲染（`FrameClock`=`CompositionTarget.Rendering`，按显示刷新率触发）跑在 **UI 线程**，输入（`WndProc` 的点击/右键/悬停）也走 UI 线程消息泵。4K@144 下每帧近全屏栅格化量约为本机 59Hz 的 ~5×（刷新率 2.44× × 像素 2.0×），把单条 UI 线程占满，导致点击/右键菜单/激活/缩略图延迟严重；本机（59Hz、半分辨率）因负载仅 ~1/5、UI 线程有余量反而流畅。根因是「渲染放在 UI 线程」，非 GPU 算力（单帧 draw 仅 6-8ms≪16.6ms 预算）。
+  - **①启动离线化**（`AppLauncher.Launch`）：`ActivateExisting`（枚举窗口+SetForegroundWindow）、`Process.Start`、shell 解析等同步重活原本阻塞 UI 线程数十~数百 ms。改为 `dismiss`（HidePanel，须 UI 线程）前台先调 → 重活 `LaunchCore` 丢 `Task.Run` 后台 → 错误 `MessageBox` marshal 回 UI 线程。验证所用 shell API（`Process.Start`/`SHGetPropertyStoreFromParsingName`）均 free-threaded、非 STA-bound，MTA 后台安全。（注：缩略图抓图 `WindowPreviewPopup` 早已后台化。）
+  - **②缩小渲染表面**（`MainDockWindowGpu` 尺寸计算）：主 Dock 窗口原为「窗口内拖拽」留 `glassDragHeadroom=1.8×icon` 的四周透明余量，但拖拽已改用独立桌面 overlay `DragGhostWindowGpu`，这片余量基本是死像素；而交换链 back buffer 是整个 `_winW×_winH`、每帧 `Clear`+绘制全覆盖。将其 `1.8→0.6 icon`（保留少量供纯文字图标 fallback），**每帧栅格化像素 ~−20%**（4K@150% 实测 2.8M→2.2M px）；放大/悬停标签余量（`hoverHeadroom`+shadow）完全未动，放大图标与名称标签不被裁（顶部余量 268 DIP ≫ 所需 178 DIP）。
+  - **定位**：二者均保帧率、低风险，**减轻** UI 线程争用但不根除——右键/激活的消息派发延迟只要渲染仍在 UI 线程就只能缓解；彻底解决需独立渲染线程（见 `docs/gpu-rendering-evaluation.md` §10 备用计划）。侧 Dock 沿屏边布局、尺寸已贴合内容，无类似可削余量。
 
 - **空闲判据改为"光标未在可见界面上活动"（覆盖仅侧 dock / 设置界面两态）+ 侧 dock 关闭空转**：原 idle-trim 只在两 dock 全隐藏时触发，导致"仅侧 dock"(~280MB)与"设置界面打开"(~196MB)两态全基线常驻。两项改造：
   ①**trim 判据泛化**：`App.EvaluateIdleTrim` 不再要求全隐藏，而是"主 dock 未显示 且 光标未在可见次级界面（侧 dock / 设置窗）上**移动**"即视为被动可 trim——静止窗口的画面由 DWM 持有、换出页面不会变黑，下次交互按需换回。设置界面态实测 196MB→~70MB。

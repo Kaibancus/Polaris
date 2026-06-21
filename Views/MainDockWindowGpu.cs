@@ -281,7 +281,16 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         double shadowPad = 72.0;
         double scrollPad = icon * 1.6;
         double hoverHeadroom = icon * 2.4;
-        double glassDragHeadroom = _config.Settings.IconSize * ThemeScale * 1.8;
+        // Headroom kept around the slab purely so an in-window drag of a TEXT icon (no
+        // bitmap) has somewhere to roam. Bitmap icons (virtually all of them) lift into
+        // an independent desktop overlay (DragGhostWindowGpu), so they don't need this
+        // surplus. The window's back buffer is the full _winW×_winH and every frame
+        // clears + rasterises all of it, so on a 4K/high-refresh display this transparent
+        // surplus is pure per-frame cost competing with the UI-thread input pump. Trim it
+        // from 1.8→0.6 icon (~20% fewer pixels per frame) while still leaving room for the
+        // text-icon fallback; the icon-pop / hover-label headroom (hoverHeadroom + shadow)
+        // is untouched so magnified icons and labels are never clipped.
+        double glassDragHeadroom = _config.Settings.IconSize * ThemeScale * 0.6;
         double w = Math.Min(dockW + shadowPad * 2 + scrollPad + glassDragHeadroom * 2, sw);
         double h = Math.Min(totalHeight + bottomMargin + hoverHeadroom + shadowPad + glassDragHeadroom, sh);
 
@@ -1529,40 +1538,58 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         var excl = SiblingShellNames(s.Entry);
         _previewSource = () => WindowPreviewService.GetWindowsForEntry(path, args, name, excl);
         EnsureAnchor();
+        if (_preview == null || _anchorWin == null)
+            return;   // anchor/popup not ready (e.g. creation failed) — skip this hover
         AnchorOverSlot(s);
-        _preview!.Placement = PreviewPlacement.Above;   // main dock is bottom-anchored
+        _preview.Placement = PreviewPlacement.Above;   // main dock is bottom-anchored
         _preview.OnPointerEnter();
     }
 
     private void EnsureAnchor()
     {
-        if (_anchorWin != null)
+        // Use _preview (created last) as the "fully initialised" flag, not _anchorWin:
+        // if a previous attempt assigned _anchorWin but then threw before creating
+        // _preview, keying off _anchorWin would skip re-creation forever and leave
+        // _preview null, NRE-ing every frame in DrivePreview.
+        if (_preview != null)
             return;
-        _anchorEl = new System.Windows.Controls.Border { Background = System.Windows.Media.Brushes.Transparent };
-        _anchorWin = new System.Windows.Window
+        try
         {
-            WindowStyle = System.Windows.WindowStyle.None,
-            AllowsTransparency = true,
-            Background = System.Windows.Media.Brushes.Transparent,
-            ShowInTaskbar = false,
-            ShowActivated = false,
-            Topmost = true,
-            ResizeMode = System.Windows.ResizeMode.NoResize,
-            Width = 1, Height = 1, Left = -10000, Top = -10000,
-            Content = _anchorEl,
-        };
-        _anchorWin.Show();
-        // Make the anchor fully click-through / non-activating so it never steals
-        // clicks from the GPU dock icon it sits over.
-        var h = new System.Windows.Interop.WindowInteropHelper(_anchorWin).Handle;
-        int ex = GetWindowLongW(h, GWL_EXSTYLE);
-        SetWindowLongW(h, GWL_EXSTYLE, ex | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE);
+            _anchorEl = new System.Windows.Controls.Border { Background = System.Windows.Media.Brushes.Transparent };
+            _anchorWin = new System.Windows.Window
+            {
+                WindowStyle = System.Windows.WindowStyle.None,
+                AllowsTransparency = true,
+                Background = System.Windows.Media.Brushes.Transparent,
+                ShowInTaskbar = false,
+                ShowActivated = false,
+                Topmost = true,
+                ResizeMode = System.Windows.ResizeMode.NoResize,
+                Width = 1, Height = 1, Left = -10000, Top = -10000,
+                Content = _anchorEl,
+            };
+            _anchorWin.Show();
+            // Make the anchor fully click-through / non-activating so it never steals
+            // clicks from the GPU dock icon it sits over.
+            var h = new System.Windows.Interop.WindowInteropHelper(_anchorWin).Handle;
+            int ex = GetWindowLongW(h, GWL_EXSTYLE);
+            SetWindowLongW(h, GWL_EXSTYLE, ex | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE);
 
-        _preview = new WindowPreviewPopup(
-            _anchorEl,
-            () => _previewSource?.Invoke() ?? new List<WindowPreview>(),
-            minWindows: 1,
-            onActivated: null);
+            _preview = new WindowPreviewPopup(
+                _anchorEl,
+                () => _previewSource?.Invoke() ?? new List<WindowPreview>(),
+                minWindows: 1,
+                onActivated: null);
+        }
+        catch (Exception ex)
+        {
+            Log.Warn("MainDockGpu", "preview anchor init failed: " + ex.Message);
+            // Roll back any half-built state so a later hover can retry cleanly.
+            try { _anchorWin?.Close(); } catch { }
+            _anchorWin = null;
+            _anchorEl = null;
+            _preview = null;
+        }
     }
 
     /// <summary>Positions the anchor window so its element overlaps the hovered icon's

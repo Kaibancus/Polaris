@@ -30,6 +30,18 @@ public static class AppLauncher
         if (entry == null || string.IsNullOrWhiteSpace(entry.Path))
             return;
 
+        // Activation / process start / shell-COM launch can each block the calling
+        // thread for tens to hundreds of ms (window enumeration + SetForegroundWindow,
+        // ShellExecute, packaged-app COM activation). On the GPU docks that thread is
+        // the UI thread, which also runs the per-refresh render loop and the input
+        // message pump, so a synchronous launch stalls clicks/menus on a high-refresh
+        // display. Run the heavy work on a background thread; the dock has already been
+        // dismissed above on the UI thread, and any error dialog is marshalled back.
+        System.Threading.Tasks.Task.Run(() => LaunchCore(entry));
+    }
+
+    private static void LaunchCore(AppEntry entry)
+    {
         // Shell-namespace objects (This PC, Recycle Bin…) and shell:AppsFolder
         // launchers (packaged UWP apps, iQiyi, File Explorer…) all live behind a
         // shell token rather than a file-system exe.
@@ -113,7 +125,16 @@ public static class AppLauncher
         }
     }
 
-    private static void ShowError(string verb, string name, Exception ex) =>
-        MessageBox.Show($"{verb} {name}:\n{ex.Message}", "Polaris",
+    private static void ShowError(string verb, string name, Exception ex)
+    {
+        // LaunchCore runs on a background thread, so a WPF MessageBox must be
+        // marshalled back to the UI thread (the app's Dispatcher).
+        void Show() => MessageBox.Show($"{verb} {name}:\n{ex.Message}", "Polaris",
             MessageBoxButton.OK, MessageBoxImage.Warning);
+        var disp = System.Windows.Application.Current?.Dispatcher;
+        if (disp != null && !disp.CheckAccess())
+            disp.BeginInvoke(Show);
+        else
+            Show();
+    }
 }
