@@ -118,6 +118,13 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     private WindowPreviewPopup? _preview;
     private Func<List<WindowPreview>>? _previewSource;
     private int _prevHover = -1;
+    // Hover-intent: while a preview is open, defer switching it to a DIFFERENT icon so the
+    // cursor can be steered onto the floating preview (which in the Saturn ring layout sits
+    // over neighbouring icons) without a transient icon-crossing closing it. The switch
+    // commits only on a deliberate dwell on the new icon.
+    private DispatcherTimer? _previewSwitchTimer;
+    private int _pendingPreviewHover = -2;
+    private const double PreviewSwitchGraceMs = 300;
     private float _runSweep;              // running-icon sweep gradient angle (deg)
     private float _runPulse = 0.5f;       // running-icon glow pulse (0.35..0.8)
     private bool _anyRunning;             // a glass running icon is present (drives sweep render)
@@ -1828,11 +1835,59 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     private void DrivePreview(int hover)
     {
         if (hover == _prevHover)
+        {
+            // Back on the source icon — drop any pending switch to a neighbour.
+            _previewSwitchTimer?.Stop();
+            _pendingPreviewHover = -2;
             return;
+        }
         // A right-click menu is anchored to one icon; moving the pointer onto a different
         // icon dismisses it (parity with WPF / standard menu behaviour).
         if (_slotMenu != null && hover != _menuIdx)
             CloseSlotMenu();
+
+        // Hover-intent: while a preview is OPEN, moving onto a DIFFERENT icon does not switch
+        // it immediately. Steering the cursor onto the floating preview usually has to cross a
+        // neighbouring icon first — especially in the Saturn ring layout where the preview sits
+        // over other icons — and an instant switch there closes the preview the user is reaching
+        // for. Defer the switch by a short grace and commit only on a deliberate DWELL: a quick
+        // (or merely continuous) transit across an icon never lands on it when the timer fires,
+        // so it is ignored. Moving off icons (hover < 0, e.g. onto the preview popup itself)
+        // cancels the pending switch and hands off to the popup's own pointer-grace.
+        bool previewOpen = _preview is { IsOpen: true } && _prevHover >= 0;
+        if (previewOpen && hover >= 0)
+        {
+            _pendingPreviewHover = hover;
+            EnsurePreviewSwitchTimer();
+            _previewSwitchTimer!.Stop();
+            _previewSwitchTimer!.Start();
+            return;
+        }
+
+        _previewSwitchTimer?.Stop();
+        _pendingPreviewHover = -2;
+        CommitPreviewHover(hover);
+    }
+
+    private void EnsurePreviewSwitchTimer()
+    {
+        if (_previewSwitchTimer != null)
+            return;
+        _previewSwitchTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(PreviewSwitchGraceMs) };
+        _previewSwitchTimer.Tick += (_, _) =>
+        {
+            _previewSwitchTimer!.Stop();
+            int target = _pendingPreviewHover;
+            _pendingPreviewHover = -2;
+            // Commit only if the cursor is genuinely still settled on that icon (a deliberate
+            // hover), not just passing through (in which case _hover has already moved on).
+            if (target >= 0 && _hover == target && _shown && !_dragging)
+                CommitPreviewHover(target);
+        };
+    }
+
+    private void CommitPreviewHover(int hover)
+    {
         if (_prevHover >= 0)
             _preview?.OnPointerLeave();
         _prevHover = hover;
@@ -1916,6 +1971,8 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
 
     private void ClosePreview()
     {
+        _previewSwitchTimer?.Stop();
+        _pendingPreviewHover = -2;
         _preview?.Close();
         _prevHover = -1;
     }
