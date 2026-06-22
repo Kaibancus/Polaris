@@ -198,6 +198,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     private ID2D1Bitmap1? _satStaticInner, _satStaticOuter, _satDisc, _satShade, _satInner, _satOuter;
     private ID2D1Bitmap1? _satBacking, _satPlanet;
     private float _satPlanetOx, _satPlanetOy;   // DIP top-left of the planet sub-region bitmaps
+    private float _satRingOx, _satRingOy;        // DIP top-left of the ring/backing/cue sub-region bitmaps
     private const float SaturnEnlarge = 1.10f;
     private const float SaturnDiskEnlarge = 1.3f;
     private const float SaturnInnerIconScale = 0.85f / SaturnEnlarge;
@@ -810,18 +811,24 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         if (_host == null) return;
         DisposeSaturnCache();
         var ctx = _host.Context;
-        int pw = (int)Math.Ceiling(_winW * _dpi), ph = (int)Math.Ceiling(_winH * _dpi);
         float bdpi = (float)(96.0 * _dpi);
-        // Inner and outer ring layers are baked separately so the summon can
-        // expand them on the inner vs outer bands (the ring graphic itself blooms
-        // inside-out, mirroring the WPF _innerBandLayer / _outerBandLayer stagger).
-        // Backing disc + base starfield: full size, never scales during summon
-        // (parity with WPF — the disc is at PanelCanvas index 0). The inner ring
-        // group is baked separately so the summon can bloom it out from centre;
-        // the centre planet is baked separately so it stays full size as well.
-        _satBacking = RenderToBitmap(ctx, pw, ph, bdpi, c => SaturnScene.DrawBacking(c, _sg));
-        _satStaticInner = RenderToBitmap(ctx, pw, ph, bdpi, c => SaturnScene.DrawInnerRings(c, _sg));
-        _satStaticOuter = RenderToBitmap(ctx, pw, ph, bdpi, c => SaturnScene.DrawStaticOuter(c, _sg));
+        // Inner and outer ring layers are baked separately so the summon can expand them on the
+        // inner vs outer bands. Backing disc + starfield, the two static ring groups and the two
+        // revolution-cue groups are all bounded by the ring radius (OuterRadius + OuterIcon;
+        // RingTiltY≈1 so nearly circular, and the starfield sits within r·0.96), so — like the
+        // planet — bake them to a ring-centred sub-region instead of the full (near-fullscreen)
+        // window. 1.3x margin clears any ringlet bloom / shepherd moons. The cue groups set
+        // ctx.Transform themselves via RevolveXform(baseXform), so their offset rides that
+        // baseXform (Translation(-ring origin)); the others honour the helper's pre-set translation.
+        float rmr = (_sg.OuterRadius + _sg.OuterIcon) * 1.3f;
+        float rox = Math.Max(0f, _sg.Cx - rmr), roy = Math.Max(0f, _sg.Cy - rmr);
+        float rx1 = Math.Min((float)_winW, _sg.Cx + rmr), ry1 = Math.Min((float)_winH, _sg.Cy + rmr);
+        _satRingOx = rox; _satRingOy = roy;
+        float rwid = Math.Max(1f, rx1 - rox), rhei = Math.Max(1f, ry1 - roy);
+        var ringBase = System.Numerics.Matrix3x2.CreateTranslation(-rox, -roy);
+        _satBacking = RenderToBitmapRegion(ctx, rox, roy, rwid, rhei, bdpi, c => SaturnScene.DrawBacking(c, _sg));
+        _satStaticInner = RenderToBitmapRegion(ctx, rox, roy, rwid, rhei, bdpi, c => SaturnScene.DrawInnerRings(c, _sg));
+        _satStaticOuter = RenderToBitmapRegion(ctx, rox, roy, rwid, rhei, bdpi, c => SaturnScene.DrawStaticOuter(c, _sg));
         // Planet body + spinning disc + shade only span ~1.4*PlanetR around the centre (the warm
         // glow halo). Bake them to a planet-centred sub-region (1.5x margin > the 1.4x halo)
         // instead of a full-window bitmap — on the near-fullscreen Saturn window this saves ~3
@@ -839,8 +846,12 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         // orbit group flat (no tilt, orbit=0) once and re-revolve the bitmap per
         // frame — same trick as the planet disc, keeps the cues near-free.
         var gFlat = _sg; gFlat.TiltY = 1f;
-        _satInner = RenderToBitmap(ctx, pw, ph, bdpi, c => { SaturnScene.DrawInnerCues(c, gFlat, 0, System.Numerics.Matrix3x2.Identity); c.Transform = System.Numerics.Matrix3x2.Identity; });
-        _satOuter = RenderToBitmap(ctx, pw, ph, bdpi, c => { SaturnScene.DrawOuterCues(c, gFlat, 0, System.Numerics.Matrix3x2.Identity); c.Transform = System.Numerics.Matrix3x2.Identity; });
+        // Pass ringBase (= Translation(-ring origin)) as the cue baseXform so the flat (orbit=0,
+        // tilt=1) bake lands inside the ring sub-region — DrawInnerCues sets ctx.Transform itself
+        // via RevolveXform(baseXform), so the helper's pre-set translation would be overwritten;
+        // the offset rides the baseXform instead.
+        _satInner = RenderToBitmapRegion(ctx, rox, roy, rwid, rhei, bdpi, c => { SaturnScene.DrawInnerCues(c, gFlat, 0, ringBase); c.Transform = System.Numerics.Matrix3x2.Identity; });
+        _satOuter = RenderToBitmapRegion(ctx, rox, roy, rwid, rhei, bdpi, c => { SaturnScene.DrawOuterCues(c, gFlat, 0, ringBase); c.Transform = System.Numerics.Matrix3x2.Identity; });
     }
 
     private ID2D1Bitmap1 RenderToBitmap(ID2D1DeviceContext ctx, int pw, int ph, float dpi, Action<ID2D1DeviceContext> draw)
@@ -1245,31 +1256,33 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             var satBase = System.Numerics.Matrix3x2.CreateScale(_satInnerScl, _satInnerScl, cen);
             var outerBase = System.Numerics.Matrix3x2.CreateScale(_satOuterScl, _satOuterScl, cen);
 
-            // Backing disc + base starfield: full size, full opacity (rides the content
-            // fade via the DComp visual). Never scales with the rings.
-            ctx.Transform = System.Numerics.Matrix3x2.Identity;
+            // Backing disc + base starfield, the static rings and the revolution cues are all
+            // baked to the ring sub-region; place each back with a +ring-origin translation
+            // (prepended to its existing scale/revolve transform).
+            var ringTf = System.Numerics.Matrix3x2.CreateTranslation(_satRingOx, _satRingOy);
+            ctx.Transform = ringTf;
             if (_satBacking != null)
                 ctx.DrawBitmap(_satBacking, 1f, InterpolationMode.Linear);
 
             // Inner ring group blooms on the inner band; the outer A/F/G/E ring layer
             // follows on the outer band so the ring graphic expands inside-out.
-            ctx.Transform = satBase;
+            ctx.Transform = ringTf * satBase;
             if (_satStaticInner != null)
                 ctx.DrawBitmap(_satStaticInner, _satInnerOp, InterpolationMode.Linear);
-            ctx.Transform = outerBase;
+            ctx.Transform = ringTf * outerBase;
             if (_satStaticOuter != null)
                 ctx.DrawBitmap(_satStaticOuter, _satOuterOp, InterpolationMode.Linear);
-            // Re-revolve the baked cue bitmaps: Rotate(orbit) * Scale(1,tilt) * base.
+            // Re-revolve the baked cue bitmaps: ringTf * Rotate(orbit) * Scale(1,tilt) * base.
             // Inner cues bloom with the inner band; outer cues trail on the outer band.
             if (_satInner != null)
             {
-                ctx.Transform = System.Numerics.Matrix3x2.CreateRotation((float)(_innerAngle * Math.PI / 180.0), cen)
+                ctx.Transform = ringTf * System.Numerics.Matrix3x2.CreateRotation((float)(_innerAngle * Math.PI / 180.0), cen)
                     * System.Numerics.Matrix3x2.CreateScale(1f, _sg.TiltY, cen) * satBase;
                 ctx.DrawBitmap(_satInner, _satInnerOp, InterpolationMode.Linear);
             }
             if (_satOuter != null)
             {
-                ctx.Transform = System.Numerics.Matrix3x2.CreateRotation((float)(_outerAngle * Math.PI / 180.0), cen)
+                ctx.Transform = ringTf * System.Numerics.Matrix3x2.CreateRotation((float)(_outerAngle * Math.PI / 180.0), cen)
                     * System.Numerics.Matrix3x2.CreateScale(1f, _sg.TiltY, cen) * outerBase;
                 ctx.DrawBitmap(_satOuter, _satOuterOp, InterpolationMode.Linear);
             }

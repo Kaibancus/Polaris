@@ -147,6 +147,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     // ---- Saturn dark-slab styling (black smoked dock + flame + debris + stars) ----
     private bool _saturn;
     private float _satBaseEdge, _satSlabMain, _satSlabLen, _flameFeather, _satDriftAmp;
+    private Vortice.Direct2D1.Effects.GaussianBlur? _satBlurEffect;   // cached flame-feather blur (reused per frame; recreated with the host)
     private bool _curActive; private float _curMain;
     private Vector2[] _stars = Array.Empty<Vector2>();
     private float[] _starSz = Array.Empty<float>();
@@ -763,6 +764,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         foreach (var b in _bmpCache.Values) b?.Dispose();
         _bmpCache.Clear();
         DisposeRockResources();
+        _satBlurEffect?.Dispose(); _satBlurEffect = null;
         _labelFormat?.Dispose(); _labelFormat = null;
         _hoverFormat?.Dispose(); _hoverFormat = null;
         _fitFormat?.Dispose(); _fitFormat = null; _fitFormatFp = 0; _labelFitName = null;
@@ -1426,7 +1428,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     /// edges, so no double-darkening). Runs as its own BeginDraw pass on an alternate
     /// target, so it must be called before the main render pass. The caller draws the
     /// returned blur and disposes both handles after EndDraw.</summary>
-    private (ID2D1CommandList src, Vortice.Direct2D1.Effects.GaussianBlur blur) PrepareSaturnSilhouette(ID2D1DeviceContext ctx)
+    private ID2D1CommandList PrepareSaturnSilhouette(ID2D1DeviceContext ctx)
     {
         // Slab + flame are drawn OPAQUE (alpha 255) into the silhouette. The flame root
         // deliberately overlaps the slab so the single feather blur fuses them; drawing both
@@ -1462,13 +1464,16 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         _host!.SetDefaultTarget();
         flame?.Dispose();
 
-        var blur = new Vortice.Direct2D1.Effects.GaussianBlur(ctx);
-        blur.SetInput(0, src, true);
+        // Reuse one cached GaussianBlur effect (recreated only with the host) instead of newing
+        // a COM effect object every frame — this lets D2D reuse the blur's intermediate render
+        // targets and avoids per-frame effect churn. The command list `src` still changes each frame.
+        _satBlurEffect ??= new Vortice.Direct2D1.Effects.GaussianBlur(ctx);
+        _satBlurEffect.SetInput(0, src, true);
         // WPF feathers the group with BlurEffect.Radius = max(12, slabFeather); a D2D
         // Gaussian standard deviation of radius/3 matches that penumbra (same ratio the
         // notch clock uses for its 14px halo).
-        blur.StandardDeviation = Math.Max(12f, _flameFeather) / 3f;
-        return (src, blur);
+        _satBlurEffect.StandardDeviation = Math.Max(12f, _flameFeather) / 3f;
+        return src;
     }
 
     /// <summary>Builds the wave-riding "black flame" tongue as a filled path (geometry
@@ -1631,15 +1636,14 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         // BeginDraw pass on an alternate target, so it has to happen before the main
         // pass). Stars/debris are drawn crisp on top in the main pass.
         ID2D1CommandList? satSrc = null;
-        Vortice.Direct2D1.Effects.GaussianBlur? satBlur = null;
         if (_saturn)
-            (satSrc, satBlur) = PrepareSaturnSilhouette(ctx);
+            satSrc = PrepareSaturnSilhouette(ctx);
 
         ctx.BeginDraw();
         ctx.Clear(Col(0, 0, 0, 0));
         if (_saturn)
         {
-            if (satBlur != null)
+            if (_satBlurEffect != null)
             {
                 // The silhouette is opaque; apply the panel transparency ONCE here (an opacity
                 // layer = a struct param, zero GC alloc) so the slab+flame overlap stays a single
@@ -1655,11 +1659,11 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
                         Opacity = op,
                     };
                     ctx.PushLayer(lp, null);
-                    ctx.DrawImage(satBlur, new Vector2(0, 0), InterpolationMode.Linear, CompositeMode.SourceOver);
+                    ctx.DrawImage(_satBlurEffect, new Vector2(0, 0), InterpolationMode.Linear, CompositeMode.SourceOver);
                     ctx.PopLayer();
                 }
                 else
-                    ctx.DrawImage(satBlur, new Vector2(0, 0), InterpolationMode.Linear, CompositeMode.SourceOver);
+                    ctx.DrawImage(_satBlurEffect, new Vector2(0, 0), InterpolationMode.Linear, CompositeMode.SourceOver);
             }
             DrawSaturnStars(ctx);
             DrawSaturnDebris(ctx);
@@ -1708,8 +1712,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
             DrawDragMarker(ctx, dp);
         ctx.EndDraw();
         _host.Present();
-        satBlur?.Dispose();
-        satSrc?.Dispose();
+        satSrc?.Dispose();   // the cached _satBlurEffect is reused (disposed with the host)
         Polaris.Services.GpuFrameStats.Frame("side");
     }
 
