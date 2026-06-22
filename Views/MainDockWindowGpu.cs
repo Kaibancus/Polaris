@@ -51,15 +51,15 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     private readonly Dictionary<string, ID2D1Bitmap?> _bmpCache = new();
     private readonly Dictionary<string, BitmapSource?> _iconCache = new();
 
-    // ---- Independent render thread (POLARIS_GPU_RENDERTHREAD=1; default OFF) ----
-    // When enabled, the dock's CompositionHost + Direct2D/DirectComposition device, the
-    // icon/Saturn caches, the laid-out _slots and all animation/wave state are owned and
-    // driven by a dedicated render thread (RenderLoop) paced to the display refresh rate
-    // via the swap chain's frame-latency waitable object — reaching the true refresh rate
-    // (60/120/144Hz) and freeing the UI thread for input. When disabled, the original
-    // UI-thread FrameClock path runs unchanged (_loop stays null).
+    // ---- Independent render thread (default ON; POLARIS_GPU_RENDERTHREAD=0 to opt out) ----
+    // The dock's CompositionHost + Direct2D/DirectComposition device, the icon/Saturn caches,
+    // the laid-out _slots and all animation/wave state are owned and driven by a dedicated
+    // render thread (RenderLoop) paced to the display refresh rate via the swap chain's
+    // frame-latency waitable object — reaching the true refresh rate (60/120/144Hz) and
+    // freeing the UI thread for input. Measured 59-60fps steady vs the UI-thread FrameClock's
+    // ~38-53fps cap. Set POLARIS_GPU_RENDERTHREAD=0 to fall back to the legacy FrameClock path.
     private static readonly bool UseRenderThread =
-        Environment.GetEnvironmentVariable("POLARIS_GPU_RENDERTHREAD") == "1";
+        Environment.GetEnvironmentVariable("POLARIS_GPU_RENDERTHREAD") != "0";
     // The drag ghost is a tiny, short-lived follow-the-cursor window. Re-creating a full
     // DComp/D2D host for it on EVERY drag start can accumulate visible jank after several
     // drags on high-refresh hardware, while the classic WPF ghost only ever moves an icon-
@@ -68,6 +68,9 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     private static readonly bool UseGpuGhost =
         Environment.GetEnvironmentVariable("POLARIS_GPU_GHOST") == "1";
     private RenderLoop? _loop;
+    private bool _gcActive;   // balances RenderGcScope Enter/Leave across show/hide
+    private int[]? _orderBuf;            // reused draw-order scratch (avoids a per-frame alloc)
+    private Comparison<int>? _orderCmp;  // cached so the sort doesn't alloc a closure each frame
     // Guards the interaction scalars written by the UI-thread WndProc and read by the
     // render thread inside Tick/Render (drag point, scroll target, launch + show/hide
     // animation phases). Layout/_slots/host/device are NOT under this lock — they are
@@ -625,6 +628,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     /// the UI-thread FrameClock otherwise.</summary>
     private void StartDriver()
     {
+        if (!_gcActive) { _gcActive = true; Polaris.Services.Gpu.RenderGcScope.Enter(); }
         if (UseRenderThread) _loop?.SetActive(true);
         else _timer?.Start();
     }
@@ -632,6 +636,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     /// <summary>Pause per-frame rendering (a hidden/settled dock costs nothing).</summary>
     private void StopDriver()
     {
+        if (_gcActive) { _gcActive = false; Polaris.Services.Gpu.RenderGcScope.Leave(); }
         if (UseRenderThread) _loop?.SetActive(false);
         else _timer?.Stop();
     }
@@ -1278,9 +1283,12 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         // The dragged icon is skipped here and drawn last, lifted under the cursor.
         int dragIdx = _dragging ? _pressIdx : -1;
         float scrollY = _scrollable ? (float)_glassScroll : 0f;
-        var order = new int[_slots.Count];
-        for (int i = 0; i < order.Length; i++) order[i] = i;
-        Array.Sort(order, (a, b) => _waveCur[a].CompareTo(_waveCur[b]));
+        int n = _slots.Count;
+        if (_orderBuf == null || _orderBuf.Length != n) _orderBuf = new int[n];
+        var order = _orderBuf;
+        for (int i = 0; i < n; i++) order[i] = i;
+        _orderCmp ??= (a, b) => _waveCur[a].CompareTo(_waveCur[b]);
+        Array.Sort(order, _orderCmp);
         bool clip = _scrollable;
         if (clip)
             ctx.PushAxisAlignedClip(new Vortice.Mathematics.Rect(_gvX, _gvY, _gvW, _gvH), AntialiasMode.Aliased);

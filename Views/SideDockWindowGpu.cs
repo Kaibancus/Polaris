@@ -80,19 +80,22 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     private DispatcherTimer? _mainDockChangedTimer;   // debounce host main-dock refresh notifications across rapid drags
 
     // ---- Independent render thread (POLARIS_GPU_RENDERTHREAD=1; default OFF) ----
-    // Mirrors MainDockWindowGpu: when enabled, the CompositionHost + Direct2D/DirectComposition
-    // device, the icon/debris caches, the laid-out _slots and all animation/wave state are
-    // owned and driven by a dedicated render thread (RenderLoop) paced to the display refresh
-    // rate via the swap chain's frame-latency waitable object. When disabled the original
-    // UI-thread FrameClock path runs unchanged (_loop stays null).
+    // Mirrors MainDockWindowGpu: the CompositionHost + Direct2D/DirectComposition device, the
+    // icon/debris caches, the laid-out _slots and all animation/wave state are owned and driven
+    // by a dedicated render thread (RenderLoop) paced to the display refresh rate via the swap
+    // chain's frame-latency waitable object. Default ON; POLARIS_GPU_RENDERTHREAD=0 falls back
+    // to the legacy UI-thread FrameClock path (_loop stays null).
     private static readonly bool UseRenderThread =
-        Environment.GetEnvironmentVariable("POLARIS_GPU_RENDERTHREAD") == "1";
+        Environment.GetEnvironmentVariable("POLARIS_GPU_RENDERTHREAD") != "0";
     // See MainDockWindowGpu: the drag ghost is tiny and short-lived, so the stable WPF
     // ghost is the better default. The GPU ghost stays available behind POLARIS_GPU_GHOST=1
     // for explicit A/B experiments.
     private static readonly bool UseGpuGhost =
         Environment.GetEnvironmentVariable("POLARIS_GPU_GHOST") == "1";
     private RenderLoop? _loop;
+    private bool _gcActive;   // balances RenderGcScope Enter/Leave across show/hide
+    private int[]? _orderBuf;            // reused draw-order scratch (avoids a per-frame alloc)
+    private Comparison<int>? _orderCmp;  // cached so the sort doesn't alloc a closure each frame
     // Guards the interaction scalars written by the UI-thread WndProc and read by the render
     // thread in Tick/Render (drag point, intro animation phase). Layout/_slots/host/device are
     // mutated only on the render thread (or while it is quiesced during rebuild). Held briefly.
@@ -770,6 +773,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     /// <summary>Resume per-frame rendering: the render loop or the UI-thread FrameClock.</summary>
     private void StartDriver()
     {
+        if (!_gcActive) { _gcActive = true; Polaris.Services.Gpu.RenderGcScope.Enter(); }
         if (UseRenderThread) _loop?.SetActive(true);
         else _timer?.Start();
     }
@@ -777,6 +781,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     /// <summary>Pause per-frame rendering (a hidden/settled dock costs nothing).</summary>
     private void StopDriver()
     {
+        if (_gcActive) { _gcActive = false; Polaris.Services.Gpu.RenderGcScope.Leave(); }
         if (UseRenderThread) _loop?.SetActive(false);
         else _timer?.Stop();
     }
@@ -1423,18 +1428,17 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     /// returned blur and disposes both handles after EndDraw.</summary>
     private (ID2D1CommandList src, Vortice.Direct2D1.Effects.GaussianBlur blur) PrepareSaturnSilhouette(ID2D1DeviceContext ctx)
     {
-        // Slab + flame share ONE panel alpha. The flame's root deliberately overlaps
-        // the slab (so the single feather blur fuses them into one mass); two separate
-        // SourceOver fills at this alpha would double-darken that overlap to a*(2-a).
-        // Avoid it by UNION-combining the slab with the (clipped) flame into a single
-        // geometry and filling ONCE — one fill = uniform alpha, no overlap darkening,
-        // while the panel transparency still shows through evenly.
-        byte a = (byte)Math.Clamp(255f * _opacity, 0f, 255f);
+        // Slab + flame are drawn OPAQUE (alpha 255) into the silhouette. The flame root
+        // deliberately overlaps the slab so the single feather blur fuses them; drawing both
+        // opaque makes the overlap opaque-over-opaque (no SourceOver double-darkening), and the
+        // panel transparency is applied ONCE when the blurred silhouette is composited (see the
+        // opacity layer in Render). This keeps slab and flame at the exact same alpha AND avoids
+        // a per-frame geometry UNION — that churned ~6 COM objects/frame and spiked gen2 GC
+        // (200-280ms hitches) during side-dock flame hover.
         var rr = new RoundedRectangle { Rect = new Rect(_sx, _sy, _sw, _sh), RadiusX = _trayRadius, RadiusY = _trayRadius };
         var flame = BuildFlameGeometry(ctx);
 
-        // Keep the flame tongue clear of the slab's rounded ends: clip it to a main-axis
-        // inset rect before the union (the slab covers everything below baseEdge).
+        // Keep the flame tongue clear of the slab's rounded ends: clip it to a main-axis inset.
         float m0 = _satSlabMain + _trayRadius, m1 = _satSlabMain + _satSlabLen - _trayRadius;
         Rect tongueClip = _side is DockSide.Left or DockSide.Right
             ? new Rect(0f, m0, _winW, Math.Max(0f, m1 - m0))
@@ -1443,29 +1447,14 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         var src = ctx.CreateCommandList();
         ctx.Target = src;
         ctx.BeginDraw();
-        using (var brush = ctx.CreateSolidColorBrush(Col(a, 6, 8, 12)))
+        using (var black = ctx.CreateSolidColorBrush(Col(255, 6, 8, 12)))
         {
+            ctx.FillRoundedRectangle(rr, black);
             if (flame != null)
             {
-                using var slabGeo = ctx.Factory.CreateRoundedRectangleGeometry(rr);
-                using var clipGeo = ctx.Factory.CreateRectangleGeometry(tongueClip);
-                using var flameClipped = ctx.Factory.CreatePathGeometry();
-                using (var fs = flameClipped.Open())
-                {
-                    flame.CombineWithGeometry(clipGeo, CombineMode.Intersect, fs);
-                    fs.Close();
-                }
-                using var fused = ctx.Factory.CreatePathGeometry();
-                using (var us = fused.Open())
-                {
-                    slabGeo.CombineWithGeometry(flameClipped, CombineMode.Union, us);
-                    us.Close();
-                }
-                ctx.FillGeometry(fused, brush);
-            }
-            else
-            {
-                ctx.FillRoundedRectangle(rr, brush);
+                ctx.PushAxisAlignedClip(tongueClip, AntialiasMode.PerPrimitive);
+                ctx.FillGeometry(flame, black);
+                ctx.PopAxisAlignedClip();
             }
         }
         ctx.EndDraw();
@@ -1651,7 +1640,27 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         if (_saturn)
         {
             if (satBlur != null)
-                ctx.DrawImage(satBlur, new Vector2(0, 0), InterpolationMode.Linear, CompositeMode.SourceOver);
+            {
+                // The silhouette is opaque; apply the panel transparency ONCE here (an opacity
+                // layer = a struct param, zero GC alloc) so the slab+flame overlap stays a single
+                // uniform alpha with no double-darkening.
+                float op = Math.Clamp(_opacity, 0f, 1f);
+                if (op < 0.999f)
+                {
+                    var lp = new LayerParameters1
+                    {
+                        ContentBounds = new Vortice.RawRectF(float.NegativeInfinity, float.NegativeInfinity, float.PositiveInfinity, float.PositiveInfinity),
+                        MaskAntialiasMode = AntialiasMode.PerPrimitive,
+                        MaskTransform = Matrix3x2.Identity,
+                        Opacity = op,
+                    };
+                    ctx.PushLayer(lp, null);
+                    ctx.DrawImage(satBlur, new Vector2(0, 0), InterpolationMode.Linear, CompositeMode.SourceOver);
+                    ctx.PopLayer();
+                }
+                else
+                    ctx.DrawImage(satBlur, new Vector2(0, 0), InterpolationMode.Linear, CompositeMode.SourceOver);
+            }
             DrawSaturnStars(ctx);
             DrawSaturnDebris(ctx);
         }
@@ -1664,9 +1673,12 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
 
         // Draw smallest-first so the magnified (focal) icon sits on top. The icon
         // being dragged is skipped here and drawn last at the cursor.
-        var order = new int[_slots.Count];
-        for (int i = 0; i < order.Length; i++) order[i] = i;
-        Array.Sort(order, (a, b) => (_waveCur[a] + BounceScale(a)).CompareTo(_waveCur[b] + BounceScale(b)));
+        int n = _slots.Count;
+        if (_orderBuf == null || _orderBuf.Length != n) _orderBuf = new int[n];
+        var order = _orderBuf;
+        for (int i = 0; i < n; i++) order[i] = i;
+        _orderCmp ??= (a, b) => (_waveCur[a] + BounceScale(a)).CompareTo(_waveCur[b] + BounceScale(b));
+        Array.Sort(order, _orderCmp);
         int dragIdx = _dragging ? _pressIdx : -1;
         foreach (int i in order)
         {
