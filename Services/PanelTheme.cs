@@ -72,9 +72,14 @@ public sealed class SaturnRingTheme : PanelTheme
     public override string DisplayName => "土星环";
     public override bool IsSaturn => true;
     public override Brush WindowBackground => Brushes.Transparent;
-    public override double DefaultTransparency => 0.05;
+    // Default 30% transparency: with the Saturn density remap this renders ≈0.88 opacity
+    // (dense black panel with a hint of wallpaper showing through).
+    public override double DefaultTransparency => 0.30;
     // 50% of the settings icon-size slider range [40, 96]: 40 + 0.50 * 56 = 68.
     public override double DefaultIconSize => 68;
+    // The two rings hold a fixed maximum (inner 14 + outer 28 = 42); past that the
+    // surplus would overcrowd the inner ring, so cap additions at the ring capacity.
+    public override int MaxIcons => 14 + 28;
 
     public override IReadOnlyList<Point> ComputeSlots(
         int count, Point center, AppSettings settings, out double outerReach)

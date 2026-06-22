@@ -21,7 +21,7 @@ namespace Polaris.Views;
 /// apps strip at the bottom. Summoned by moving the mouse to the left-centre
 /// edge, or together with the main dock via the global hotkey.
 /// </summary>
-public partial class SideDockWindow : Window
+public partial class SideDockWindow : Window, ISideDock
 {
     private const double GlassIconScale = 1.32;   // match the main dock's grid icon size
     private const double HoverScale = 1.5;

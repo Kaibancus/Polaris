@@ -18,13 +18,18 @@ internal static class AttentionBadges
     /// previews. Runs off the UI thread and never throws.</summary>
     public static (bool flashing, int count) ForIcon(
         RadialIcon icon, HashSet<IntPtr> flashing, string logArea)
+        => ForEntry(icon.Entry.Path, icon.Entry.Arguments, flashing, logArea);
+
+    /// <summary>Path/arguments overload of <see cref="ForIcon"/> for the GPU docks,
+    /// which key off an <see cref="Models.AppEntry"/> rather than a WPF RadialIcon.</summary>
+    public static (bool flashing, int count) ForEntry(
+        string path, string? args, HashSet<IntPtr> flashing, string logArea)
     {
         bool flash = false;
         int count = 0;
         try
         {
-            var wins = WindowPreviewService.GetWindowsForEntry(
-                icon.Entry.Path, icon.Entry.Arguments);
+            var wins = WindowPreviewService.GetWindowsForEntry(path, args);
             foreach (var w in wins)
             {
                 if (flashing.Contains(w.Handle))

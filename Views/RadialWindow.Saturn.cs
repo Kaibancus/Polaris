@@ -18,15 +18,11 @@ public partial class RadialWindow
     // lets WPF share a single immutable GPU resource.
     private static T Frozen<T>(T f) where T : Freezable { f.Freeze(); return f; }
 
-    /// <summary>High-performance mode renders the Saturn rings with extra,
-    /// purely-static (or group-rotated, GPU-composited) detail — finer band
-    /// striations, denser icy speckle, embedded ringlets, more shimmer/spokes,
-    /// more density clumps and a richer starfield. All of it builds at summon
-    /// time and adds ~no per-frame cost, so low-performance mode keeps the
-    /// lighter baseline.</summary>
-    private bool SaturnHiDetail =>
-        _config.Settings.PerformanceMode == Models.PerformanceMode.High;
-
+    /// <summary>The Saturn rings render with rich, purely-static (or
+    /// group-rotated, GPU-composited) detail — finer band striations, denser icy
+    /// speckle, embedded ringlets, more shimmer/spokes, more density clumps and a
+    /// richer starfield. All of it builds at summon time and adds ~no per-frame
+    /// cost.</summary>
     private void DrawBackingDisc()
     {
         double icon = EffectiveIconSize;
@@ -131,10 +127,11 @@ public partial class RadialWindow
         DrawRingZone(MapR(RCin), MapR(RCout), dimC, 0.18, 0.35, icon);     // C ring (crepe)
         DrawRingZone(MapR(RBin), MapR(RBout), paleB, 0.60, 0.66, icon);    // B ring (bright, widest)
 
-        if (SaturnHiDetail)
+        // (C) Embedded fine ringlets: bright/dark lanes that give the B ring
+        // a grooved, many-laned "record" structure (real Saturn has thousands).
+        // Discrete extra detail — kept on every tier except the lowest.
+        if (Polaris.Services.RenderProfile.SaturnExtraDetail)
         {
-            // (C) Embedded fine ringlets: bright/dark lanes that give the B ring
-            // a grooved, many-laned "record" structure (real Saturn has thousands).
             double rbi = MapR(RBin), rbo = MapR(RBout), bw = rbo - rbi;
             AddRinglet(rbi + bw * 0.22, Lighten(paleB, 0.24), 0.30, 1.1);   // bright lane
             AddRinglet(rbi + bw * 0.46, Darken(paleB, 0.45), 0.26, 1.4);    // dark gap
@@ -156,10 +153,11 @@ public partial class RadialWindow
             DrawRingZone(MapR(RAin), MapR(REncke - 0.004), tanA, 0.42, 0.50, icon);   // A inner
             DrawRingZone(MapR(REncke + 0.004), MapR(RAout), tanA, 0.44, 0.48, icon);  // A outer
 
-            if (SaturnHiDetail)
+            // (C) A faint dark ringlet inside the Cassini Division plus a
+            // couple of bright/dark lanes threading the A ring. Discrete extra
+            // detail — kept on every tier except the lowest.
+            if (Polaris.Services.RenderProfile.SaturnExtraDetail)
             {
-                // (C) A faint dark ringlet inside the Cassini Division plus a
-                // couple of bright/dark lanes threading the A ring.
                 double rci = MapR(RCassIn), rco = MapR(RCassOut);
                 AddRinglet((rci + rco) / 2, Lighten(paleB, 0.20), 0.10, 1.0);   // Cassini ringlet
                 double rai = MapR(RAin), rao = MapR(RAout), aw = rao - rai;
@@ -203,10 +201,11 @@ public partial class RadialWindow
         AddRingBlob(rB, _innerOrbit, phaseDeg: 60, rx: rB * 0.16, ry: rB * 0.05,
                     color: Lighten(paleB, 0.30), alpha: 0.22);
 
-        if (SaturnHiDetail)
+        // (D) One extra, fainter shimmer arc + one extra spoke on the inner
+        // ring, at a different phase so the revolution reads richer. Discrete
+        // extra detail — kept on every tier except the lowest.
+        if (Polaris.Services.RenderProfile.SaturnExtraDetail)
         {
-            // (D) One extra, fainter shimmer arc + one extra spoke on the inner
-            // ring, at a different phase so the revolution reads richer.
             AddShimmer(rB, _innerOrbit, paleB, phaseDeg: 168, intensity: 0.55, arcSpan: 0.24);
             AddSpoke(rBin, rBout, _innerOrbit, phaseDeg: 140, widthDeg: 5.0, alpha: 0.18);
             // (E) An extra density clump on the B ring.
@@ -224,10 +223,11 @@ public partial class RadialWindow
             AddRingBlob(rAmid, _outerOrbit, phaseDeg: 150, rx: rAmid * 0.13, ry: rAmid * 0.04,
                         color: Lighten(tanA, 0.30), alpha: 0.16);
 
-            if (SaturnHiDetail)
-            {
                 // (D) One extra, fainter shimmer arc + one extra spoke on the
-                // outer ring, phased apart from the primaries.
+                // outer ring, phased apart from the primaries. Discrete extra
+                // detail — kept on every tier except the lowest.
+            if (Polaris.Services.RenderProfile.SaturnExtraDetail)
+            {
                 AddShimmer(rAmid, _outerOrbit, paleB, phaseDeg: 200, intensity: 0.45, arcSpan: 0.22);
                 AddSpoke(rAin, rAout, _outerOrbit, phaseDeg: 290, widthDeg: 5.0, alpha: 0.14);
                 // (E) An extra density clump on the A ring.
@@ -255,8 +255,8 @@ public partial class RadialWindow
     /// a few twinkling stars, so the planet reads as floating in space.</summary>
     private void DrawStarfield(double r)
     {
-        int count = SaturnHiDetail ? 104 : 64;
-        double twinkleGate = SaturnHiDetail ? 0.55 : 0.68;
+        int count = (int)Math.Round(104 * Polaris.Services.RenderProfile.SaturnDetailFactor);
+        double twinkleGate = 0.55;
         for (int i = 0; i < count; i++)
         {
             double ang = Hash01(i * 2.17) * Math.PI * 2;
@@ -505,7 +505,7 @@ public partial class RadialWindow
         if (rOuter <= rInner || rOuter <= 1)
             return;
 
-        double spacing = Math.Max(1.4, iconSize * (SaturnHiDetail ? 0.020 : 0.030));
+        double spacing = Math.Max(1.4, iconSize * 0.020);
         double thickness = spacing * 1.7;
         int n = Math.Max(1, (int)Math.Round((rOuter - rInner) / spacing));
 
@@ -562,8 +562,8 @@ public partial class RadialWindow
         // Sparse bright/dark speckle scattered through the zone to break up the
         // perfect concentric stroke pattern (icy-particle grain). Positions are
         // deterministic so the look is stable across rebuilds.
-        int speckles = (int)Math.Clamp((rOuter - rInner) * (SaturnHiDetail ? 0.85 : 0.52),
-                                       0, SaturnHiDetail ? 60 : 34);
+        int speckles = (int)Math.Clamp((rOuter - rInner) * 0.85 * Polaris.Services.RenderProfile.SaturnDetailFactor,
+                                       0, 60);
         for (int i = 0; i < speckles; i++)
         {
             double rr = rInner + (rOuter - rInner) * Hash01(rInner * 7.1 + i * 2.3);

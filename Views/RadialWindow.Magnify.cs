@@ -9,16 +9,15 @@ public partial class RadialWindow
 {
     // ---- Cursor-distance magnification for the MAIN dock -------------------
     //
-    // High performance mode only: instead of the binary per-icon hover zoom
-    // (enter => 1.7x, leave => 1.0x), every icon is magnified continuously by a
-    // smooth function of its 2-D distance from the cursor — the icon nearest the
-    // pointer grows the most and the effect eases to nothing further away (a
-    // fisheye / macOS-dock feel that works for both the Saturn rings and the
-    // liquid-glass grid). The icon directly under the pointer stays put (its
-    // outward push is ~0), so it never slides out from under the cursor.
+    // Instead of the binary per-icon hover zoom (enter => 1.7x, leave => 1.0x),
+    // every icon is magnified continuously by a smooth function of its 2-D
+    // distance from the cursor — the icon nearest the pointer grows the most and
+    // the effect eases to nothing further away (a fisheye / macOS-dock feel that
+    // works for both the Saturn rings and the liquid-glass grid). The icon
+    // directly under the pointer stays put (its outward push is ~0), so it never
+    // slides out from under the cursor.
     //
-    // This adds a per-frame render loop while the pointer is over the dock, so it
-    // is gated to High mode; Low mode keeps the cheaper, event-driven hover zoom.
+    // This adds a per-frame render loop only while the pointer is over the dock.
 
     private double[] _magCur = Array.Empty<double>();
     private double[] _magOffX = Array.Empty<double>();
@@ -40,12 +39,6 @@ public partial class RadialWindow
     /// hover zoom so High and Low modes reach the same maximum size).</summary>
     private const double MagnifyPeak = DockTuning.HoverScale;
 
-    /// <summary>True when the main dock should use the continuous cursor-distance
-    /// magnification (High performance mode). Low mode keeps the event-driven
-    /// per-icon hover zoom.</summary>
-    private bool MainMagnifyEnabled =>
-        _config.Settings.PerformanceMode == Models.PerformanceMode.High;
-
     /// <summary>Influence radius of the wave in DIPs; icons further than this from
     /// the cursor stay at rest. A raised cosine falls off smoothly to the edge.</summary>
     private double MagnifySupport => EffectiveIconSize * 1.3;
@@ -64,7 +57,7 @@ public partial class RadialWindow
     /// the cursor leaves the dock and everything has settled back to rest.</summary>
     private void UpdateMagnifyFromPointer(Point pInPanel)
     {
-        if (!MainMagnifyEnabled || _pressedIcon != null || _iconElements.Count == 0)
+        if (_pressedIcon != null || _iconElements.Count == 0)
         {
             _magCursor = new Point(double.NaN, double.NaN);
             return;
@@ -150,7 +143,7 @@ public partial class RadialWindow
     private void OnMagTick(object? sender, EventArgs e)
     {
         int n = _iconElements.Count;
-        if (n == 0 || !MainMagnifyEnabled)
+        if (n == 0)
         {
             StopMagTicking();
             return;

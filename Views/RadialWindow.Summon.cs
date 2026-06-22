@@ -74,6 +74,9 @@ public partial class RadialWindow
         SizeToActiveContent();
         _suppressRebuild = false;
         Rebuild();                      // pick up any config changes
+        // Watch the live frame rate while shown so the quality governor can step
+        // weak machines down a tier if they can't hold 60 (no-op on capable HW).
+        Polaris.Services.RenderProfile.BeginWatch();
         // Reset the content opacity to 0 before fading in so a stale frame from
         // the previous summon can never flash.
         RootGrid.BeginAnimation(OpacityProperty, null);
@@ -150,7 +153,13 @@ public partial class RadialWindow
         // dropped frames). Cache the entire panel to one GPU texture for the
         // duration so the scale just stretches that texture, then drop the cache
         // when the motion settles so live content (clock, hover) renders crisply.
-        var riseCache = new System.Windows.Media.BitmapCache { SnapsToDevicePixels = false };
+        var riseCache = new System.Windows.Media.BitmapCache
+        {
+            SnapsToDevicePixels = false,
+            // 1.0 on capable hardware (unchanged); lower on weak / high-DPI panels
+            // so the squash/stretch rasterises fewer pixels per frame.
+            RenderAtScale = Polaris.Services.RenderProfile.CacheRenderScale,
+        };
         PanelCanvas.CacheMode = riseCache;
         Polaris.Services.FpsProfiler.Push("GlassRise");
         slide.Completed += (_, _) =>
@@ -232,6 +241,8 @@ public partial class RadialWindow
         Polaris.Services.WindowPreviewService.TrimThumbCacheForHide();
         _notch?.HideNotch();
         ResetMagnify();
+        // Stop watching the live frame rate so an idle app pays nothing.
+        Polaris.Services.RenderProfile.EndWatch();
 
         // Let the host retract the left-edge dock together with the main dock
         // (e.g. when an icon launch hides the panel).

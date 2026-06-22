@@ -18,7 +18,7 @@ namespace Polaris.Views;
 /// It is a separate borderless, click-through, top-most layered window so it can
 /// sit flush with the very screen edge, independent of the content-sized,
 /// screen-centred main dock window.</summary>
-public sealed class NotchClockWindow : Window
+public sealed class NotchClockWindow : Window, INotchClock
 {
     private readonly TextBlock _line;        // foreground white text
     private readonly TextBlock _lineShadow;  // dark offset copy behind it (3-D lift)

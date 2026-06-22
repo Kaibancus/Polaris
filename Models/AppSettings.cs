@@ -11,16 +11,6 @@ public enum DockSide
     Bottom,
 }
 
-/// <summary>Frame-rate / animation-throttling profile.
-/// <see cref="Low"/> caps everything for minimal resource use (60 fps, slow
-/// loops at 30 fps); <see cref="High"/> follows the display refresh rate and
-/// runs loop animations at 60 fps.</summary>
-public enum PerformanceMode
-{
-    Low,
-    High,
-}
-
 /// <summary>
 /// User-configurable appearance and behavior settings.
 /// </summary>
@@ -106,11 +96,6 @@ public sealed class AppSettings
     /// <summary>Global dock-text size, as a slider percentage where 50 maps to the
     /// original sizes (1.0×). Applied across all dock typography. Default 50.</summary>
     public double FontSizePercent { get; set; } = 50;
-
-    /// <summary>Frame-rate / animation profile. High (default) follows the
-    /// display refresh rate for the smoothest motion; Low minimises resource
-    /// use by throttling the always-on background loops.</summary>
-    public PerformanceMode PerformanceMode { get; set; } = PerformanceMode.High;
 }
 
 /// <summary>Remembered per-theme appearance values.</summary>

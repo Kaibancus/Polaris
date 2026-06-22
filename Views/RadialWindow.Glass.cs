@@ -146,11 +146,10 @@ public partial class RadialWindow
         }
 
         // Cool light source orbiting the dock centre, lighting the glass from a
-        // slowly drifting direction (one revolution per minute). This is an
-        // always-on animated layer; skip it in low-performance mode where every
-        // tick re-composites the layered window, the effect being subtle enough
-        // (peak alpha ~20%) that its absence is near-imperceptible.
-        if (_config.Settings.PerformanceMode == Models.PerformanceMode.High)
+        // slowly drifting direction (one revolution per minute). Its animated
+        // blurred sprite is the heaviest always-on layer, so it is dropped on the
+        // lowest quality tier (weak / software-rendered machines).
+        if (Polaris.Services.RenderProfile.HeavyBlurEnabled)
             BuildGlassOrbitLight(left, top, w, totalH, radius);
 
         // Settings gear in the panel's top-right corner.
@@ -545,7 +544,7 @@ public partial class RadialWindow
         if (on)
         {
             if (_glassScrollLayer.CacheMode == null)
-                _glassScrollLayer.CacheMode = new BitmapCache(DeviceScale)
+                _glassScrollLayer.CacheMode = new BitmapCache(DeviceScale * Polaris.Services.RenderProfile.CacheRenderScale)
                 {
                     SnapsToDevicePixels = true,
                 };

@@ -124,6 +124,7 @@
         <Style TargetType="Slider">
             <Setter Property="Height" Value="24"/>
             <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="IsMoveToPointEnabled" Value="True"/>
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Slider">
@@ -362,15 +363,6 @@
                     <Button Grid.Column="1" x:Name="CheckUpdateButton" Content="检查更新"
                             Style="{DynamicResource PillButton}" Height="38" Padding="36,0"
                             Click="OnCheckUpdate"/>
-                </Grid>
-
-                <Grid Margin="0,10,0,2">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="150"/>
-                        <ColumnDefinition Width="*"/>
-                    </Grid.ColumnDefinitions>
-                    <TextBlock Grid.Column="0" Text="性能模式" Style="{DynamicResource RowLabel}"/>
-                    <ComboBox Grid.Column="1" x:Name="PerformanceModeCombo" SelectionChanged="OnPerformanceModeChanged"/>
                 </Grid>
             </StackPanel>
         </Border>

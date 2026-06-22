@@ -295,7 +295,9 @@ public partial class RadialWindow
         if (snap == null)
             return;
 
-        _dragGhost = new DragGhostWindow(snap, w, h);
+        _dragGhost = UseGpuGhost
+            ? new DragGhostWindowGpu(snap, w, h)
+            : new DragGhostWindow(snap, w, h);
         // Position it at the icon's current spot before the first paint so it does
         // not flash in at the screen origin.
         double lx = Canvas.GetLeft(icon);

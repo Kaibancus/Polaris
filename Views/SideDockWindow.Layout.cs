@@ -290,10 +290,8 @@ public partial class SideDockWindow
             // as a 3-D slab rather than a flat sheet.
             DrawGlassBevel(r.X, r.Y, r.Width, r.Height, trayRadius, opacity);
             // Cool light source orbiting the slab centre (one revolution / minute).
-            // Always-on animated layer; skip it in low-performance mode (subtle
-            // enough that its absence is near-imperceptible) to spare the layered
-            // window a continuous per-tick recomposite.
-            if (_config.Settings.PerformanceMode == Models.PerformanceMode.High)
+            // Dropped on the lowest quality tier to spare its per-frame blur.
+            if (Polaris.Services.RenderProfile.HeavyBlurEnabled)
                 BuildGlassOrbitLight(r, trayRadius);
         }
         if (_hasRunningArea)

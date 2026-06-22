@@ -29,62 +29,50 @@ public partial class App : Application
     /// <summary>Tick rate for always-on loop animations in the liquid-glass
     /// theme. That theme runs as a fullscreen per-pixel-alpha layered window, so
     /// every animation tick re-composites the whole screen — an expensive upload.
-    /// Capping the slow background loops (running-app sweep/glow) low frees the
-    /// composition budget for the interactive hover/zoom to stay fluid.</summary>
-    public static int GlassLoopFrameRate { get; private set; } = 30;
+    /// Set to the display refresh (capped at 60), and throttled by
+    /// <see cref="Services.RenderProfile"/> on weak machines so the background
+    /// loops stay smooth without starving interaction.</summary>
+    public static int GlassLoopFrameRate { get; private set; } = 60;
 
-    /// <summary>Tick rate for VERY slow ambient drifts (e.g. the glass orbit light
-    /// that takes a full minute per revolution). At ~0.1°/frame even 30 fps is
-    /// visually identical to 60, so capping these mode-independently at this rate
-    /// halves the layered window's full-frame upload frequency for them with no
-    /// perceptible difference — regardless of the High/Low loop rate, which is
-    /// meant for faster motion (hover/zoom, running pulses) where it actually
-    /// shows. Kept low enough to matter, high enough to stay perfectly smooth.</summary>
-    public const int SlowDriftFrameRate = 30;
+    /// <summary>Tick rate for slow ambient drifts (e.g. the glass orbit light
+    /// that takes a full minute per revolution). Driven by
+    /// <see cref="Services.RenderProfile"/>: 60 on capable hardware, 30 on weaker
+    /// tiers (visually identical at that speed, half the layered-window uploads).</summary>
+    public static int SlowDriftFrameRate => Services.RenderProfile.SlowDriftFrameRate;
 
     /// <summary>Whether the one-shot global timeline frame-rate metadata override
     /// has been installed (it can only be set once per process).</summary>
     private static bool _frameMetadataApplied;
 
-    /// <summary>Applies the user's frame-rate / animation profile by setting the
-    /// three static rate fields (read whenever an animation is created) and, on
-    /// the first call, the global timeline default frame rate.
+    /// <summary>Applies the display-driven frame-rate / animation profile by
+    /// setting the static rate fields (read whenever an animation is created)
+    /// and, on the first call, the global timeline default frame rate.
     ///
-    /// Interactive animations (hover/magnify, summon, drag) are beat-masked in
-    /// BOTH modes: the display's ACTUAL refresh is never an exact integer (a
-    /// "60 Hz" panel runs at ~59 Hz), so ticking interactive motion at exactly 60
-    /// beats against the present and drops/doubles frames -> visible judder, which
-    /// is most obvious on the expensive fullscreen liquid-glass dock. Over-sampling
-    /// ~2x on <=60 Hz panels masks that beat so interaction presents a smooth 60;
+    /// Interactive animations (hover/magnify, summon, drag) are beat-masked: the
+    /// display's ACTUAL refresh is never an exact integer (a "60 Hz" panel runs
+    /// at ~59 Hz), so ticking interactive motion at exactly 60 beats against the
+    /// present and drops/doubles frames -> visible judder, which is most obvious
+    /// on the expensive fullscreen liquid-glass dock. Over-sampling ~2x on
+    /// &lt;=60 Hz panels masks that beat so interaction presents a smooth 60;
     /// high-refresh panels present fast enough to use their native rate.
     ///
-    /// The two modes differ in the LOOP rates — the always-on background motion
-    /// (planet/Saturn spin, running pulses, glass shimmer) that dominates the
-    /// continuous cost: High runs loops at 60 fps for the smoothest backdrop, Low
-    /// throttles them to 30 fps to save resources while interaction stays smooth.</summary>
-    internal static void ApplyPerformanceMode(Models.PerformanceMode mode)
+    /// The always-on loops (planet/Saturn spin, running pulses, glass shimmer)
+    /// run at 60 fps (capped to the refresh) for the smoothest backdrop.</summary>
+    internal static void ApplyDisplayProfile()
     {
+        Services.RenderProfile.Detect();
         int hz = (int)Math.Clamp(GetPrimaryRefreshRate(), 60, 240);
-        int animHz;
-        if (mode == Models.PerformanceMode.High)
-        {
-            // Follow the display: oversample <=60 Hz to mask the beat, native on
-            // high-refresh. Loop animations at 60 fps (capped to the refresh).
-            animHz = hz < 90 ? Math.Min(hz * 2, 240) : hz;  // 59->118, 144->144
-            AnimationFrameRate = animHz;
-            AmbientFrameRate = 60;
-            GlassLoopFrameRate = Math.Min(60, hz);
-        }
-        else
-        {
-            // Low: keep interaction smooth (oversample the beat on <=60 Hz panels,
-            // cap high-refresh at 60 to stay light) but throttle the always-on
-            // loops hard to 30 fps — that is where the resource saving comes from.
-            animHz = hz < 90 ? Math.Min(hz * 2, 120) : 60;  // 59->118, 144->60
-            AnimationFrameRate = animHz;
-            AmbientFrameRate = 30;
-            GlassLoopFrameRate = 30;
-        }
+        // Follow the display for INTERACTIVE motion: oversample <=60 Hz to mask
+        // the beat, native on high-refresh. Interaction is never degraded — weak
+        // machines are helped by throttling the always-on LOOPS and shrinking the
+        // composited-pixel area instead (see RenderProfile).
+        int animHz = hz < 90 ? Math.Min(hz * 2, 240) : hz;  // 59->118, 144->144
+        AnimationFrameRate = animHz;
+        // Background loop rate: 60 on capable hardware, throttled by the quality
+        // tier on weak machines (capped to the real refresh).
+        int loopHz = Math.Min(Services.RenderProfile.LoopFrameRate, hz);
+        AmbientFrameRate = loopHz;
+        GlassLoopFrameRate = loopHz;
 
         if (!_frameMetadataApplied)
         {
@@ -99,14 +87,14 @@ public partial class App : Application
     private KeyboardHook? _hook;
     private KeyboardHook? _pinnedHook;
     private KeyboardHook? _escHook;
-    private RadialWindow? _panel;
+    private IMainDock? _panel;
     private SettingsWindow? _settings;
     // True from the moment a settings-open is requested until the window is
     // actually shown. During this window the docks are fading out, so the edge
     // poll must NOT re-summon the side dock (which would flash on screen).
     private bool _openingSettings;
     private Forms.NotifyIcon? _tray;
-    private SideDockWindow? _sideDock;
+    private Polaris.Views.ISideDock? _sideDock;
     private DispatcherTimer? _edgePollTimer;
 
     // Idle working-set trimming. While both docks are hidden, Polaris's (almost
@@ -142,9 +130,33 @@ public partial class App : Application
     // loop); the owner only toggles its Active flag. See ClickAwayWatcher.cs.
     private readonly Polaris.Services.ClickAwayWatcher _clickAway = new();
 
+    // Tick of the last click-away dismiss. Clicking the tray icon while the docks
+    // are open fires the click-away hook (the tray belongs to another process, so
+    // it reads as "outside") which hides the docks — then NotifyIcon.MouseClick
+    // runs TogglePinnedDock and would re-open them. We suppress that re-open for a
+    // short window so a tray click while open simply closes (a real toggle).
+    private long _lastClickAwayDismiss;
+
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+
+        // GPU-rendering spike benchmark: POLARIS_GPU_BENCH=gpu|wpf runs a large
+        // animated per-pixel-alpha window in the chosen compositing path, samples
+        // CPU to gpu-bench.csv, then exits — skipping normal tray startup.
+        string? bench = Environment.GetEnvironmentVariable("POLARIS_GPU_BENCH");
+        if (!string.IsNullOrEmpty(bench))
+        {
+            Polaris.Services.Gpu.GpuBenchmark.Run(bench);
+            return;
+        }
+
+        // GPU-rendering spike — D2D/DirectWrite glass-slab visual-fidelity prototype:
+        // shows a GPU-rendered glass slab + clock alongside normal startup so it can
+        // be eyeballed against the real WPF glass dock.
+        if (Environment.GetEnvironmentVariable("POLARIS_GLASS_PROTO") == "1")
+            Dispatcher.BeginInvoke(new Action(Polaris.Services.Gpu.GlassPrototypeWindow.Show),
+                DispatcherPriority.ApplicationIdle);
 
         // Global safety net: a tray-resident app must survive an unexpected
         // exception on the UI thread instead of vanishing silently. Log the
@@ -153,11 +165,14 @@ public partial class App : Application
         AppDomain.CurrentDomain.UnhandledException += OnDomainUnhandledException;
         System.Threading.Tasks.TaskScheduler.UnobservedTaskException += OnUnobservedTaskException;
 
-        // Frame-rate / animation profile is applied from config (see
-        // ApplyPerformanceMode) once settings are loaded below.
+        // Frame-rate / animation profile is applied from the display refresh
+        // (see ApplyDisplayProfile) once settings are loaded below.
 
         // Opt-in frame-rate profiler (POLARIS_FPS=1). No-op otherwise.
         FpsProfiler.StartIfRequested();
+
+        // Opt-in GPU-dock frame meter (POLARIS_GPUFPS=1). No-op otherwise.
+        Polaris.Services.GpuFrameStats.StartIfRequested();
 
         // Single-instance guard: if another Polaris is already running,
         // notify the user and exit immediately.
@@ -175,8 +190,17 @@ public partial class App : Application
 
         _config = ConfigStore.Load();
 
-        // Apply the saved frame-rate / animation profile before any window opens.
-        ApplyPerformanceMode(_config.Settings.PerformanceMode);
+        // Apply the display-driven frame-rate / animation profile before any window opens.
+        ApplyDisplayProfile();
+        // If the live governor later steps the quality tier down on a weak
+        // machine, re-apply the frame-rate fields so newly created loop
+        // animations tick at the throttled rate. Geometry-scaled knobs (Saturn
+        // detail, cache scale) are re-read on the next summon's Rebuild.
+        Services.RenderProfile.Changed += () => Dispatcher.Invoke(() =>
+        {
+            ApplyDisplayProfile();
+            _panel?.RefreshFromConfig();
+        });
 
         // Seed the global dock-text multiplier before any dock renders.
         Polaris.Services.FontScale.SetFromPercent(_config.Settings.FontSizePercent);
@@ -210,7 +234,12 @@ public partial class App : Application
         ThemeRegistry.LoadAppearance(_config.Settings);
         ConfigStore.Save(_config);
 
-        _panel = new RadialWindow(_config, Persist);
+        // Pick the main-dock implementation. The GPU (DirectComposition + Direct2D)
+        // liquid-glass dock is now the DEFAULT; set POLARIS_GPU_MAINDOCK=0 to fall
+        // back to the WPF dock. Both implement IMainDock so the host wiring is identical.
+        _panel = Environment.GetEnvironmentVariable("POLARIS_GPU_MAINDOCK") == "0"
+            ? new RadialWindow(_config, Persist)
+            : new Polaris.Views.MainDockWindowGpu(_config);
         _panel.RequestOpenSettings += OpenSettings;
         _panel.Realize();   // realise once (stays shown, fully transparent) to avoid show/hide flicker
 
@@ -220,7 +249,12 @@ public partial class App : Application
         // The left dock mirrors the main dock's resident region (top two rows),
         // so seed that mirror once before the docks build.
         DockSync.MirrorResidentToLeft(_config);
-        _sideDock = new SideDockWindow(_config, Persist);
+        // Pick the side-dock implementation. The GPU (DirectComposition + Direct2D)
+        // dock is now the DEFAULT; set POLARIS_GPU_SIDEDOCK=0 to fall back to the WPF
+        // one. Both implement ISideDock so the host wiring below is identical.
+        _sideDock = Environment.GetEnvironmentVariable("POLARIS_GPU_SIDEDOCK") == "0"
+            ? new SideDockWindow(_config, Persist)
+            : new Polaris.Views.SideDockWindowGpu(_config);
         _sideDock.MainDockChanged += () => _panel?.RefreshFromConfig();
         // Clicking the Polaris tile in the left dock's running strip toggles the
         // pinned docks (equivalent to Ctrl+4).
@@ -232,11 +266,12 @@ public partial class App : Application
         // is docked at the bottom (so they never overlap).
         _panel.BottomDockReserve = GetBottomDockReserve;
         // Keep the left dock in step when the main dock's resident region changes.
-        _panel.AppsChanged = () =>
-        {
-            if (DockSync.MirrorResidentToLeft(_config))
-                _sideDock?.RefreshFromConfig();
-        };
+        // Always refresh: the main dock's PersistAndRebuild already mirrored the resident
+        // region before raising AppsChanged, so a conditional MirrorResidentToLeft here would
+        // return "unchanged" and the side dock would never pick up the new resident count.
+        // RefreshFromConfig relayouts in place (no flash) and is cheap, so refreshing on every
+        // main-dock app change is fine.
+        _panel.AppsChanged = () => _sideDock?.RefreshFromConfig();
         // Keep the left dock visible while a glass icon is being dragged.
         _panel.GlassDragActiveChanged = active => _sideDock?.SetDragActive(active);
         // Retract the left dock together with the main dock (e.g. when launching
@@ -260,6 +295,7 @@ public partial class App : Application
                 if (_panel?.IsShown == true)
                 {
                     _clickAway.Active = false;
+                    _lastClickAwayDismiss = Environment.TickCount64;
                     _panel.HidePanel();   // also retracts the left dock via PanelDismissed
                 }
             });
@@ -386,6 +422,11 @@ public partial class App : Application
         }
         else
         {
+            // If a click-away dismiss just fired (e.g. this very tray click closed the
+            // docks via the global mouse hook), don't immediately re-open — let the
+            // click act as a plain toggle-off.
+            if (Environment.TickCount64 - _lastClickAwayDismiss < 350)
+                return;
             // If the settings window is open, close it first so the summoned
             // dock does not stack on top of it and block interaction.
             CloseSettingsIfOpen();
@@ -697,7 +738,11 @@ public partial class App : Application
         // reserve from screen coordinates — e.g. primaryHeight - b.Top — breaks
         // on a secondary monitor whose bottom edge differs from the primary's,
         // producing a huge bogus reserve that shoves the glass dock off-screen.)
-        const double gap = 18.0;
+        // Reserve the side dock's thickness plus a gap so the glass main dock lifts
+        // clear of it. The gap must exceed the main dock's bottom grab margin so the
+        // two slabs read as visually separate and the side dock's toggle tile stays
+        // clickable (the main dock is a topmost window that overlaps the side dock).
+        const double gap = 30.0;
         double reserve = b.Height + gap;
         return reserve > 0 ? reserve : 0.0;
     }
@@ -880,10 +925,6 @@ public partial class App : Application
             // shared positioning target so the refresh below lands the docks on
             // the right monitor (the cursor's when enabled, the primary when not).
             SetActiveMonitorFromCursor();
-            // The performance profile may have changed; re-apply the frame-rate
-            // fields so loop / transition animations re-created in the refresh
-            // below tick at the new profile's rates.
-            ApplyPerformanceMode(_config.Settings.PerformanceMode);
             // A theme switch can change the resident count (Ring0Count is stored
             // per theme), so re-mirror the resident region into the side dock
             // before relaying it — otherwise the side dock keeps the old theme's

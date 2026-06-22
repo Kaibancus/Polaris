@@ -25,6 +25,16 @@
     <Resource Include="Assets\app.ico" />
   </ItemGroup>
 
+  <!-- GPU-rendering spike (代码重构 branch): per-pixel-alpha window via
+       DirectComposition + Direct2D, evaluated on DragGhostWindow. Vortice are
+       thin managed wrappers over the OS D3D11/DXGI/D2D/DComp DLLs. -->
+  <ItemGroup>
+    <PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />
+    <PackageReference Include="Vortice.DXGI" Version="3.8.3" />
+    <PackageReference Include="Vortice.Direct2D1" Version="3.8.3" />
+    <PackageReference Include="Vortice.DirectComposition" Version="3.8.3" />
+  </ItemGroup>
+
   <!-- The unit-test project lives in Tests\ beneath this project root. The WPF
        SDK globs **/*.cs, so exclude it here or the app would try to compile the
        xUnit-dependent test sources. -->
