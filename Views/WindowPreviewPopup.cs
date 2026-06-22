@@ -577,6 +577,12 @@ internal sealed class WindowPreviewPopup
     /// <summary>True while the thumbnail popup is currently shown.</summary>
     public bool IsOpen => _previewPopup != null;
 
+    /// <summary>True while the pointer is over the floating preview itself (tracked from the
+    /// popup shell's MouseEnter/Leave). Lets the dock ignore the geometric icon-hover that the
+    /// preview overlaps in the Saturn ring layout, so resting on the preview never switches it
+    /// to — or closes it in favour of — the icon underneath the cursor.</summary>
+    public bool PointerInPopup => _pointerInPopup;
+
     /// <summary>Closes and disposes the preview popup if it is open.</summary>
     public void Close()
     {

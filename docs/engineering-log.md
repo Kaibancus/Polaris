@@ -372,6 +372,7 @@
 - **悬停预览的「hover 意图」延迟，减少移向预览时误关（尤其土星环形布局）**：
   - **现象**：预览图浮在被悬停图标上方；土星主 dock 是环形排布，预览会**叠在其它图标上**。用户把鼠标移向预览图时，途经的图标被即时判定为「悬停了别的图标」→ `DrivePreview` 立刻 `OnPointerLeave` 关旧预览 + 改投到途经图标，导致想够的预览被误关。
   - **修复**：在 `MainDockWindowGpu.DrivePreview` 加「hover 意图」延迟——**预览开着时**移到**另一个图标**不立即切换，而是起一个 `PreviewSwitchGraceMs=300ms` 计时器并记 `_pendingPreviewHover`；**仅当计时器触发时光标仍停在该图标(`_hover==target`，即 dwell)才提交切换**。连续移动(移向预览途经图标)因每帧 `_hover` 在变、计时触发时已不在该图标，故不切换；移到预览 popup 上(`hover<0`)则取消 pending、交给 popup 自身的 `_closeTimer` 宽限保持。`CommitPreviewHover` 抽出原切换逻辑；`ClosePreview` 停掉计时器。
+  - **补充（光标在预览上、下方压着图标也会关）**：还有一种情况——光标停在预览 popup 上、但其**正下方正好压着另一个图标**时，dock 的几何 hit-test（`_hover` 取光标下的图标）取到底下那个图标，300ms dwell 后仍会把预览切走/关闭。修复：`WindowPreviewPopup` 暴露 `PointerInPopup`（由 popup shell 的 `MouseEnter/MouseLeave` 跟踪）；`DrivePreview` 入口与 dwell-commit 处各加守卫——**光标真的在预览 popup 上时，忽略其下方图标的几何 hover，绝不 arm/commit 切换**（两处守卫覆盖 popup-MouseEnter 与 `_hover` 更新的时序竞争）。
   - **效果**：用户实测「误关明显减少」；故意 dwell 切换仍正常(延迟按用户偏好设 300ms)。
 
 - **土星面板黑色浓度重映射（幂曲线）**：用户反馈土星黑色面板整体偏淡。把土星的「面板透明度设置 →

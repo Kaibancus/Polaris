@@ -1854,6 +1854,16 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         // (or merely continuous) transit across an icon never lands on it when the timer fires,
         // so it is ignored. Moving off icons (hover < 0, e.g. onto the preview popup itself)
         // cancels the pending switch and hands off to the popup's own pointer-grace.
+        // The cursor is RESTING on the floating preview itself: in the ring layout the preview
+        // overlaps icons, so the geometric hover of the icon underneath is not a real icon hover.
+        // Never switch or close the preview while the pointer is genuinely on it.
+        if (_preview is { IsOpen: true, PointerInPopup: true })
+        {
+            _previewSwitchTimer?.Stop();
+            _pendingPreviewHover = -2;
+            return;
+        }
+
         bool previewOpen = _preview is { IsOpen: true } && _prevHover >= 0;
         if (previewOpen && hover >= 0)
         {
@@ -1881,7 +1891,8 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             _pendingPreviewHover = -2;
             // Commit only if the cursor is genuinely still settled on that icon (a deliberate
             // hover), not just passing through (in which case _hover has already moved on).
-            if (target >= 0 && _hover == target && _shown && !_dragging)
+            if (target >= 0 && _hover == target && _shown && !_dragging
+                && !(_preview?.PointerInPopup ?? false))
                 CommitPreviewHover(target);
         };
     }
