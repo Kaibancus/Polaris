@@ -65,7 +65,11 @@ internal sealed class DwmThumbnail : IDisposable
             rcDestination = new RECT { Left = left, Top = top, Right = right, Bottom = bottom },
             opacity = 255,
             fVisible = visible,
-            fSourceClientAreaOnly = true,
+            // Render the FULL window so the rendered aspect equals DwmQueryThumbnailSourceSize
+            // (the tile is sized to that), giving an exact fill with no one-sided black band.
+            // Client-area-only would render a different (unmeasurable for WebView2 apps) aspect
+            // → mismatch band. Win11's thin invisible resize border is the only surplus.
+            fSourceClientAreaOnly = false,
         };
         DwmUpdateThumbnailProperties(_thumb, ref props);
     }

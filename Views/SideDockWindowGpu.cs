@@ -1419,6 +1419,11 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     private (ID2D1CommandList src, Vortice.Direct2D1.Effects.GaussianBlur blur) PrepareSaturnSilhouette(ID2D1DeviceContext ctx)
     {
         byte a = (byte)Math.Clamp(255f * _opacity, 0f, 255f);
+        // The broad slab reads LIGHTER than the narrow flame at the same alpha (its large
+        // area lets more bright wallpaper show through), so deepen the slab body toward
+        // opaque to match the flame's density (user parity request: background → flame).
+        // The flame tongue keeps the base alpha.
+        byte slabA = (byte)Math.Clamp(255f * Math.Min(1f, _opacity + 0.30f), 0f, 255f);
         var rr = new RoundedRectangle { Rect = new Rect(_sx, _sy, _sw, _sh), RadiusX = _trayRadius, RadiusY = _trayRadius };
         var flame = BuildFlameGeometry(ctx);
 
@@ -1432,15 +1437,14 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         var src = ctx.CreateCommandList();
         ctx.Target = src;
         ctx.BeginDraw();
-        using (var black = ctx.CreateSolidColorBrush(Col(a, 6, 8, 12)))
+        using (var slabBrush = ctx.CreateSolidColorBrush(Col(slabA, 6, 8, 12)))
+            ctx.FillRoundedRectangle(rr, slabBrush);
+        if (flame != null)
         {
-            ctx.FillRoundedRectangle(rr, black);
-            if (flame != null)
-            {
-                ctx.PushAxisAlignedClip(tongueClip, AntialiasMode.PerPrimitive);
-                ctx.FillGeometry(flame, black);
-                ctx.PopAxisAlignedClip();
-            }
+            using var flameBrush = ctx.CreateSolidColorBrush(Col(a, 6, 8, 12));
+            ctx.PushAxisAlignedClip(tongueClip, AntialiasMode.PerPrimitive);
+            ctx.FillGeometry(flame, flameBrush);
+            ctx.PopAxisAlignedClip();
         }
         ctx.EndDraw();
         src.Close();
@@ -1662,8 +1666,9 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
                 s.Kind, s.IconKey, s.Image, s.Entry, s.Window);
             DrawIcon(ctx, moved, 1.12f, Vector2.Zero);
         }
-        else if (_labelIdx >= 0 && _labelIdx < _slots.Count && _labelOp > 0.01f)
-            DrawHoverLabel(ctx, _slots[_labelIdx], _waveCur[_labelIdx], _labelOp);
+        // Side dock icons intentionally show NO floating name label (parity request:
+        // names only on the main dock). The hover-fade bookkeeping still runs so the
+        // preview popup logic is unaffected; we simply don't draw the name here.
         // External drag-follow marker (parity with the main dock's live drop feedback).
         if (_extDragPt is { } dp)
             DrawDragMarker(ctx, dp);
@@ -1686,8 +1691,8 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         var lamp = new Vector2(cx + orbitR * MathF.Sin(th), cy - orbitR * MathF.Cos(th));
         using var stops = ctx.CreateGradientStopCollection(new[]
         {
-            new Vortice.Direct2D1.GradientStop { Position = 0f,    Color = Col(0x3C, 0xCF, 0xEC, 0xFF) },
-            new Vortice.Direct2D1.GradientStop { Position = 0.34f, Color = Col(0x22, 0x76, 0xC4, 0xFF) },
+            new Vortice.Direct2D1.GradientStop { Position = 0f,    Color = Col(0x3C, 0xE0, 0xEC, 0xEC) },
+            new Vortice.Direct2D1.GradientStop { Position = 0.34f, Color = Col(0x22, 0x88, 0xC4, 0xEC) },
             new Vortice.Direct2D1.GradientStop { Position = 0.62f, Color = Col(0x0A, 0x4C, 0x9E, 0xF0) },
             new Vortice.Direct2D1.GradientStop { Position = 1f,    Color = Col(0x00, 0x3A, 0x86, 0xE0) },
         });
@@ -1906,12 +1911,12 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         var p1 = new Vector2(bx, by);
         ctx.Transform = Matrix3x2.Identity;
         // Approximate the WPF BlurEffect glow with two stacked translucent strokes.
-        using (var glowWide = ctx.CreateSolidColorBrush(Col(0x40, 0xBF, 0xE0, 0xFF)))
-            ctx.DrawLine(p0, p1, glowWide, 7f);
-        using (var glow = ctx.CreateSolidColorBrush(Col(0x90, 0xBF, 0xE0, 0xFF)))
-            ctx.DrawLine(p0, p1, glow, 4f);
-        using (var shine = ctx.CreateSolidColorBrush(Col(0xDD, 0xEA, 0xF4, 0xFF)))
-            ctx.DrawLine(p0, p1, shine, 1f);
+        using (var glowWide = ctx.CreateSolidColorBrush(Col(0x2C, 0xBF, 0xE0, 0xFF)))
+            ctx.DrawLine(p0, p1, glowWide, 3f);
+        using (var glow = ctx.CreateSolidColorBrush(Col(0x66, 0xBF, 0xE0, 0xFF)))
+            ctx.DrawLine(p0, p1, glow, 1.6f);
+        using (var shine = ctx.CreateSolidColorBrush(Col(0xA0, 0xEA, 0xF4, 0xFF)))
+            ctx.DrawLine(p0, p1, shine, 0.5f);
     }
 
     private readonly struct RunItem

@@ -47,6 +47,10 @@ internal sealed class WindowPreviewPopup
     /// Left for a Right dock.</summary>
     public PreviewPlacement Placement { get; set; } = PreviewPlacement.Above;
 
+    /// <summary>Extra upward offset (px) applied only to an Above-opening preview, so the
+    /// main dock can lift its preview a little higher above the icon. 0 for side docks.</summary>
+    public double ExtraTopLift { get; set; }
+
     // Maps a window handle to its tile's thumbnail host so a background capture
     // can swap in the fresh image once it finishes.
     private readonly Dictionary<IntPtr, Border> _tileHosts = new();
@@ -58,20 +62,8 @@ internal sealed class WindowPreviewPopup
     // rects are mapped relative to this window's client area.
     private IntPtr _popupHwnd;
 
-    // ---- Floating close ("×") button --------------------------------------
-    // A taskbar-style close button. A normal WPF button inside a tile is hidden
-    // behind the DWM thumbnail (an opaque overlay composited ABOVE the tile rect),
-    // so the button lives in its OWN topmost popup, which the OS composites above
-    // the main preview popup — hence above its DWM overlay. Shared across tiles:
-    // re-anchored to whichever tile the pointer hovers, fading in when the pointer
-    // enters a tile's top-right hot-zone and closing that window on click.
-    private Popup? _closeBtnPopup;
-    private Border? _closeBtnVisual;
-    private IntPtr _closeBtnHandle;
-    private bool _overCloseBtn;
-    private readonly DispatcherTimer _closeBtnHideTimer;
-    // Maps a window handle to its whole tile element so the shared close button
-    // (which only knows the handle) can remove the correct tile from the strip.
+    // Maps a window handle to its whole tile element so the in-header close button
+    // can remove the correct tile from the strip.
     private readonly Dictionary<IntPtr, UIElement> _tiles = new();
 
     /// <param name="target">Element to anchor the popup to and centre it over.</param>
@@ -90,10 +82,6 @@ internal sealed class WindowPreviewPopup
         _openTimer.Tick += OnOpenTimerTick;
         _closeTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(PreviewCloseDelayMs) };
         _closeTimer.Tick += OnCloseTimerTick;
-
-        _closeBtnHideTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(90) };
-        _closeBtnHideTimer.Tick += (_, _) => { _closeBtnHideTimer.Stop(); if (!_overCloseBtn) HideCloseButton(); };
-        BuildCloseButton();
     }
 
     /// <summary>Call from the target's MouseEnter.</summary>
@@ -205,7 +193,7 @@ internal sealed class WindowPreviewPopup
         // horizontal row would overflow the popup width and, with the scrollbar
         // hidden, silently clip the extra tiles). Cap the row width at up to 6
         // columns; further windows wrap onto additional rows.
-        const double TileWidth = PreviewThumbWidth + 24; // 220 content + padding + margin
+        const double TileWidth = PreviewThumbWidth + 14; // 220 content + tile padding + margin
         int columns = Math.Min(windows.Count, 6);
         var strip = new WrapPanel
         {
@@ -215,13 +203,16 @@ internal sealed class WindowPreviewPopup
         foreach (var w in windows)
             strip.Children.Add(BuildTile(w));
 
+        bool shellLight = SystemTheme.IsLight;
         var shell = new Border
         {
-            Background = new SolidColorBrush(Color.FromArgb(0xE6, 0x1A, 0x1A, 0x1A)),
-            BorderBrush = new SolidColorBrush(Color.FromArgb(0x55, 0xFF, 0xFF, 0xFF)),
+            Background = new SolidColorBrush(shellLight ? Color.FromArgb(0xF4, 0xF3, 0xF3, 0xF6)
+                                                        : Color.FromArgb(0xF2, 0x1E, 0x1E, 0x22)),
+            BorderBrush = new SolidColorBrush(shellLight ? Color.FromArgb(0x22, 0x00, 0x00, 0x00)
+                                                         : Color.FromArgb(0x40, 0xFF, 0xFF, 0xFF)),
             BorderThickness = new Thickness(1),
-            CornerRadius = new CornerRadius(10),
-            Padding = new Thickness(8),
+            CornerRadius = new CornerRadius(8),
+            Padding = new Thickness(4),
             Effect = new System.Windows.Media.Effects.DropShadowEffect
             {
                 BlurRadius = 18,
@@ -272,7 +263,7 @@ internal sealed class WindowPreviewPopup
                         break;
                     default: // Above
                         x = (targetSize.Width - popupSize.Width) / 2.0;
-                        y = -popupSize.Height - gap;
+                        y = -popupSize.Height - gap - ExtraTopLift;
                         axis = PopupPrimaryAxis.Horizontal;
                         break;
                 }
@@ -324,6 +315,16 @@ internal sealed class WindowPreviewPopup
                 // the "已最小化" fallback that sat underneath the overlay.
                 kv.Value.Child = null;
                 kv.Value.Background = Brushes.Transparent;
+                // Size the tile to the FULL-window aspect (DwmQueryThumbnailSourceSize) and
+                // render the full window (see DwmThumbnail.SetDestination). Both derive from
+                // the same full-window measurement, so the thumbnail fills the tile EXACTLY
+                // with no one-sided black band — unlike client-area-only, whose true client
+                // aspect can't be measured for WebView2/UWP-shell apps (new Outlook reports a
+                // 217x29 stub), causing a mismatch band.
+                var (sw, sh) = thumb.SourceSize;
+                if (sw > 0 && sh > 0)
+                    kv.Value.Height = Math.Clamp(PreviewThumbWidth * (double)sh / sw,
+                        PreviewThumbWidth * 0.32, PreviewThumbWidth * 1.10);
             }
         }
         PlaceDwmThumbnails();
@@ -350,12 +351,16 @@ internal sealed class WindowPreviewPopup
             try
             {
                 // Host rect in its own DIP space → popup-window DIP → physical px.
+                // Floor the top-left and ceil the bottom-right so the opaque thumbnail
+                // ALWAYS fully covers the host: Math.Round on all four could leave the dest
+                // rect a sub-pixel short, exposing the dark shell as a thin black line along
+                // a (white) window's edge.
                 var topLeft = host.TranslatePoint(new Point(0, 0), _hwndRoot ?? host);
                 var dpi = VisualTreeHelper.GetDpi(host);
-                int l = (int)Math.Round(topLeft.X * dpi.DpiScaleX);
-                int t = (int)Math.Round(topLeft.Y * dpi.DpiScaleY);
-                int r = (int)Math.Round((topLeft.X + host.ActualWidth) * dpi.DpiScaleX);
-                int b = (int)Math.Round((topLeft.Y + host.ActualHeight) * dpi.DpiScaleY);
+                int l = (int)Math.Floor(topLeft.X * dpi.DpiScaleX);
+                int t = (int)Math.Floor(topLeft.Y * dpi.DpiScaleY);
+                int r = (int)Math.Ceiling((topLeft.X + host.ActualWidth) * dpi.DpiScaleX);
+                int b = (int)Math.Ceiling((topLeft.Y + host.ActualHeight) * dpi.DpiScaleY);
                 if (r > l && b > t)
                     thumb.SetDestination(l, t, r, b);
             }
@@ -389,17 +394,80 @@ internal sealed class WindowPreviewPopup
 
     private UIElement BuildTile(WindowPreview w)
     {
+        bool light = Polaris.Services.SystemTheme.IsLight;
+        var fgBrush = new SolidColorBrush(light ? Color.FromArgb(0xF0, 0x1B, 0x1B, 0x1F)
+                                                : Color.FromArgb(0xF0, 0xFF, 0xFF, 0xFF));
+        var subBrush = new SolidColorBrush(light ? Color.FromArgb(0x99, 0x00, 0x00, 0x00)
+                                                 : Color.FromArgb(0x99, 0xFF, 0xFF, 0xFF));
+        var fallbackBg = new SolidColorBrush(light ? Color.FromArgb(0xFF, 0xEC, 0xEC, 0xEE)
+                                                   : Color.FromArgb(0xFF, 0x2A, 0x2A, 0x2A));
+        IntPtr handle = w.Handle;
+        double fs = Polaris.Services.FontScale.Current;
+
         var inner = new StackPanel { Orientation = Orientation.Vertical, Width = PreviewThumbWidth };
 
+        // --- Windows-taskbar-style header: app icon + title (left), close X (right),
+        //     ABOVE the thumbnail. Because it doesn't overlap the thumbnail it is NOT
+        //     covered by the DWM thumbnail overlay, so the close button is a plain WPF
+        //     element again (no separate topmost popup needed). ---
+        const double HeaderH = 24;
+        var titleRow = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 0, HeaderH, 0),   // leave room for the right-aligned close button
+        };
+        var hdrIcon = WindowPreviewService.GetWindowAppIcon(handle);
+        if (hdrIcon != null)
+            titleRow.Children.Add(new Image
+            {
+                Source = hdrIcon, Width = 16, Height = 16,
+                Margin = new Thickness(2, 0, 5, 0), VerticalAlignment = VerticalAlignment.Center,
+            });
+        titleRow.Children.Add(new TextBlock
+        {
+            Text = w.Title,
+            Foreground = fgBrush,
+            FontSize = 12 * fs,
+            VerticalAlignment = VerticalAlignment.Center,
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            MaxWidth = PreviewThumbWidth - HeaderH - (hdrIcon != null ? 24 : 4),
+        });
+
+        var closeGlyph = new TextBlock
+        {
+            Text = "✕", FontSize = 11, Foreground = fgBrush,
+            HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center,
+        };
+        var closeBtn = new Border
+        {
+            Width = HeaderH, Height = HeaderH,
+            CornerRadius = new CornerRadius(4),
+            Background = Brushes.Transparent,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            VerticalAlignment = VerticalAlignment.Center,
+            Cursor = Cursors.Hand,
+            Child = closeGlyph,
+        };
+        closeBtn.MouseEnter += (_, _) => { closeBtn.Background = new SolidColorBrush(Color.FromArgb(0xFF, 0xC4, 0x2B, 0x1C)); closeGlyph.Foreground = Brushes.White; };
+        closeBtn.MouseLeave += (_, _) => { closeBtn.Background = Brushes.Transparent; closeGlyph.Foreground = fgBrush; };
+        closeBtn.MouseLeftButtonUp += (_, e) => { e.Handled = true; CloseTileWindow(handle); };
+
+        var header = new Grid { Height = HeaderH, Margin = new Thickness(2, 0, 2, 3) };
+        header.Children.Add(titleRow);
+        header.Children.Add(closeBtn);
+        inner.Children.Add(header);
+
+        // --- Live thumbnail host (the DWM overlay is composited over THIS, below the header) ---
         var thumbHost = new Border
         {
             Width = PreviewThumbWidth,
             Height = PreviewThumbWidth * 0.62,
-            CornerRadius = new CornerRadius(6),
-            Background = new SolidColorBrush(Color.FromArgb(0xFF, 0x2A, 0x2A, 0x2A)),
+            CornerRadius = new CornerRadius(4),
+            Background = fallbackBg,
             ClipToBounds = true,
         };
-        _tileHosts[w.Handle] = thumbHost;
+        _tileHosts[handle] = thumbHost;
         if (w.Thumbnail != null)
         {
             thumbHost.Child = new Image
@@ -410,103 +478,49 @@ internal sealed class WindowPreviewPopup
                 VerticalAlignment = VerticalAlignment.Center,
             };
         }
+        else if (WindowPreviewService.IsWindowMinimized(handle))
+        {
+            // A genuinely minimized window can't be PrintWindow-captured (a live DWM
+            // thumbnail, if it registers, replaces this placeholder anyway).
+            thumbHost.Child = new TextBlock
+            {
+                Text = "已最小化", Foreground = subBrush,
+                HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center,
+                FontSize = 12 * fs,
+            };
+        }
         else
         {
-            // No live thumbnail. A genuinely minimized window can't be captured,
-            // so label it as such; otherwise (e.g. Windows Terminal and other
-            // GPU/DirectX-composited windows that render nothing to PrintWindow's
-            // GDI surface) fall back to the app's icon rather than a misleading
-            // "minimized" label.
-            if (WindowPreviewService.IsWindowMinimized(w.Handle))
-            {
+            var ic = WindowPreviewService.GetWindowAppIcon(handle);
+            if (ic != null)
+                thumbHost.Child = new Image
+                {
+                    Source = ic, Width = 56, Height = 56, Stretch = Stretch.Uniform,
+                    HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center,
+                };
+            else
                 thumbHost.Child = new TextBlock
                 {
-                    Text = "已最小化",
-                    Foreground = new SolidColorBrush(Color.FromArgb(0x99, 0xFF, 0xFF, 0xFF)),
-                    HorizontalAlignment = HorizontalAlignment.Center,
-                    VerticalAlignment = VerticalAlignment.Center,
-                    FontSize = 12 * Polaris.Services.FontScale.Current,
+                    Text = "无预览", Foreground = subBrush,
+                    HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center,
+                    FontSize = 12 * fs,
                 };
-            }
-            else
-            {
-                var appIcon = WindowPreviewService.GetWindowAppIcon(w.Handle);
-                if (appIcon != null)
-                {
-                    thumbHost.Child = new Image
-                    {
-                        Source = appIcon,
-                        Width = 56,
-                        Height = 56,
-                        Stretch = Stretch.Uniform,
-                        HorizontalAlignment = HorizontalAlignment.Center,
-                        VerticalAlignment = VerticalAlignment.Center,
-                    };
-                }
-                else
-                {
-                    thumbHost.Child = new TextBlock
-                    {
-                        Text = "无预览",
-                        Foreground = new SolidColorBrush(Color.FromArgb(0x99, 0xFF, 0xFF, 0xFF)),
-                        HorizontalAlignment = HorizontalAlignment.Center,
-                        VerticalAlignment = VerticalAlignment.Center,
-                        FontSize = 12 * Polaris.Services.FontScale.Current,
-                    };
-                }
-            }
         }
-
-        // A close ("×") button lives in a SEPARATE topmost popup (see BuildCloseButton);
-        // it is revealed by the tile's top-right hover hot-zone wired up below.
         inner.Children.Add(thumbHost);
-
-        inner.Children.Add(new TextBlock
-        {
-            Text = w.Title,
-            Foreground = Brushes.White,
-            FontSize = 12 * Polaris.Services.FontScale.Current,
-            Margin = new Thickness(2, 6, 2, 0),
-            TextTrimming = TextTrimming.CharacterEllipsis,
-            MaxWidth = PreviewThumbWidth,
-        });
 
         var tile = new Border
         {
-            Margin = new Thickness(4, 2, 4, 2),
-            Padding = new Thickness(6),
-            CornerRadius = new CornerRadius(8),
+            Margin = new Thickness(3),
+            Padding = new Thickness(4),
+            CornerRadius = new CornerRadius(6),
             Background = Brushes.Transparent,
             Cursor = Cursors.Hand,
             Child = inner,
         };
-        IntPtr handle = w.Handle;
         _tiles[handle] = tile;
-
-        // Taskbar-style close button: a normal WPF button placed in the tile is
-        // hidden behind the tile's DWM thumbnail (an opaque overlay composited above
-        // the tile rect), so it lives in its own topmost popup (_closeBtnPopup).
-        // Reveal it when the pointer enters the tile's top-right hot-zone — the DWM
-        // overlay does not eat input, so thumbHost still receives these moves.
-        const double hotW = 46, hotH = 40;
-        thumbHost.MouseMove += (_, e) =>
-        {
-            var p = e.GetPosition(thumbHost);
-            bool inCorner = p.X >= thumbHost.ActualWidth - hotW && p.Y <= hotH;
-            if (inCorner)
-                ShowCloseButtonFor(handle, thumbHost);
-            else if (!_overCloseBtn)
-                ScheduleHideCloseButton();
-        };
-        thumbHost.MouseLeave += (_, _) =>
-        {
-            if (!_overCloseBtn)
-                ScheduleHideCloseButton();
-        };
-        tile.MouseEnter += (_, _) =>
-            tile.Background = new SolidColorBrush(Color.FromArgb(0x33, 0xFF, 0xFF, 0xFF));
-        tile.MouseLeave += (_, _) =>
-            tile.Background = Brushes.Transparent;
+        tile.MouseEnter += (_, _) => tile.Background = new SolidColorBrush(
+            light ? Color.FromArgb(0x14, 0x00, 0x00, 0x00) : Color.FromArgb(0x1F, 0xFF, 0xFF, 0xFF));
+        tile.MouseLeave += (_, _) => tile.Background = Brushes.Transparent;
         tile.MouseLeftButtonUp += (_, e) =>
         {
             e.Handled = true;
@@ -517,106 +531,10 @@ internal sealed class WindowPreviewPopup
         return tile;
     }
 
-    /// <summary>Builds the shared floating close button and its topmost popup. The
-    /// popup is re-anchored to a tile's top-right corner in
-    /// <see cref="ShowCloseButtonFor"/>; living in its own HWND keeps it visible
-    /// above the DWM thumbnail overlay that hides any in-tile WPF button.</summary>
-    private void BuildCloseButton()
+    /// <summary>Closes the given window and removes its tile, closing the whole popup
+    /// once the last tile is gone.</summary>
+    private void CloseTileWindow(IntPtr handle)
     {
-        _closeBtnVisual = new Border
-        {
-            Width = 28,
-            Height = 28,
-            CornerRadius = new CornerRadius(6),
-            Background = new SolidColorBrush(Color.FromArgb(0xEE, 0xA6, 0x22, 0x1A)),
-            BorderBrush = new SolidColorBrush(Color.FromArgb(0xE6, 0xFF, 0xFF, 0xFF)),
-            BorderThickness = new Thickness(1),
-            Cursor = Cursors.Hand,
-            Child = new TextBlock
-            {
-                Text = "✕",
-                FontSize = 14,
-                FontWeight = FontWeights.Bold,
-                Foreground = Brushes.White,
-                HorizontalAlignment = HorizontalAlignment.Center,
-                VerticalAlignment = VerticalAlignment.Center,
-            },
-        };
-        _closeBtnVisual.MouseEnter += (_, _) =>
-        {
-            _overCloseBtn = true;
-            _closeBtnHideTimer.Stop();
-            // The button is a separate HWND, so moving onto it fires the shell's
-            // MouseLeave; treat it as "still in the popup" so the preview stays open.
-            _pointerInPopup = true;
-            _closeTimer.Stop();
-            _closeBtnVisual!.Background = new SolidColorBrush(Color.FromArgb(0xFF, 0xC2, 0x32, 0x26));
-        };
-        _closeBtnVisual.MouseLeave += (_, _) =>
-        {
-            _overCloseBtn = false;
-            _closeBtnVisual!.Background = new SolidColorBrush(Color.FromArgb(0xEE, 0xA6, 0x22, 0x1A));
-            _pointerInPopup = false;
-            _closeTimer.Stop();
-            _closeTimer.Start();
-            ScheduleHideCloseButton();
-        };
-        _closeBtnVisual.MouseLeftButtonUp += (_, e) =>
-        {
-            e.Handled = true;
-            CloseHoveredWindow();
-        };
-        _closeBtnPopup = new Popup
-        {
-            Placement = PlacementMode.Custom,
-            CustomPopupPlacementCallback = (popupSize, targetSize, _) =>
-                new[] { new CustomPopupPlacement(
-                    new Point(targetSize.Width - popupSize.Width - 2, 1), PopupPrimaryAxis.None) },
-            AllowsTransparency = true,
-            PopupAnimation = PopupAnimation.Fade,
-            StaysOpen = true,
-            Child = _closeBtnVisual,
-        };
-    }
-
-    /// <summary>Anchors and fades the shared close button into the given tile's
-    /// top-right corner.</summary>
-    private void ShowCloseButtonFor(IntPtr handle, Border thumbHost)
-    {
-        if (_closeBtnPopup == null)
-            return;
-        _closeBtnHideTimer.Stop();
-        _closeBtnHandle = handle;
-        if (!ReferenceEquals(_closeBtnPopup.PlacementTarget, thumbHost))
-        {
-            // Re-anchoring to another tile: close first so the Fade replays at the
-            // new corner instead of the button jumping across.
-            _closeBtnPopup.IsOpen = false;
-            _closeBtnPopup.PlacementTarget = thumbHost;
-        }
-        if (!_closeBtnPopup.IsOpen)
-            _closeBtnPopup.IsOpen = true;
-    }
-
-    private void ScheduleHideCloseButton()
-    {
-        _closeBtnHideTimer.Stop();
-        _closeBtnHideTimer.Start();
-    }
-
-    private void HideCloseButton()
-    {
-        if (_closeBtnPopup != null)
-            _closeBtnPopup.IsOpen = false;
-    }
-
-    /// <summary>Closes the window the floating button is anchored to and removes its
-    /// tile, closing the whole popup once the last tile is gone.</summary>
-    private void CloseHoveredWindow()
-    {
-        IntPtr handle = _closeBtnHandle;
-        _overCloseBtn = false;
-        HideCloseButton();
         WindowPreviewService.CloseWindow(handle);
         _tileHosts.Remove(handle);
         if (_dwmThumbs.TryGetValue(handle, out var dt))
@@ -695,7 +613,6 @@ internal sealed class WindowPreviewPopup
         // DWM thumbnails are opaque overlays that do NOT participate in the WPF
         // fade-out, so release them immediately rather than leaving a live preview
         // hanging over a fading popup.
-        HideCloseButton();
         _tiles.Clear();
         DisposeDwmThumbnails();
         _tileHosts.Clear();
@@ -719,7 +636,6 @@ internal sealed class WindowPreviewPopup
     /// the same capture batch keeps streaming in fresh thumbnails).</summary>
     private void ClosePopupUi()
     {
-        HideCloseButton();
         _tiles.Clear();
         DisposeDwmThumbnails();
         _tileHosts.Clear();

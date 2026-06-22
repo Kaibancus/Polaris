@@ -16,6 +16,21 @@
 
 ## ⚠️ 调查结论 / 已知限制
 
+### DWM 缩略图预览填充：必须「整窗渲染 + DwmQueryThumbnailSourceSize 比例」才能无黑边
+- **背景**：悬停预览用 DWM Thumbnail，缩略图四周/单边出现黑带。DWM 始终**保持源比例居中**（不拉伸），
+  所以单边黑带 = tile 比例 ≠ 实际渲染内容比例。
+- **三种组合实测**：
+  | 渲染模式 | tile 高度比例来源 | 结果 |
+  |---------|------------------|------|
+  | 客户区(`fSourceClientAreaOnly=true`) | `GetClientRect` | ❌ 新 Outlook 等 WebView2/UWP 壳应用顶层 HWND 客户区是空壳（实测 `217x29`）→ tile 被压扁 |
+  | 客户区 | `SourceSize`(整窗) | ❌ 整窗含标题栏，客户区更短 → 顶部留标题栏高度黑带 |
+  | **整窗(`false`) + `SourceSize`** | `SourceSize` | ✅ 两者同源（同一整窗测量），数学上精确填满，无单边黑带（Win11 隐形边框极薄可忽略） |
+- **结论**：`GetClientRect` 对 WebView2/UWP 壳应用不可靠；`DwmQueryThumbnailSourceSize` 是 DWM 自己的可靠测量。
+  唯一对所有窗口都精确填满的组合是**整窗渲染 + SourceSize 比例**。`DwmUpdateThumbnailProperties` 的目标矩形用
+  floor(左上)/ceil(右下) 取整以确保完全覆盖（`Math.Round` 会差半像素露出底色黑线）。
+- **已知限制**：DWM 缩略图是合成在目标矩形**之上的不透明覆盖层**，不在 WPF 视觉树，无法被 WPF 圆角裁剪；
+  任何要盖在其上的元素（关闭按钮/标题）必须放在缩略图**之外**（如顶部 header）或独立更高层 HWND。
+
 ### GPU Dock 帧率上限 ~38-40fps 的根因 = UI 线程定时器 / WPF 渲染时钟；60fps 需独立渲染线程
 - **背景**：本机为真实 **Surface Laptop 6 for Business**（Intel Core Ultra 7 165H + 集成 **Intel Arc** iGPU，59Hz 显示，平衡电源）。注：`HypervisorPresent=True` 是开启 Windows **VBS/HVCI** 安全特性所致，**非来宾虚拟机**（早期曾误判为「VM/虚拟 GPU」，此处更正）。GPU Dock 单帧 draw 仅 4-5ms、`Present(1)` 仅 0.1ms
   （DComp flip 交换链 2 缓冲，低于刷新率时队列不满故不阻塞、不起节流作用），帧预算充裕但帧率仍只
@@ -83,6 +98,15 @@
   匹配退化为极端兜底。
 
 ## 🐛 BUG 修复
+
+- **主 Dock 悬停名字标签初次显示模糊**：
+  - **现象**：主 Dock 悬停图标弹出的名字标签，在图标放大动画过程中显示发虚/模糊，定住后才清晰。
+  - **根因**：标签中心 `lx/ly` 是随放大动画每帧变化的小数坐标，文本绘制原点落在非整设备像素上 → 灰度
+    抗锯齿把字形糊开；动画停住坐标稳定后才清晰。
+  - **修复**：`DrawHoverLabel` 绘制前把标签中心**对齐到设备像素栅格**（`Math.Round(v*_dpi)/_dpi`）；并在
+    `CompositionHost` 显式设 `TextAntialiasMode.Grayscale`（预乘 alpha 合成面上 ClearType 无效，统一灰度更干净）。
+    另把标签宽度由「字符数×固定每字宽」估算改为 DirectWrite **实测文本宽度** + 固定内边距（按名字缓存），
+    消除短名/拉丁名余量过大、宽度不一致的问题。
 
 - **拖拽越拖越卡（高刷屏）根因 = 渲染线程整帧持锁饿死 UI 输入**：
   - **现象**：在高刷新率机器上拖动图标，越拖越涩、发粘，但帧率诊断显示渲染线程稳定 140+ fps（worst gap 16ms），并非掉帧。
@@ -299,6 +323,14 @@
 
 ## ✨ 功能优化 / 新增
 
+- **窗口预览重设计为 Windows 任务栏式**：预览改为「顶部 header（app 图标 + 标题在左、关闭 ✕ 在右、
+  等高对齐）+ 下方实时缩略图」，**背景跟随系统深/浅主题**（`SystemTheme.IsLight`：浅色用近白 `#F3F3F6`、
+  深色用近黑 `#1E1E22`，文字/关闭按钮配套）。
+  - **关键简化**：标题与关闭按钮移到缩略图**上方**后不再与 DWM overlay 重叠，关闭按钮**回归普通 WPF 元素**，
+    删除了之前为「按钮浮于 DWM 之上」而引入的独立 topmost `Popup` + 热区 + 防误关那一整套机制
+    （`BuildCloseButton`/`ShowCloseButtonFor`/`CloseHoveredWindow` 等）。
+  - **缩略图填充**：tile 高度按 `DwmQueryThumbnailSourceSize` 比例设置 + 整窗渲染，精确填满无黑边
+    （详见「调查结论」DWM 缩略图条目）。
 - **预览缩略图任务栏式关闭按钮**：悬停缩略图**右上角热区**(46×40)时淡入一个红色圆角 ✕ 按钮
   (`PopupAnimation.Fade`)，点击关闭对应窗口(空了则关整个预览)。
   - **关键陷阱**：DWM thumbnail 是合成在 tile **之上**的不透明覆盖层，放在 tile 视觉树里的普通

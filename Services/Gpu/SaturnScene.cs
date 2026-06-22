@@ -215,7 +215,7 @@ internal static class SaturnScene
             // --- Inner group: D, C, B -------------------------------------------
             DrawRingZone(ctx, g, MapR(RDin), MapR(RDout), faintD, 0.12, 0.20, icon);
             DrawRingZone(ctx, g, MapR(RCin), MapR(RCout), dimC, 0.18, 0.35, icon);
-            DrawRingZone(ctx, g, MapR(RBin), MapR(RBout), paleB, 0.60, 0.66, icon);
+            DrawRingZone(ctx, g, MapR(RBin), MapR(RBout), paleB, 0.52, 0.58, icon);
 
             if (extra)
             {

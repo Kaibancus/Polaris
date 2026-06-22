@@ -527,6 +527,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             FontStyle.Normal, Vortice.DirectWrite.FontStretch.Normal, _labelFontPx, "zh-cn");
         _labelFormat.TextAlignment = Vortice.DirectWrite.TextAlignment.Center;
         _labelFormat.ParagraphAlignment = ParagraphAlignment.Center;
+        _labelMeasureName = null;   // font size changed → re-measure widths against the new format
         float clockSize = (float)(Math.Max(18.0, _effIcon * 0.36) * FontScale.Current);
         _clockFormat = _dwrite.CreateTextFormat("Segoe UI Semibold", null, Vortice.DirectWrite.FontWeight.SemiBold,
             FontStyle.Normal, Vortice.DirectWrite.FontStretch.Normal, clockSize, "zh-cn");
@@ -1451,8 +1452,8 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         var lamp = new Vector2(cx + orbitR * MathF.Sin(th), cy - orbitR * MathF.Cos(th));
         using var stops = ctx.CreateGradientStopCollection(new[]
         {
-            new Vortice.Direct2D1.GradientStop { Position = 0f,    Color = Col(0x58, 0xCF, 0xEC, 0xFF) },
-            new Vortice.Direct2D1.GradientStop { Position = 0.34f, Color = Col(0x3A, 0x76, 0xC4, 0xFF) },
+            new Vortice.Direct2D1.GradientStop { Position = 0f,    Color = Col(0x58, 0xE0, 0xEC, 0xEC) },
+            new Vortice.Direct2D1.GradientStop { Position = 0.34f, Color = Col(0x3A, 0x88, 0xC4, 0xEC) },
             new Vortice.Direct2D1.GradientStop { Position = 0.62f, Color = Col(0x1A, 0x4C, 0x9E, 0xF0) },
             new Vortice.Direct2D1.GradientStop { Position = 1f,    Color = Col(0x00, 0x3A, 0x86, 0xE0) },
         });
@@ -1674,8 +1675,13 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             return;
         float zoomedHalf = _gIcon / 2f * scale;
         float h = _labelFontPx + 10f;
-        float w = Math.Max(48f, s.Name.Length * _labelFontPx * 0.95f + 20f);
+        float w = MeasureLabelWidth(s.Name);
         float lx = s.Center.X, ly = s.Center.Y + zoomedHalf + 2f + h / 2f;
+        // Pixel-snap the label centre to the device grid so the name stays crisp while the
+        // focal icon is still magnifying — a fractional, per-frame-moving text origin renders
+        // soft/shimmery until it settles (the "blurry at first" artefact).
+        lx = (float)(Math.Round(lx * _dpi) / _dpi);
+        ly = (float)(Math.Round(ly * _dpi) / _dpi);
         var rect = new Vortice.Mathematics.Rect(lx - w / 2f, ly - h / 2f, w, h);
         // Saturn uses the icon's built-in dark pill (Background #261A1A1A, the
         // RadialIcon LabelChrome); glass uses a barely-there tint (#051A1A1A, the
@@ -1694,6 +1700,31 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         }
         using (var ink = ctx.CreateSolidColorBrush(Col((byte)(0xF2 * opacity), 0xFF, 0xFF, 0xFF)))
             ctx.DrawText(s.Name, _labelFormat, rect, ink);
+    }
+
+    private string? _labelMeasureName;
+    private float _labelMeasureW;
+    /// <summary>Tight hover-label width = the name's ACTUAL measured text width (DirectWrite)
+    /// plus a fixed inset, cached by name. Replaces a char-count × per-char-width estimate
+    /// that over-padded short / Latin-heavy names, so every label now has a consistent margin
+    /// regardless of how wide its individual glyphs are.</summary>
+    private float MeasureLabelWidth(string name)
+    {
+        if (name == _labelMeasureName)
+            return _labelMeasureW;
+        float tw = name.Length * _labelFontPx * 0.7f;   // fallback if measuring fails
+        if (_dwrite != null && _labelFormat != null)
+        {
+            try
+            {
+                using var tl = _dwrite.CreateTextLayout(name, _labelFormat, 10000f, 100f);
+                tw = tl.Metrics.Width;
+            }
+            catch { }
+        }
+        _labelMeasureName = name;
+        _labelMeasureW = Math.Max(48f, tw + 18f);
+        return _labelMeasureW;
     }
 
     private ID2D1Bitmap? GetBitmap(ID2D1DeviceContext ctx, string key, BitmapSource? src)
@@ -1754,6 +1785,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             return;   // anchor/popup not ready (e.g. creation failed) — skip this hover
         AnchorOverSlot(s);
         _preview.Placement = PreviewPlacement.Above;   // main dock is bottom-anchored
+        _preview.ExtraTopLift = 18;                    // raise the preview a little above the icon
         _preview.OnPointerEnter();
     }
 

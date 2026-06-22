@@ -146,6 +146,10 @@ internal sealed class CompositionHost : IDisposable
         _d2dFactory = D2D1.D2D1CreateFactory<ID2D1Factory1>(Vortice.Direct2D1.FactoryType.SingleThreaded);
         _d2dDevice = _d2dFactory.CreateDevice(_dxgiDevice);
         _d2d = _d2dDevice.CreateDeviceContext(DeviceContextOptions.None);
+        // The swap chain is premultiplied-alpha (transparent composition surface), where
+        // ClearType subpixel AA is invalid; force grayscale AA so glyph edges are clean
+        // rather than colour-fringed/soft.
+        _d2d.TextAntialiasMode = TextAntialiasMode.Grayscale;
 
         using var surface = _swapChain.GetBuffer<IDXGISurface>(0);
         var props = new BitmapProperties1(
