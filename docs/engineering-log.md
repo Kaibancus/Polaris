@@ -83,6 +83,20 @@
 - **保留产出**：新增 `GlassIdle` profiling 场景标记（与 `SaturnIdle` 对称），便于未来用
   `POLARIS_FPS=1` 单独读玻璃空闲帧率。(commit `c3d89d1`)
 
+- **爱奇艺等版本号子目录安装的应用悬停无预览缩略图**：
+  - **现象**：爱奇艺正在运行（绿灯正常），但悬停 dock 图标不出预览窗口，而系统任务栏能正常预览。
+  - **根因**：爱奇艺以 `shell:AppsFolder\IQIYI.Inc.PCClient` 固定，其 `System.Link.TargetParsingPath`
+    指向安装根目录的**桩启动器** `D:\IQIYI Video\LStyle\QyClient.exe`（存在但只负责拉起真正进程后退出）；
+    真正运行的进程在**版本号子目录** `…\LStyle\14.6.0.10070\QyClient.exe`。`TryResolveAppsFolderExe`
+    返回桩路径，`GetWindows()` 按精确路径匹配 PID 失败，回退的 `GetWindowsByExeFolder()` 又卡在
+    `GetPidsForExe(exePath).Count == 0` 这道「钉住的 exe 必须在运行」的闸门——它同样要求精确路径，
+    于是在扫描安装文件夹之前就提前返回空。爱奇艺窗口又不携带 AUMID，AUMID 路径也救不回来 → 无预览。
+  - **修复**：把该闸门从 `GetPidsForExe`（精确路径）换成新的 `HasRunningProcessUnderFolder(exePath, dir)`：
+    只要有**同基名**进程（QyClient）的镜像路径位于安装文件夹前缀下即放行。既覆盖版本号子目录的搬迁，
+    又保留 Office 防误配（关闭的 Word 仍能挡住打开的 Excel，因 EXCEL≠WINWORD 基名不同）。
+  - **验证**：用编译后程序集实测 `GetWindowsForEntry("shell:AppsFolder\IQIYI.Inc.PCClient")` 由返回 0 窗口
+    变为返回 1 个窗口（hwnd 0x1504B6，标题「爱奇艺」），即任务栏所预览的同一窗口。
+
 ---
 
 ## ⚡ 性能优化 / 健壮性

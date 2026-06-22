@@ -431,15 +431,23 @@ public static class WindowPreviewService
         if (string.IsNullOrEmpty(dir) || IsTooBroadFolder(dir))
             return result;
 
-        // Only fold in sibling-process windows when the pinned executable is
-        // actually running. Genuine multi-process apps (Steam → steam.exe, iQiyi
-        // → QyClient.exe) keep their main process alive even though a helper owns
-        // the visible window, so this gate passes. But when the pinned app is NOT
+        // Only fold in sibling-process windows when the pinned app is actually
+        // running. Genuine multi-process apps (Steam → steam.exe, iQiyi →
+        // QyClient.exe) keep their main process alive even though a helper owns the
+        // visible window, so this gate passes. But when the pinned app is NOT
         // running, the folder match would wrongly sweep up unrelated apps that
         // merely share its install folder — e.g. all of Microsoft Office lives in
         // …\Office16\, so hovering a closed Word/PowerPoint/OneNote would surface
-        // an open Excel window. Requiring the pinned exe to be running prevents that.
-        if (GetPidsForExe(exePath).Count == 0)
+        // an open Excel window. Requiring a running same-named process prevents that.
+        //
+        // The check matches by the pinned exe's BASE NAME anywhere under the install
+        // folder, not by its exact path: version-numbered installers pin a stub
+        // launcher (iQiyi: …\LStyle\QyClient.exe) while the real, running process
+        // lives in a version subfolder (…\LStyle\<ver>\QyClient.exe). An exact-path
+        // match misses that relocated child, so the genuine window never surfaces.
+        // Office stays protected because Excel's basename (EXCEL) differs from the
+        // pinned WINWORD, so a closed Word still gates out an open Excel.
+        if (!HasRunningProcessUnderFolder(exePath, dir))
             return result;
 
         string prefix = dir.TrimEnd('\\') + "\\";
@@ -1470,9 +1478,59 @@ public static class WindowPreviewService
         return sb.ToString();
     }
 
-    private static HashSet<int> GetPidsForExe(string exePath)
+    /// <summary>True when a process whose executable shares <paramref name="exePath"/>'s
+    /// base name is running with its image located anywhere under <paramref name="folder"/>.
+    /// Unlike <see cref="GetPidsForExe"/> (exact-path match) this tolerates version-numbered
+    /// installers that pin a stub launcher in the install root (iQiyi: …\LStyle\QyClient.exe)
+    /// while the live process runs from a version subfolder (…\LStyle\&lt;ver&gt;\QyClient.exe).
+    /// Matching by base name keeps unrelated same-folder apps out (e.g. a closed Word still
+    /// gates out an open Excel, since EXCEL ≠ WINWORD).</summary>
+    private static bool HasRunningProcessUnderFolder(string exePath, string folder)
     {
-        var pids = new HashSet<int>();
+        string name;
+        try { name = Path.GetFileNameWithoutExtension(exePath); }
+        catch { return false; }
+        if (string.IsNullOrEmpty(name) || string.IsNullOrEmpty(folder))
+            return false;
+        string prefix = folder.TrimEnd('\\') + "\\";
+
+        Process[] procs;
+        try { procs = Process.GetProcessesByName(name); }
+        catch { return false; }
+        try
+        {
+            foreach (var p in procs)
+            {
+                try
+                {
+                    string? img = TryGetProcessImagePath((uint)p.Id);
+                    // When the image path can't be read (elevated / bitness mismatch),
+                    // fall back to accepting the name-only match: the process is named
+                    // like the pin and we can't prove it lives elsewhere.
+                    if (string.IsNullOrEmpty(img))
+                        return true;
+                    if (Path.GetFullPath(img).StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                        return true;
+                }
+                catch
+                {
+                    // Process exited mid-inspection; keep scanning the rest.
+                }
+            }
+        }
+        finally
+        {
+            foreach (var p in procs)
+            {
+                try { p.Dispose(); }
+                catch { }
+            }
+        }
+        return false;
+    }
+
+    private static HashSet<int> GetPidsForExe(string exePath)
+    {        var pids = new HashSet<int>();
         if (string.IsNullOrWhiteSpace(exePath))
             return pids;
 
