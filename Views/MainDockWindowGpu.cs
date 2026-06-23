@@ -1645,6 +1645,10 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             ctx.DrawRoundedRectangle(rr, rim, 1.0f);
     }
 
+    // Lens colour with an opacity multiplier (the water-droplet lens fades in with magnification).
+    private static Color4 LensCol(int a, int r, int g, int b, float mul)
+        => new(r / 255f, g / 255f, b / 255f, a / 255f * mul);
+
     private void DrawIcon(ID2D1DeviceContext ctx, in IconSlot s, float scale, Vector2 off, float gIcon = 0f, float opacity = 1f)
     {
         float g = gIcon > 0f ? gIcon : _gIcon, half = g / 2f, cx = s.Center.X + off.X, cy = s.Center.Y + off.Y;
@@ -1700,6 +1704,81 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
                       * Matrix3x2.CreateTranslation(dstX, dstY) * wave;
         ctx.DrawBitmap(bmp, Math.Clamp(opacity, 0f, 1f), InterpolationMode.HighQualityCubic);
         ctx.Transform = baseTf;
+
+        // Liquid-glass water-droplet lens over the magnified icon (port of the WPF RadialIcon
+        // HoverGlow): a domed refraction tint + a wet rim + a specular shine + a focused
+        // caustic, layered on top of the icon so a hovered icon reads as a bead of water
+        // magnifying it. Glass only (Saturn has its own hover styling), and it fades in with the
+        // magnification (strongest on the focal icon under the cursor) rather than a binary hover.
+        if (!_saturn && scale > 1.001f)
+        {
+            float lensOp = Math.Clamp((scale - 1f) / Math.Max(0.001f, MagnifyPeak - 1f), 0f, 1f)
+                         * Math.Clamp(opacity, 0f, 1f);
+            if (lensOp > 0.01f)
+            {
+                ctx.Transform = wave;
+                float x0 = cx - half, y0 = cy - half, rr = g * 0.18f;
+                var rrect = new RoundedRectangle { Rect = new Vortice.Mathematics.Rect(x0, y0, g, g), RadiusX = rr, RadiusY = rr };
+
+                // 1) Domed refraction tint (radial, bright shoulder at 0.36,0.28 -> clear -> cool base).
+                using (var stops = ctx.CreateGradientStopCollection(new[]
+                {
+                    new Vortice.Direct2D1.GradientStop { Position = 0f,    Color = LensCol(0x52, 255, 255, 255, lensOp) },
+                    new Vortice.Direct2D1.GradientStop { Position = 0.40f, Color = LensCol(0x1E, 255, 255, 255, lensOp) },
+                    new Vortice.Direct2D1.GradientStop { Position = 0.72f, Color = LensCol(0x00, 255, 255, 255, lensOp) },
+                    new Vortice.Direct2D1.GradientStop { Position = 1f,    Color = LensCol(0x1A, 0x8F, 0xB6, 0xE8, lensOp) },
+                }))
+                using (var br = ctx.CreateRadialGradientBrush(new RadialGradientBrushProperties
+                {
+                    Center = new Vector2(x0 + g * 0.36f, y0 + g * 0.28f), GradientOriginOffset = Vector2.Zero,
+                    RadiusX = g * 0.95f, RadiusY = g * 0.95f,
+                }, stops))
+                    ctx.FillRoundedRectangle(rrect, br);
+
+                // 2) Wet rim: a faint, very thin hairline, strongest top-left, cooling to the lower-right.
+                using (var stops = ctx.CreateGradientStopCollection(new[]
+                {
+                    new Vortice.Direct2D1.GradientStop { Position = 0f,    Color = LensCol(0x80, 255, 255, 255, lensOp) },
+                    new Vortice.Direct2D1.GradientStop { Position = 0.45f, Color = LensCol(0x18, 255, 255, 255, lensOp) },
+                    new Vortice.Direct2D1.GradientStop { Position = 0.60f, Color = LensCol(0x0A, 255, 255, 255, lensOp) },
+                    new Vortice.Direct2D1.GradientStop { Position = 1f,    Color = LensCol(0x44, 0xD8, 0xEC, 0xFF, lensOp) },
+                }))
+                using (var br = ctx.CreateLinearGradientBrush(new LinearGradientBrushProperties
+                {
+                    StartPoint = new Vector2(x0, y0), EndPoint = new Vector2(x0 + g, y0 + g),
+                }, stops))
+                    ctx.DrawRoundedRectangle(rrect, br, 0.8f);
+
+                // 3) Specular shine: the bright soft dot on the droplet's shoulder.
+                using (var stops = ctx.CreateGradientStopCollection(new[]
+                {
+                    new Vortice.Direct2D1.GradientStop { Position = 0f,   Color = LensCol(0xE0, 255, 255, 255, lensOp) },
+                    new Vortice.Direct2D1.GradientStop { Position = 0.5f, Color = LensCol(0x50, 255, 255, 255, lensOp) },
+                    new Vortice.Direct2D1.GradientStop { Position = 1f,   Color = LensCol(0x00, 255, 255, 255, lensOp) },
+                }))
+                using (var br = ctx.CreateRadialGradientBrush(new RadialGradientBrushProperties
+                {
+                    Center = new Vector2(x0 + g * 0.32f, y0 + g * 0.24f), GradientOriginOffset = Vector2.Zero,
+                    RadiusX = g * 0.26f, RadiusY = g * 0.20f,
+                }, stops))
+                    ctx.FillEllipse(new Ellipse { Point = new Vector2(x0 + g * 0.32f, y0 + g * 0.24f), RadiusX = g * 0.26f, RadiusY = g * 0.20f }, br);
+
+                // 4) Focused caustic: a faint bright pool at the lower-right.
+                using (var stops = ctx.CreateGradientStopCollection(new[]
+                {
+                    new Vortice.Direct2D1.GradientStop { Position = 0f, Color = LensCol(0x3C, 255, 255, 255, lensOp) },
+                    new Vortice.Direct2D1.GradientStop { Position = 1f, Color = LensCol(0x00, 255, 255, 255, lensOp) },
+                }))
+                using (var br = ctx.CreateRadialGradientBrush(new RadialGradientBrushProperties
+                {
+                    Center = new Vector2(x0 + g * 0.72f, y0 + g * 0.78f), GradientOriginOffset = Vector2.Zero,
+                    RadiusX = g * 0.30f, RadiusY = g * 0.26f,
+                }, stops))
+                    ctx.FillEllipse(new Ellipse { Point = new Vector2(x0 + g * 0.72f, y0 + g * 0.78f), RadiusX = g * 0.30f, RadiusY = g * 0.26f }, br);
+
+                ctx.Transform = baseTf;
+            }
+        }
 
         // New-message attention dot: a small pulsing red disc hugging the icon's
         // top-right corner when any of this app's windows is flashing for attention

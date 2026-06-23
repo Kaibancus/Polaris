@@ -383,6 +383,12 @@
 
 ## ✨ 功能优化 / 新增
 
+- **GPU 液态玻璃主 dock 图标放大时的「水珠透镜」效果（移植自重构前 WPF `RadialIcon` HoverGlow）**：
+  - **背景**：重构前 WPF 液态玻璃图标 hover 放大时叠加一层水珠/凸透镜质感（`RadialIcon.xaml` 的 `HoverGlow`）；GPU 主 dock 迁移后只放大、缺这层透镜，观感偏「干」。
+  - **实现**：`MainDockWindowGpu.DrawIcon` 在画完图标位图后、徽标前插入透镜，**仅液态玻璃**(`!_saturn`，土星有自己的 hover 样式)且 `scale>1` 时绘制。`ctx.Transform=wave` 让透镜随图标一起放大；不透明度 `lensOp=clamp((scale−1)/(MagnifyPeak−1))×opacity`，**随放大程度淡入**（光标正下方焦点图标最强，邻居渐弱），比 WPF 的二值 hover 更连续。4 层 D2D（按 WPF z 序）：①圆顶折射 tint（圆角矩形 + 径向渐变，亮肩 0.36,0.28→透明→冷底）②湿润 rim（圆角矩形描边，左上亮→右下冷）③镜面高光（左上小椭圆径向）④右下焦散光池（椭圆径向）。渐变 `using var stops`/`using var br` 释放（遵循 GlassSlab 的 stops 必须 dispose 防原生泄漏）。
+  - **调参（用户实测）**：首版 rim 偏粗偏亮 → 描边 1.4→0.8、rim alpha 约减半，使边缘细线更细更不显。
+  - **效果**：液态玻璃 hover 图标呈水珠放大质感，与重构前观感一致。
+
 - **悬停预览的「hover 意图」延迟，减少移向预览时误关（尤其土星环形布局）**：
   - **现象**：预览图浮在被悬停图标上方；土星主 dock 是环形排布，预览会**叠在其它图标上**。用户把鼠标移向预览图时，途经的图标被即时判定为「悬停了别的图标」→ `DrivePreview` 立刻 `OnPointerLeave` 关旧预览 + 改投到途经图标，导致想够的预览被误关。
   - **修复**：在 `MainDockWindowGpu.DrivePreview` 加「hover 意图」延迟——**预览开着时**移到**另一个图标**不立即切换，而是起一个 `PreviewSwitchGraceMs=300ms` 计时器并记 `_pendingPreviewHover`；**仅当计时器触发时光标仍停在该图标(`_hover==target`，即 dwell)才提交切换**。连续移动(移向预览途经图标)因每帧 `_hover` 在变、计时触发时已不在该图标，故不切换；移到预览 popup 上(`hover<0`)则取消 pending、交给 popup 自身的 `_closeTimer` 宽限保持。`CommitPreviewHover` 抽出原切换逻辑；`ClosePreview` 停掉计时器。
