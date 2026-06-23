@@ -44,7 +44,8 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
     private IntPtr _hwnd;
     private DropShimWindow? _dropShim;   // overlay that catches external drags + forwards them
     private IDragGhost? _ghost;           // independent desktop overlay for the dragged icon
-    private Vector2? _extDragPt;          // window-local point of an in-progress external drag (preview)
+    private Vector2? _extDragPt;          // window-local drop point of an in-progress external drag
+    private string? _dragIconKey;         // icon source of the dragged item, previewed at the drop point
     private readonly Dictionary<string, ID2D1Bitmap?> _bmpCache = new();
     private readonly Dictionary<string, BitmapSource?> _iconCache = new();
 
@@ -1311,11 +1312,10 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
         if (!_saturn && _scrollable)
             DrawScrollBar(ctx);
 
-        // External drag-follow marker: a soft ring + plus at the cursor while a file/shell
-        // item is being dragged over the dock, so the drop point is visible (parity with the
-        // WPF dock's live drag feedback; WM_DROPFILES gave no such feedback).
-        if (_extDragPt is { } dp)
-            DrawDragMarker(ctx, dp);
+        // Preview the dragged item's icon at the drop point while an external drag hovers the
+        // dock (the OS drag image isn't shown over the topmost composition window).
+        if (_extDragPt is { } dp && _dragIconKey != null)
+            DrawDragPreview(ctx, dp);
 
         if (slid || stretching)
             ctx.Transform = System.Numerics.Matrix3x2.Identity;
@@ -1705,24 +1705,24 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
         }
     }
 
-    /// <summary>Floating name label centred just below the magnified focal icon
-    /// (mirrors the WPF glass dock's <c>ShowGlassHoverLabel</c>: barely-there dark tint,
-    /// <summary>Draws the external-drag-follow marker at window-local point <paramref
-    /// name="p"/>: a soft translucent disc with a brighter ring and a small plus, so a file
-    /// being dragged from Explorer reads as "drop here" and tracks the cursor.</summary>
-    private void DrawDragMarker(ID2D1DeviceContext ctx, Vector2 p)
+    /// <summary>Previews the dragged item's icon at the drop point while an external drag
+    /// hovers the dock. The OS drag image isn't rendered over the topmost composition window,
+    /// so without this the user sees nothing being dragged in.</summary>
+    private void DrawDragPreview(ID2D1DeviceContext ctx, Vector2 p)
     {
-        float r = _gIcon * 0.42f;
-        using (var fill = ctx.CreateSolidColorBrush(Col(0x33, 0x5A, 0xC8, 0xFF)))
-            ctx.FillEllipse(new Ellipse { Point = p, RadiusX = r, RadiusY = r }, fill);
-        using (var ring = ctx.CreateSolidColorBrush(Col(0xCC, 0x8F, 0xD6, 0xFF)))
-            ctx.DrawEllipse(new Ellipse { Point = p, RadiusX = r, RadiusY = r }, ring, 2f);
-        using (var plus = ctx.CreateSolidColorBrush(Col(0xEE, 0xFF, 0xFF, 0xFF)))
-        {
-            float a = r * 0.5f;
-            ctx.DrawLine(new Vector2(p.X - a, p.Y), new Vector2(p.X + a, p.Y), plus, 2.4f);
-            ctx.DrawLine(new Vector2(p.X, p.Y - a), new Vector2(p.X, p.Y + a), plus, 2.4f);
-        }
+        var key = _dragIconKey;
+        if (key == null)
+            return;
+        var bmp = GetBitmap(ctx, key, IconExtractor.GetCached(key, _iconCache));
+        if (bmp == null)
+            return;
+        float g = _gIcon, half = g / 2f;
+        var bs = bmp.Size;
+        var baseTf = ctx.Transform;
+        ctx.Transform = Matrix3x2.CreateScale(g / Math.Max(1f, bs.Width), g / Math.Max(1f, bs.Height))
+                      * Matrix3x2.CreateTranslation(p.X - half, p.Y - half) * baseTf;
+        ctx.DrawBitmap(bmp, 0.85f, InterpolationMode.HighQualityCubic);
+        ctx.Transform = baseTf;
     }
 
     /// <summary>Floating name label centred just below the magnified focal icon
@@ -2035,18 +2035,32 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
     private void SyncShim()
     {
         if (_dropShim == null) return;
-        float m = _gIcon * 0.5f;
-        float bottomM = _saturn ? m : Math.Min(m, _effIcon * 0.12f);
-        float left = _winX + _slabX - m;
-        float top = _winY + _slabY - m;
-        float right = _winX + _slabX + _slabW + m;
-        float bottom = _winY + _slabY + _slabH + bottomM;
-        int sx = (int)Math.Round(left * _dpi);
-        int sy = (int)Math.Round(top * _dpi);
+        // Cover the shim over the SAME area the window region carves out (the full mouse-solid
+        // dock box incl. magnify/label headroom). If the shim were smaller, the headroom band
+        // would be a topmost dock-window area with no drop target → the OS shows a "no-drop"
+        // cursor there. Matching them means every solid dock pixel accepts the drag.
+        var (left, top, right, bottom) = ContentRect();
+        int sx = (int)Math.Round((_winX + left) * _dpi);
+        int sy = (int)Math.Round((_winY + top) * _dpi);
         int sw = Math.Max(1, (int)Math.Ceiling((right - left) * _dpi));
         int sh = Math.Max(1, (int)Math.Ceiling((bottom - top) * _dpi));
         _dropShim.SetBounds(sx, sy, sw, sh);
         ApplyWindowRegion();
+    }
+
+    /// <summary>The dock's visible/interactive box in window-local DIPs (slab / ring disc plus
+    /// magnification + hover-label headroom). Shared by the window region carve and the drop
+    /// shim so the mouse-solid area and the drop-accepting area are identical.</summary>
+    private (float left, float top, float right, float bottom) ContentRect()
+    {
+        float mx = _gIcon * 1.0f;
+        float mTop = _saturn ? _gIcon * 1.0f : _gIcon * 3.2f;
+        float mBot = _saturn ? _gIcon * 1.0f : _gIcon * 0.6f;
+        float left = Math.Max(0f, _slabX - mx);
+        float top = Math.Max(0f, _slabY - mTop);
+        float right = Math.Min(_winW, _slabX + _slabW + mx);
+        float bottom = Math.Min(_winH, _slabY + _slabH + mBot);
+        return (left, top, right, bottom);
     }
 
     /// <summary>Carves the dock's composition window down to just the visible content (the
@@ -2067,16 +2081,10 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
         if (_hwnd == IntPtr.Zero) return;
         try
         {
-            // Keep generous headroom so magnified icons / hover labels are never clipped:
-            // glass icons rise + show a label well above the slab top; Saturn's disc is
-            // symmetric with the magnification already inside the slab box.
-            float mx = _gIcon * 1.0f;
-            float mTop = _saturn ? _gIcon * 1.0f : _gIcon * 3.2f;
-            float mBot = _saturn ? _gIcon * 1.0f : _gIcon * 0.6f;
-            float left = Math.Max(0f, _slabX - mx);
-            float top = Math.Max(0f, _slabY - mTop);
-            float right = Math.Min(_winW, _slabX + _slabW + mx);
-            float bottom = Math.Min(_winH, _slabY + _slabH + mBot);
+            // Keep generous headroom so magnified icons / hover labels are never clipped
+            // (see ContentRect); the drop shim covers this exact box so there is no perimeter
+            // band of solid-but-no-drop-target window.
+            var (left, top, right, bottom) = ContentRect();
             int rx = (int)Math.Floor(left * _dpi);
             int ry = (int)Math.Floor(top * _dpi);
             int rr = (int)Math.Ceiling(right * _dpi);
@@ -2153,23 +2161,20 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
         _ghost = null;
     }
 
-    /// <summary>Called continuously while an external file/shell drag hovers the dock (and
-    /// with null on leave/drop). Tracks the window-local cursor point so the render can draw
-    /// a drag-follow marker, mirroring the WPF dock's live drag feedback.</summary>
-    private void OnExternalDragMove((int x, int y)? screenPt)
+    /// <summary>Called while an external file/shell drag hovers the dock (null on leave/drop)
+    /// with the SCREEN point and the first dragged file's icon source. Tracks the window-local
+    /// drop point and the icon to preview at it.</summary>
+    private void OnExternalDragMove((int x, int y)? screenPt, string? iconSrc)
     {
         if (screenPt is { } p)
         {
-            float lx = (float)(p.x / _dpi - _winX);
-            float ly = (float)(p.y / _dpi - _winY);
-            // Only show the follow marker where a drop will actually register (the slab /
-            // ring box). Over the transparent headroom the drag falls through to the desktop,
-            // so a marker there would be misleading.
-            _extDragPt = InDropRegion(lx, ly) ? new Vector2(lx, ly) : (Vector2?)null;
+            // The OLE callback fires only while the cursor is over the drop shim, which now
+            // spans the whole mouse-solid dock box, so any reported point is a valid drop spot.
+            _extDragPt = new Vector2((float)(p.x / _dpi - _winX), (float)(p.y / _dpi - _winY));
+            if (iconSrc != null) _dragIconKey = iconSrc;
         }
-        else
-            _extDragPt = null;
-        // OLE callbacks run on the STA UI thread; repaint so the marker tracks the cursor
+        else { _extDragPt = null; _dragIconKey = null; }
+        // OLE callbacks run on the STA UI thread; repaint so the preview tracks the cursor
         // (synchronous on the default path, next vblank on the render-thread path).
         try { RequestRender(); } catch { }
     }
@@ -2848,7 +2853,7 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
         // Screen pixels → window-local DIPs (icon-slot geometry space).
         float lx = (float)(screenX / _dpi - _winX);
         float ly = (float)(screenY / _dpi - _winY);
-        _extDragPt = null;   // drag finished — clear the follow marker
+        _extDragPt = null; _dragIconKey = null;   // drag finished — clear the preview
         // Defer the actual insert: it may rebuild (recreate) this window, which must
         // NOT happen while the OS is still inside the IDropTarget.Drop call. Run it
         // once the drop returns and the OLE drag loop has unwound.

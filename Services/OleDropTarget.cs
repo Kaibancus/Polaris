@@ -44,10 +44,12 @@ internal sealed class OleDropTarget : IOleDropTarget
     private readonly Action<List<string>, byte[]?, int, int> _onDrop;
     private bool _registered;
     private bool _accepting;
+    private string? _dragIconSrc;   // first dragged file path, handed to the dock for the icon preview
 
-    /// <summary>Optional: invoked on every DragOver with the SCREEN point while a drag is
-    /// over us (and null on leave/drop), so the dock can draw a drag-follow preview.</summary>
-    public Action<(int x, int y)?>? OnDragMove { get; set; }
+    /// <summary>Optional: invoked on every DragOver with the SCREEN point while a drag is over
+    /// us (and null on leave/drop), plus the first dragged file's icon-source path (null for
+    /// shell-namespace items), so the dock can preview the dragged app's icon at the drop point.</summary>
+    public Action<(int x, int y)?, string?>? OnDragMove { get; set; }
 
     public OleDropTarget(IntPtr hwnd, Action<List<string>, byte[]?, int, int> onDrop)
     {
@@ -109,21 +111,29 @@ internal sealed class OleDropTarget : IOleDropTarget
         bool sh = pDataObj != null && CF_SHELLIDLIST != 0 && HasFormat(pDataObj, CF_SHELLIDLIST);
         _accepting = hd || sh;
         pdwEffect = _accepting ? DROPEFFECT_COPY : DROPEFFECT_NONE;
-        if (_accepting) OnDragMove?.Invoke((pt.X, pt.Y));
+        if (_accepting)
+        {
+            // Hand the first dragged file's path to the dock so it can preview that app's icon
+            // at the drop point — the OS drag image isn't shown over the topmost composition
+            // dock. Shell-namespace items (no CF_HDROP path) preview nothing.
+            _dragIconSrc = hd ? FirstPath(pDataObj!) : null;
+            OnDragMove?.Invoke((pt.X, pt.Y), _dragIconSrc);
+        }
         return S_OK;
     }
 
     int IOleDropTarget.DragOver(int grfKeyState, POINTL pt, ref int pdwEffect)
     {
         pdwEffect = _accepting ? DROPEFFECT_COPY : DROPEFFECT_NONE;
-        if (_accepting) OnDragMove?.Invoke((pt.X, pt.Y));
+        if (_accepting) OnDragMove?.Invoke((pt.X, pt.Y), _dragIconSrc);
         return S_OK;
     }
 
     int IOleDropTarget.DragLeave()
     {
         _accepting = false;
-        OnDragMove?.Invoke(null);
+        _dragIconSrc = null;
+        OnDragMove?.Invoke(null, null);
         return S_OK;
     }
 
@@ -149,8 +159,16 @@ internal sealed class OleDropTarget : IOleDropTarget
             pdwEffect = DROPEFFECT_NONE;
         }
         _accepting = false;
-        OnDragMove?.Invoke(null);
+        _dragIconSrc = null;
+        OnDragMove?.Invoke(null, null);
         return S_OK;
+    }
+
+    /// <summary>First dropped file path (for the drag-over icon preview), or null.</summary>
+    private static string? FirstPath(ComTypes.IDataObject data)
+    {
+        var files = ReadHDrop(data);
+        return files.Count > 0 ? files[0] : null;
     }
 
     /// <summary>Extracts the dropped file paths from a CF_HDROP medium.</summary>

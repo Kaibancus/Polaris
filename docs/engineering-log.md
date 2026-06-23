@@ -137,6 +137,11 @@
 
 ## 🐛 BUG 修复
 
+- **拖文件到 dock 添加时：看不到被拖应用图标 + 主 dock 外围一圈「禁止」光标（GPU）**：
+  - **现象**：①拖入时 dock 上看不到被拖应用的图标（OS 的分层拖拽图像不会渲染在置顶合成 dock 之上），原先只画了一个通用蓝色「+」环标记；②主 dock 可见区外围有一圈显示「禁止」(no-drop) 光标的区域。
+  - **根因**：①「+」环标记被光标处的拖拽内容遮挡 / 并非用户想要的反馈——用户要看到**被拖应用本身的图标**；②主 dock 的 `SetWindowRgn` carve 出的窗口 region 含放大/悬停标签余量（玻璃顶部达 `gIcon×3.2`），而 drop shim 只盖到 `slab + gIcon×0.5`，两者**不一致**：中间那圈余量带是置顶 dock 窗口但**没有注册 drop target**，拖拽到那里既无法穿透到桌面、又无人接受 → OS 显示「禁止」。（侧 dock 的 shim 与 region 早已共享 `HitBox()`，无此问题。）
+  - **修复**：①移除「+」环标记（`DrawDragMarker`），改为在落点渲染**被拖应用的真实图标**——`OleDropTarget.DragEnter` 提取首个 `CF_HDROP` 路径经 `OnDragMove(point, iconSrc)` 回调（签名加 `string?`）传给 dock，dock 用既有 `IconExtractor.GetCached`+`GetBitmap` 解析并在落点按 `_gIcon` 尺寸、0.85 不透明度绘制（`DrawDragPreview`）。图标解析全部在渲染线程进行（`_iconCache` 线程亲和不变），UI 线程只写 `_extDragPt`/`_dragIconKey` 标量。②主 dock 提取共享的 `ContentRect()`，让 `SyncShim` 与 `ApplyWindowRegion` **用同一矩形**——drop shim 覆盖与 carve region 完全相同的鼠标实心区，消除「禁止」带；预览判定随之简化（OLE 回调只在 shim 上触发，故任意回调点都是有效落点，去掉 `InDropRegion` 门控）。Shell-namespace 项（This PC 等，无文件路径）不预览图标但仍可正常 drop。两 dock 一致。
+
 - **侧 dock 鼠标边缘召唤时跳动闪烁一下（GPU）**：
   - **现象**：鼠标触发侧 dock 显示时，dock 会先在静止位置闪现一帧再滑入，观感为「跳动闪烁」。
   - **根因**：`SideDockWindowGpu.DoShow` 顺序为 `Rebuild()`（重建 host，新 DComp visual 默认 offset 0 / opacity 1，首帧渲染在**静止位置**）→ `ShowWindow`（合成器立即显示这一静止帧）→ 才 `StartIntro()`（下一帧 `DriveIntro` 把 visual 推到屏外起点再滑入）。`ShowWindow` 与首个 `DriveIntro` 帧之间，DWM 合成了 1+ 帧静止态 → 可见跳变。

@@ -60,7 +60,8 @@ internal sealed class SideDockWindowGpu : GpuDockBase, IDisposable, ISideDock
     private readonly Dispatcher _dispatcher = Dispatcher.CurrentDispatcher;
     private DropShimWindow? _dropShim; // overlay that catches external drags + forwards them
     private IDragGhost? _ghost;        // independent desktop overlay for the dragged icon
-    private Vector2? _extDragPt;       // window-local point of an in-progress external drag (preview)
+    private Vector2? _extDragPt;       // window-local drop point of an in-progress external drag
+    private string? _dragIconKey;      // icon source of the dragged item, previewed at the drop point
     private IDWriteFactory? _dwrite;
     private IDWriteTextFormat? _labelFormat;
     private IDWriteTextFormat? _hoverFormat;   // floating hover name (SemiBold, hover-scaled)
@@ -858,14 +859,6 @@ internal sealed class SideDockWindowGpu : GpuDockBase, IDisposable, ISideDock
         catch (Exception ex) { Log.Warn("SideDockGpu", "ApplyWindowRegion failed: " + ex.Message); }
     }
 
-    /// <summary>True when a window-local DIP point is within the slab box (plus icon margin)
-    /// where an OLE drop actually registers.</summary>
-    private bool InDropRegion(float lx, float ly)
-    {
-        float m = _gIcon * 0.5f;
-        return lx >= _sx - m && lx <= _sx + _sw + m && ly >= _sy - m && ly <= _sy + _sh + m;
-    }
-
     /// <summary>Lifts the icon at <paramref name="idx"/> into an independent topmost desktop
     /// overlay pinned to the cursor, so the dragged icon roams the whole desktop and never
     /// clips at the narrow side-dock window's edge (parity with the main dock / WPF).</summary>
@@ -916,38 +909,6 @@ internal sealed class SideDockWindowGpu : GpuDockBase, IDisposable, ISideDock
         if (_ghost == null) return;
         try { _ghost.Close(); } catch { }
         _ghost = null;
-    }
-
-    /// <summary>Called continuously while an external file/shell drag hovers the dock (null on
-    /// leave/drop). Tracks the window-local cursor point so the render draws a drag-follow
-    /// marker where a drop will register.</summary>
-    private void OnExternalDragMove((int x, int y)? screenPt)
-    {
-        if (screenPt is { } p)
-        {
-            float lx = (float)(p.x / _dpi - _winX);
-            float ly = (float)(p.y / _dpi - _winY);
-            _extDragPt = InDropRegion(lx, ly) ? new Vector2(lx, ly) : (Vector2?)null;
-        }
-        else
-            _extDragPt = null;
-        try { RequestRender(); } catch { }
-    }
-
-    /// <summary>Soft ring + plus drawn at the cursor while an external drag hovers the slab.</summary>
-    private void DrawDragMarker(ID2D1DeviceContext ctx, Vector2 p)
-    {
-        float r = _gIcon * 0.42f;
-        using (var fill = ctx.CreateSolidColorBrush(Col(0x33, 0x5A, 0xC8, 0xFF)))
-            ctx.FillEllipse(new Ellipse { Point = p, RadiusX = r, RadiusY = r }, fill);
-        using (var ring = ctx.CreateSolidColorBrush(Col(0xCC, 0x8F, 0xD6, 0xFF)))
-            ctx.DrawEllipse(new Ellipse { Point = p, RadiusX = r, RadiusY = r }, ring, 2f);
-        using (var plus = ctx.CreateSolidColorBrush(Col(0xEE, 0xFF, 0xFF, 0xFF)))
-        {
-            float a = r * 0.5f;
-            ctx.DrawLine(new Vector2(p.X - a, p.Y), new Vector2(p.X + a, p.Y), plus, 2.4f);
-            ctx.DrawLine(new Vector2(p.X, p.Y - a), new Vector2(p.X, p.Y + a), plus, 2.4f);
-        }
     }
 
     [DllImport("user32.dll")] private static extern int SetWindowRgn(IntPtr hWnd, IntPtr hRgn, bool bRedraw);
@@ -1640,9 +1601,8 @@ internal sealed class SideDockWindowGpu : GpuDockBase, IDisposable, ISideDock
         // Side dock icons intentionally show NO floating name label (parity request:
         // names only on the main dock). The hover-fade bookkeeping still runs so the
         // preview popup logic is unaffected; we simply don't draw the name here.
-        // External drag-follow marker (parity with the main dock's live drop feedback).
-        if (_extDragPt is { } dp)
-            DrawDragMarker(ctx, dp);
+        if (_extDragPt is { } dp && _dragIconKey != null)
+            DrawDragPreview(ctx, dp);
         ctx.EndDraw();
         _host.Present();
         satSrc?.Dispose();   // the cached _satBlurEffect is reused (disposed with the host)
@@ -2816,8 +2776,44 @@ internal sealed class SideDockWindowGpu : GpuDockBase, IDisposable, ISideDock
         // Screen pixels → window-local DIPs.
         float lx = (float)(screenX / _dpi - _winX);
         float ly = (float)(screenY / _dpi - _winY);
+        _extDragPt = null; _dragIconKey = null;   // drag finished — clear the preview
         _dispatcher.BeginInvoke(new Action(() => InsertDroppedEntries(entries, lx, ly)),
             System.Windows.Threading.DispatcherPriority.Background);
+    }
+
+    /// <summary>Called while an external file/shell drag hovers the dock (null on leave/drop)
+    /// with the SCREEN point and the first dragged file's icon source. Tracks the window-local
+    /// drop point and the icon to preview at it.</summary>
+    private void OnExternalDragMove((int x, int y)? screenPt, string? iconSrc)
+    {
+        if (screenPt is { } p)
+        {
+            // The OLE callback fires only while the cursor is over the drop shim (== the
+            // mouse-solid dock box), so any reported point is a valid drop spot.
+            _extDragPt = new Vector2((float)(p.x / _dpi - _winX), (float)(p.y / _dpi - _winY));
+            if (iconSrc != null) _dragIconKey = iconSrc;
+        }
+        else { _extDragPt = null; _dragIconKey = null; }
+        try { RequestRender(); } catch { }
+    }
+
+    /// <summary>Previews the dragged item's icon at the drop point while an external drag
+    /// hovers the dock — the OS drag image isn't rendered over the topmost composition window.</summary>
+    private void DrawDragPreview(ID2D1DeviceContext ctx, Vector2 p)
+    {
+        var key = _dragIconKey;
+        if (key == null)
+            return;
+        var bmp = GetBitmap(ctx, key, IconExtractor.GetCached(key, _iconCache));
+        if (bmp == null)
+            return;
+        float g = _gIcon, half = g / 2f;
+        var bs = bmp.Size;
+        var baseTf = ctx.Transform;
+        ctx.Transform = Matrix3x2.CreateScale(g / Math.Max(1f, bs.Width), g / Math.Max(1f, bs.Height))
+                      * Matrix3x2.CreateTranslation(p.X - half, p.Y - half) * baseTf;
+        ctx.DrawBitmap(bmp, 0.85f, InterpolationMode.HighQualityCubic);
+        ctx.Transform = baseTf;
     }
 
     /// <summary>Shared drop core: pins each resolved entry into the resident column at

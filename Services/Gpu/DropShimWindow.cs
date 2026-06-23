@@ -29,7 +29,7 @@ internal sealed class DropShimWindow : IDisposable
     private IntPtr _owner;
     private readonly Func<uint, IntPtr, int, int, (bool handled, IntPtr result)> _forward;
     private readonly Action<List<string>, byte[]?, int, int> _onDrop;
-    private readonly Action<(int x, int y)?>? _onDragMove;
+    private readonly Action<(int x, int y)?, string?>? _onDragMove;
     private OleDropTarget? _ole;
     private IntPtr _hwnd;
 
@@ -41,7 +41,7 @@ internal sealed class DropShimWindow : IDisposable
     public DropShimWindow(IntPtr owner,
         Func<uint, IntPtr, int, int, (bool handled, IntPtr result)> forward,
         Action<List<string>, byte[]?, int, int> onDrop,
-        Action<(int x, int y)?>? onDragMove = null)
+        Action<(int x, int y)?, string?>? onDragMove = null)
     {
         _owner = owner;
         _forward = forward;
@@ -69,7 +69,7 @@ internal sealed class DropShimWindow : IDisposable
         // CFSTR_SHELLIDLIST shell items (This PC / Recycle Bin / File Explorer) that the
         // legacy WM_DROPFILES path can't carry.
         Allow(_hwnd);
-        _ole = new OleDropTarget(_hwnd, _onDrop) { OnDragMove = pt => _onDragMove?.Invoke(pt) };
+        _ole = new OleDropTarget(_hwnd, _onDrop) { OnDragMove = (pt, src) => _onDragMove?.Invoke(pt, src) };
         _ole.Register();
     }
 
