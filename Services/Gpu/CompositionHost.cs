@@ -19,16 +19,11 @@ namespace Polaris.Services.Gpu;
 /// composites this on the GPU and the back buffer lives in VRAM.</summary>
 internal sealed class CompositionHost : IDisposable
 {
-    private readonly ID3D11Device _d3d;
-    private readonly IDXGIDevice _dxgiDevice;
-    private readonly IDXGIFactory2 _factory;
     private readonly IDXGISwapChain1 _swapChain;
     private readonly IDCompositionDevice _dcomp;
     private readonly IDCompositionTarget _target;
     private readonly IDCompositionVisual _visual;
     private readonly IDCompositionVisual3? _visual3;
-    private readonly ID2D1Factory1 _d2dFactory;
-    private readonly ID2D1Device _d2dDevice;
     private readonly ID2D1DeviceContext _d2d;
     private ID2D1Bitmap1 _targetBitmap;
     private float _dpi;
@@ -82,24 +77,11 @@ internal sealed class CompositionHost : IDisposable
         Width = Math.Max(1, width);
         Height = Math.Max(1, height);
 
-        // Prefer the hardware GPU; fall back to WARP so the spike still runs in a
-        // VM / on a machine without a usable D3D11 hardware device.
-        ID3D11Device? device = null;
-        try
-        {
-            D3D11.D3D11CreateDevice(null, DriverType.Hardware,
-                DeviceCreationFlags.BgraSupport, null, out device).CheckError();
-        }
-        catch
-        {
-            device?.Dispose();
-            D3D11.D3D11CreateDevice(null, DriverType.Warp,
-                DeviceCreationFlags.BgraSupport, null, out device).CheckError();
-        }
-        _d3d = device!;
-
-        _dxgiDevice = _d3d.QueryInterface<IDXGIDevice>();
-        _factory = DXGI.CreateDXGIFactory2<IDXGIFactory2>(false);
+        // Use the process-wide shared GPU device (one D3D11/DXGI/D2D device shared by
+        // every dock) instead of creating a per-host device. Only the per-window
+        // resources below (swap chain, DComp device/target/visual, D2D context + target
+        // bitmap) are owned and disposed by this host.
+        var gpu = GpuDevice.Shared;
 
         // The render-thread path adds FrameLatencyWaitableObject so a dedicated thread can
         // block on the compositor's "ready for next frame" signal (refresh-rate paced),
@@ -119,7 +101,7 @@ internal sealed class CompositionHost : IDisposable
             AlphaMode = DXGIAlphaMode.Premultiplied,
             Flags = _swapFlags,
         };
-        _swapChain = _factory.CreateSwapChainForComposition(_d3d, desc);
+        _swapChain = gpu.Factory.CreateSwapChainForComposition(gpu.D3D, desc);
         if (waitable)
         {
             try
@@ -133,7 +115,7 @@ internal sealed class CompositionHost : IDisposable
             catch { _swapChain2 = null; _frameLatencyWaitable = IntPtr.Zero; }
         }
 
-        _dcomp = DComp.DCompositionCreateDevice<IDCompositionDevice>(_dxgiDevice);
+        _dcomp = DComp.DCompositionCreateDevice<IDCompositionDevice>(gpu.Dxgi);
         _dcomp.CreateTargetForHwnd(hwnd, true, out _target).CheckError();
         _visual = _dcomp.CreateVisual();
         _visual.SetContent(_swapChain);
@@ -143,9 +125,7 @@ internal sealed class CompositionHost : IDisposable
         _target.SetRoot(_visual);
         _dcomp.Commit();
 
-        _d2dFactory = D2D1.D2D1CreateFactory<ID2D1Factory1>(Vortice.Direct2D1.FactoryType.SingleThreaded);
-        _d2dDevice = _d2dFactory.CreateDevice(_dxgiDevice);
-        _d2d = _d2dDevice.CreateDeviceContext(DeviceContextOptions.None);
+        _d2d = gpu.D2DDevice.CreateDeviceContext(DeviceContextOptions.None);
         // The swap chain is premultiplied-alpha (transparent composition surface), where
         // ClearType subpixel AA is invalid; force grayscale AA so glyph edges are clean
         // rather than colour-fringed/soft.
@@ -250,18 +230,15 @@ internal sealed class CompositionHost : IDisposable
 
     public void Dispose()
     {
+        // Only per-window resources are disposed here; the shared GpuDevice (D3D/DXGI/D2D
+        // device + factories) is kept for the process lifetime and reclaimed by the OS.
         _targetBitmap?.Dispose();
         _d2d?.Dispose();
-        _d2dDevice?.Dispose();
-        _d2dFactory?.Dispose();
         _visual?.Dispose();
         _visual3?.Dispose();
         _target?.Dispose();
         _dcomp?.Dispose();
         _swapChain2?.Dispose();
         _swapChain?.Dispose();
-        _factory?.Dispose();
-        _dxgiDevice?.Dispose();
-        _d3d?.Dispose();
     }
 }

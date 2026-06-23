@@ -101,6 +101,11 @@
 
 ## ⚡ 性能优化 / 健壮性
 
+- **GPU 共享单设备（每窗各建 D3D11/DXGI/D2D 设备 → 全进程共享一套，减内存 + 减线程）**：原 `CompositionHost` 每个实例（主 dock + 侧 dock + 土星 notch 时钟 + drag ghost，3-4 个活跃面）各自 `D3D11CreateDevice` + DXGI factory + D2D device——每个硬件设备各提交一大块驱动地址空间并各起一组驱动 worker 线程。新增 `Services/Gpu/GpuDevice.cs`（线程安全 `Lazy<GpuDevice>` 单例 `GpuDevice.Shared`），全进程共享**一套** `ID3D11Device` + `IDXGIDevice` + `IDXGIFactory2` + `ID2D1Device`（硬件→WARP 回退、进程生命周期常驻、退出由 OS 回收免去拆除时序风险）。`CompositionHost` 改为只持有**每窗私有**资源：swap chain、DComp device/target/visual、`ID2D1DeviceContext` + target bitmap；`Dispose` 只释放这些，不碰共享设备。
+  - **线程安全**：各 dock 在自己的 `RenderLoop` 线程渲染、并发触达共享设备。共享 `ID3D11Device` 标记 `ID3D11Multithread.SetMultithreadProtected(true)`、D2D factory 用 `FactoryType.MultiThreaded`，让 D3D11/D2D 内部串行化并发访问；DComp 设备/上下文仍每窗各建、只在本窗渲染线程使用（线程亲和不变）。
+  - **实测 A/B（同条件 idle，控 P1.1 notch 释放变量，启动后第 9s 取样）**：私有字节 335→301MB（**-34MB**）、线程 125→101（**-24**，合并 2 组驱动 worker 线程池）、句柄 941→915。土星双 dock 召唤时（3 活跃设备 → 1）收益更大。42 单测全过、0 警告。
+  - **已知取舍**：设备丢失（device-lost / TDR）现在会同时影响全部 dock；改动前每窗独立设备本就**无** device-lost 处理，故非回归，后续如加须在 `GpuDevice` 集中重建。
+
 - **土星缓存子区域扩到环层 + 缓存火焰模糊（再省 ~38MB + 减每帧 churn）**：承接上轮 planet 子区域，把主 dock 的 backing/星空、两个静态环、两个 revolution-cue 共 **5 层**也按**环中心子区域**烘焙（半径 `(OuterRadius+OuterIcon)×1.3`；RingTiltY≈0.97 近圆、星空在 r·0.96 内、含 bloom/牧羊犬卫星余量）——每层 ~16→~8MB，再省 ~38MB（土星主 dock 烘焙缓存 ~126MB → ~30MB）。cue 层因自身经 `RevolveXform` 设 `ctx.Transform`，偏移改由 `baseXform=Translation(-环原点)` 传入；绘制时各层 prepend `ringTf`。验证：内外环/Cassini 缝/微光/辐条/牧羊犬卫星/星空/「环展开」动画全部无裁切。**另**：侧 dock 黑色火焰原本每帧 `new GaussianBlur`，改为缓存 `_satBlurEffect`（随 host 销毁），让 D2D 复用模糊中间纹理、减少每帧效果 COM churn，视觉不变。
   - **关键诊断结论**：dotnet-counters 实测 Polaris **托管堆仅 ~17MB**（gen0 3.3 + gen2 2.4 + LOH 0.4…）；土星双 dock 活跃 ~770–900MB 工作集 / ~1GB commit **几乎全是原生 GPU/驱动内存**（3 个独立 D3D11 设备 + 近全屏 swapchain + 复杂逐帧场景 + 烘焙位图），**非托管堆** —— 故 GC / SustainedLowLatency 不是内存瓶颈，土星比 glass 重 ~3-5× 也源于此。idle-trim 会在光标停在 dock 上不动时就 trim，测活跃内存须保持光标移动否则抓到的是 trim 谷值。
 
