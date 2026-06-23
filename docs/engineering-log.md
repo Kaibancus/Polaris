@@ -334,6 +334,11 @@
 
 ## ⚡ 性能优化
 
+- **土星凹口时钟 GPU 设备空闲释放（减少非土星会话的常驻设备）**：
+  - **背景**：GPU 迁移后凹口时钟（`NotchClockWindowGpu`，土星主题专属）的 `CompositionHost`（一个完整 D3D11 设备 + 其驱动 worker 线程）**创建一次后常驻到进程退出**——即使切到液态玻璃 / dismiss 后，这个仅土星用的设备仍占着提交地址空间。
+  - **修复**：`HideNotch` 起一个 10s `_releaseTimer`，超时仍隐藏则 `ReleaseGpu()`（dispose host + DirectWrite factory/format + `DestroyWindow`，`_built=false`）；下次 `ShowNotch` 经 `EnsureBuilt` 懒重建。`ShowNotch` 入口先 `Stop()` 该计时器，**10s 内快速 hide/show 复用同一设备、不 churn**；持续隐藏才释放，让 working-set trim 能回收。notch 用 `DispatcherTimer` 在 UI 线程渲染（无独立渲染线程），故释放/重建全在 UI 线程，无线程协调。
+  - **注**：更大的同类优化（主/侧 dock 三设备共享单一 D3D11/DXGI/D2D 设备，P0）评估后**暂缓**，方案存于 session 文件待后续拉分支试验（需 MultiThreaded D2D + 多线程保护的共享设备 + per-thread DComp，因两 dock 各自渲染线程并发，风险较高）。
+
 - **高刷新率机输入延迟缓解：启动离线化 + 缩小 GPU 主 Dock 渲染表面**（GPU 渲染移植在 4K@144 上的输入响应退化）：
   - **背景**：GPU 双 Dock 的渲染（`FrameClock`=`CompositionTarget.Rendering`，按显示刷新率触发）跑在 **UI 线程**，输入（`WndProc` 的点击/右键/悬停）也走 UI 线程消息泵。4K@144 下每帧近全屏栅格化量约为本机 59Hz 的 ~5×（刷新率 2.44× × 像素 2.0×），把单条 UI 线程占满，导致点击/右键菜单/激活/缩略图延迟严重；本机（59Hz、半分辨率）因负载仅 ~1/5、UI 线程有余量反而流畅。根因是「渲染放在 UI 线程」，非 GPU 算力（单帧 draw 仅 6-8ms≪16.6ms 预算）。
   - **①启动离线化**（`AppLauncher.Launch`）：`ActivateExisting`（枚举窗口+SetForegroundWindow）、`Process.Start`、shell 解析等同步重活原本阻塞 UI 线程数十~数百 ms。改为 `dismiss`（HidePanel，须 UI 线程）前台先调 → 重活 `LaunchCore` 丢 `Task.Run` 后台 → 错误 `MessageBox` marshal 回 UI 线程。验证所用 shell API（`Process.Start`/`SHGetPropertyStoreFromParsingName`）均 free-threaded、非 STA-bound，MTA 后台安全。（注：缩略图抓图 `WindowPreviewPopup` 早已后台化。）

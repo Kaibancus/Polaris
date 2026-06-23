@@ -27,6 +27,7 @@ internal sealed class NotchClockWindowGpu : INotchClock
     private IDWriteFactory? _dwrite;
     private IDWriteTextFormat? _format;
     private readonly DispatcherTimer _timer;
+    private readonly DispatcherTimer _releaseTimer;
     private bool _atBottom;
     private bool _built;
     private bool _visible;
@@ -35,12 +36,18 @@ internal sealed class NotchClockWindowGpu : INotchClock
     {
         _timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
         _timer.Tick += (_, _) => Render();
+        // Release the GPU device after the notch stays hidden past the delay (the Saturn
+        // theme is frequently inactive). A re-summon within the delay cancels it, so quick
+        // hide/show cycles don't churn the device; a sustained hide frees it for the trim.
+        _releaseTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(10) };
+        _releaseTimer.Tick += (_, _) => { _releaseTimer.Stop(); if (!_visible) ReleaseGpu(); };
     }
 
     public void ShowNotch(bool atBottom)
     {
         try
         {
+            _releaseTimer.Stop();   // cancel a pending device release — we're showing again
             EnsureBuilt();
             _atBottom = atBottom;
 
@@ -68,6 +75,23 @@ internal sealed class NotchClockWindowGpu : INotchClock
             ShowWindow(_hwnd, SW_HIDE);
             _visible = false;
         }
+        // Free the GPU device (a full D3D11 device + its driver worker threads) once the
+        // notch has stayed hidden past the delay, so a glass session / dismissed dock does
+        // not keep a Saturn-only device committed. Recreated lazily on the next ShowNotch.
+        _releaseTimer.Stop();
+        _releaseTimer.Start();
+    }
+
+    /// <summary>Disposes the GPU device + text resources + window while hidden. The next
+    /// ShowNotch rebuilds them lazily via EnsureBuilt. Runs on the UI thread (the notch
+    /// renders from a DispatcherTimer, so it has no render thread to coordinate with).</summary>
+    private void ReleaseGpu()
+    {
+        _format?.Dispose(); _format = null;
+        _dwrite?.Dispose(); _dwrite = null;
+        _host?.Dispose(); _host = null;
+        if (_hwnd != IntPtr.Zero) { DestroyWindow(_hwnd); _hwnd = IntPtr.Zero; }
+        _built = false;
     }
 
     private void EnsureBuilt()
@@ -236,6 +260,7 @@ internal sealed class NotchClockWindowGpu : INotchClock
         int x, int y, int w, int h, IntPtr parent, IntPtr menu, IntPtr inst, IntPtr param);
     [DllImport("user32.dll")] private static extern IntPtr DefWindowProcW(IntPtr h, uint m, IntPtr w, IntPtr l);
     [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr h, int n);
+    [DllImport("user32.dll")] private static extern bool DestroyWindow(IntPtr h);
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr GetModuleHandleW(string? n);
