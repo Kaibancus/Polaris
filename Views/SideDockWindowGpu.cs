@@ -556,13 +556,17 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         double bodyCross, bodyCrossLen;
         if (darkSlab)
         {
-            double darkBleed = gIcon * 0.4, darkPad = gIcon * 0.5;
+            // darkPad/glassPad are the INTERIOR pad (icon's far edge → slab inner edge); they
+            // set the slab thickness (= the dock's visible height/width) WITHOUT affecting the
+            // icon's distance from the screen edge (colCenterCross, computed above and unrelated
+            // to these). Trimmed slightly to make the dock a touch thinner per user request.
+            double darkBleed = gIcon * 0.4, darkPad = gIcon * 0.4;
             bodyCross = slabCross - darkBleed;
             bodyCrossLen = (colCenterCross - bodyCross) + gIcon / 2.0 + darkPad;
         }
         else
         {
-            double glassPad = gIcon * 0.30;
+            double glassPad = gIcon * 0.20;
             bodyCross = slabCross;
             bodyCrossLen = (colCenterCross - bodyCross) + gIcon / 2.0 + glassPad;
         }
