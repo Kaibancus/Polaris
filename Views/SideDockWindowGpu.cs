@@ -290,6 +290,15 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         }
         if (_hwnd != IntPtr.Zero)
         {
+            // Prime the slide-in start state (off-screen toward the edge + transparent) on the
+            // compositor BEFORE the window is shown, so the first visible frame is already at the
+            // animation's start instead of flashing once at the rest position. Rebuild recreates
+            // the host with a default at-rest visual (offset 0, opacity 1), so without this the
+            // DWM composites one rest frame the instant ShowWindow runs, then StartIntro jumps it
+            // off-screen to slide in — the visible "jump/flicker" on summon.
+            _introSlidePx = (_slabCrossLen + 40f) * (float)_dpi;
+            Vector2 startOff = PopOffset(-_introSlidePx);
+            InvokeOnRender(() => _host?.SetIntro(startOff.X, startOff.Y, 0f));
             ShowWindow(_hwnd, SW_SHOWNOACTIVATE);
             SetWindowPos(_hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE);
             SyncShim(); _dropShim?.Show();

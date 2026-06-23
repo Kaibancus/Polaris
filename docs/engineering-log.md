@@ -132,6 +132,11 @@
 
 ## 🐛 BUG 修复
 
+- **侧 dock 鼠标边缘召唤时跳动闪烁一下（GPU）**：
+  - **现象**：鼠标触发侧 dock 显示时，dock 会先在静止位置闪现一帧再滑入，观感为「跳动闪烁」。
+  - **根因**：`SideDockWindowGpu.DoShow` 顺序为 `Rebuild()`（重建 host，新 DComp visual 默认 offset 0 / opacity 1，首帧渲染在**静止位置**）→ `ShowWindow`（合成器立即显示这一静止帧）→ 才 `StartIntro()`（下一帧 `DriveIntro` 把 visual 推到屏外起点再滑入）。`ShowWindow` 与首个 `DriveIntro` 帧之间，DWM 合成了 1+ 帧静止态 → 可见跳变。
+  - **修复**：在 `ShowWindow` **之前**先把 intro 起始态（沿停靠边缘的屏外偏移 `PopOffset(-_introSlidePx)` + opacity 0）经 `InvokeOnRender(_host.SetIntro(...))` **同步**提交到合成器，使窗口变可见时首帧已在滑入起点；随后 `StartIntro` 从该态缓动到静止。与主 dock `Summon` 显示前 `SetIntro(0,0,0)` 置首帧透明的做法一致。
+
 - **双 dock 都打开时，在主 dock 重排图标，侧 dock 不实时更新（GPU 迁移后引入）**：
   - **现象**：两个 dock 都召唤着时，在**主 dock** 拖拽重排 resident 图标，**侧 dock 不跟着变**——必须先 dismiss 主 dock，侧 dock 才补刷新顺序。反方向（侧 dock 重排 → 主 dock）一直实时正常。
   - **根因**：为拖拽流畅做的优化把主→侧刷新**全压到 dismiss**：①主 dock `NotifyAppsChangedSoon` 在 `_shown` 时直接 `return`（只置 `_appsChangedPending`，等 dismiss 由 `FlushAppsChanged` 补发 `AppsChanged`）；②侧 dock `RefreshFromConfig` 的 block 条件含 `_byMain`（主显示时阻塞）；③侧 dock `SetDragActive(false)` 的补刷条件含 `!_byMain`。三重 `_byMain` 守卫过宽——而拖拽流畅其实已由 `SetDragActive` 设的 `_suspendRefreshWhileDrag`/`_byDrag` 在拖拽期间硬挂起侧刷新单独保护，`_byMain` 是多余的。
