@@ -16,12 +16,6 @@ internal static class AttentionBadges
     /// effort unread count parsed from the window titles. Reuses
     /// GetWindowsForEntry so the icon→window matching stays identical to the hover
     /// previews. Runs off the UI thread and never throws.</summary>
-    public static (bool flashing, int count) ForIcon(
-        RadialIcon icon, HashSet<IntPtr> flashing, string logArea)
-        => ForEntry(icon.Entry.Path, icon.Entry.Arguments, flashing, logArea);
-
-    /// <summary>Path/arguments overload of <see cref="ForIcon"/> for the GPU docks,
-    /// which key off an <see cref="Models.AppEntry"/> rather than a WPF RadialIcon.</summary>
     public static (bool flashing, int count) ForEntry(
         string path, string? args, HashSet<IntPtr> flashing, string logArea)
     {

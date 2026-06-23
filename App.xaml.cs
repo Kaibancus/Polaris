@@ -141,23 +141,6 @@ public partial class App : Application
     {
         base.OnStartup(e);
 
-        // GPU-rendering spike benchmark: POLARIS_GPU_BENCH=gpu|wpf runs a large
-        // animated per-pixel-alpha window in the chosen compositing path, samples
-        // CPU to gpu-bench.csv, then exits — skipping normal tray startup.
-        string? bench = Environment.GetEnvironmentVariable("POLARIS_GPU_BENCH");
-        if (!string.IsNullOrEmpty(bench))
-        {
-            Polaris.Services.Gpu.GpuBenchmark.Run(bench);
-            return;
-        }
-
-        // GPU-rendering spike — D2D/DirectWrite glass-slab visual-fidelity prototype:
-        // shows a GPU-rendered glass slab + clock alongside normal startup so it can
-        // be eyeballed against the real WPF glass dock.
-        if (Environment.GetEnvironmentVariable("POLARIS_GLASS_PROTO") == "1")
-            Dispatcher.BeginInvoke(new Action(Polaris.Services.Gpu.GlassPrototypeWindow.Show),
-                DispatcherPriority.ApplicationIdle);
-
         // Global safety net: a tray-resident app must survive an unexpected
         // exception on the UI thread instead of vanishing silently. Log the
         // fault, tell the user, and keep running where it is safe to do so.
@@ -167,9 +150,6 @@ public partial class App : Application
 
         // Frame-rate / animation profile is applied from the display refresh
         // (see ApplyDisplayProfile) once settings are loaded below.
-
-        // Opt-in frame-rate profiler (POLARIS_FPS=1). No-op otherwise.
-        FpsProfiler.StartIfRequested();
 
         // Opt-in GPU-dock frame meter (POLARIS_GPUFPS=1). No-op otherwise.
         Polaris.Services.GpuFrameStats.StartIfRequested();
@@ -234,12 +214,8 @@ public partial class App : Application
         ThemeRegistry.LoadAppearance(_config.Settings);
         ConfigStore.Save(_config);
 
-        // Pick the main-dock implementation. The GPU (DirectComposition + Direct2D)
-        // liquid-glass dock is now the DEFAULT; set POLARIS_GPU_MAINDOCK=0 to fall
-        // back to the WPF dock. Both implement IMainDock so the host wiring is identical.
-        _panel = Environment.GetEnvironmentVariable("POLARIS_GPU_MAINDOCK") == "0"
-            ? new RadialWindow(_config, Persist)
-            : new Polaris.Views.MainDockWindowGpu(_config);
+        // The GPU (DirectComposition + Direct2D) liquid-glass main dock is the renderer.
+        _panel = new Polaris.Views.MainDockWindowGpu(_config);
         _panel.RequestOpenSettings += OpenSettings;
         _panel.Realize();   // realise once (stays shown, fully transparent) to avoid show/hide flicker
 
@@ -249,12 +225,8 @@ public partial class App : Application
         // The left dock mirrors the main dock's resident region (top two rows),
         // so seed that mirror once before the docks build.
         DockSync.MirrorResidentToLeft(_config);
-        // Pick the side-dock implementation. The GPU (DirectComposition + Direct2D)
-        // dock is now the DEFAULT; set POLARIS_GPU_SIDEDOCK=0 to fall back to the WPF
-        // one. Both implement ISideDock so the host wiring below is identical.
-        _sideDock = Environment.GetEnvironmentVariable("POLARIS_GPU_SIDEDOCK") == "0"
-            ? new SideDockWindow(_config, Persist)
-            : new Polaris.Views.SideDockWindowGpu(_config);
+        // The GPU (DirectComposition + Direct2D) side dock is the renderer.
+        _sideDock = new Polaris.Views.SideDockWindowGpu(_config);
         _sideDock.MainDockChanged += () => _panel?.RefreshFromConfig();
         // Clicking the Polaris tile in the left dock's running strip toggles the
         // pinned docks (equivalent to Ctrl+4).
@@ -1019,7 +991,6 @@ public partial class App : Application
 
     protected override void OnExit(ExitEventArgs e)
     {
-        FpsProfiler.Stop();
         FlushPersist();
         _taskbarGuard.Stop();
         _clickAway.Stop();

@@ -6,11 +6,8 @@ using Polaris.Models;
 namespace Polaris.Views;
 
 /// <summary>
-/// The surface the host (App) drives the primary "main dock" through, so the
-/// WPF (<see cref="RadialWindow"/>) and GPU (<see cref="MainDockWindowGpu"/>)
-/// implementations are interchangeable behind the <c>POLARIS_GPU_MAINDOCK</c>
-/// flag — the same A/B pattern used for the drag ghost, notch clock and side
-/// dock.
+/// The surface the host (App) drives the primary "main dock" through, implemented
+/// by the GPU <see cref="MainDockWindowGpu"/>.
 /// </summary>
 internal interface IMainDock
 {

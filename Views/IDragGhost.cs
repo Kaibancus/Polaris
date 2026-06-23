@@ -1,9 +1,7 @@
 namespace Polaris.Views;
 
-/// <summary>Common surface for the drag ghost overlay so the WPF
-/// (<see cref="DragGhostWindow"/>) and the GPU/DirectComposition
-/// (<see cref="DragGhostWindowGpu"/>) implementations are interchangeable for the
-/// GPU-rendering spike A/B comparison.</summary>
+/// <summary>Common surface for the drag ghost overlay, implemented by the GPU/
+/// DirectComposition <see cref="DragGhostWindowGpu"/>.</summary>
 internal interface IDragGhost
 {
     /// <summary>Centres the ghost on a virtual-desktop point (in DIPs).</summary>

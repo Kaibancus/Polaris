@@ -18,17 +18,13 @@ using FontStyle = Vortice.DirectWrite.FontStyle;
 
 namespace Polaris.Views;
 
-/// <summary>GPU main dock (spike) — Stage A static render of the LIQUID-GLASS theme.
-/// Draws the bottom-docked liquid-glass slab (via the shared <see cref="GlassSlab"/>)
-/// and the 7-column pinned icon grid in Direct2D under DirectComposition, mirroring the
-/// WPF <see cref="RadialWindow"/>'s glass layout (<c>DrawGlassPanel</c> +
-/// <c>LiquidGlassTheme.ComputeSlots</c>). Per-monitor DPI aware (layout in DIPs, window +
-/// swap chain in physical px, D2D target DPI = 96 × scale).
-/// <para>Stage B: a 16 ms cursor poll drives a continuous 2-D fisheye magnify wave
-/// (raised-cosine falloff, focal anchoring + neighbour spread mirroring
-/// <c>RadialWindow.Magnify</c>) and a floating hover name label below the focal icon.
-/// Still click-through (hit-test is poll-based) — launch / drag interaction lands in
-/// Stage D. Shown behind POLARIS_GPU_MAINDOCK=1.</summary>
+/// <summary>GPU main dock: the bottom-docked liquid-glass slab (via the shared
+/// <see cref="GlassSlab"/>) and the 7-column pinned icon grid drawn in Direct2D under
+/// DirectComposition (<c>LiquidGlassTheme.ComputeSlots</c> layout), plus the Saturn-ring
+/// theme. A 16 ms cursor poll drives a continuous 2-D fisheye magnify wave (raised-cosine
+/// falloff, focal anchoring + neighbour spread) and a floating hover name label below the
+/// focal icon. Per-monitor DPI aware (layout in DIPs, window + swap chain in physical px,
+/// D2D target DPI = 96 × scale).</summary>
 internal sealed class MainDockWindowGpu : IMainDock, IDisposable
 {
     // Mirror the WPF glass theme scale factors (see RadialWindow: _uiScale=1, _themeScale=0.9
@@ -60,13 +56,6 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     // ~38-53fps cap. Set POLARIS_GPU_RENDERTHREAD=0 to fall back to the legacy FrameClock path.
     private static readonly bool UseRenderThread =
         Environment.GetEnvironmentVariable("POLARIS_GPU_RENDERTHREAD") != "0";
-    // The drag ghost is a tiny, short-lived follow-the-cursor window. Re-creating a full
-    // DComp/D2D host for it on EVERY drag start can accumulate visible jank after several
-    // drags on high-refresh hardware, while the classic WPF ghost only ever moves an icon-
-    // sized layered window and is therefore cheap enough. Keep the GPU ghost behind its
-    // original explicit spike flag, but default GPU docks back to the stable WPF ghost.
-    private static readonly bool UseGpuGhost =
-        Environment.GetEnvironmentVariable("POLARIS_GPU_GHOST") == "1";
     private RenderLoop? _loop;
     private bool _gcActive;   // balances RenderGcScope Enter/Leave across show/hide
     private int[]? _orderBuf;            // reused draw-order scratch (avoids a per-frame alloc)
@@ -187,8 +176,6 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     // Phone-notch date/time panel shown at the screen top while the Saturn theme is
     // summoned (mirrors RadialWindow._notch / ShowNotchIfSaturn).
     private INotchClock? _notch;
-    private static readonly bool UseGpuNotch =
-        Environment.GetEnvironmentVariable("POLARIS_GPU_NOTCH") == "1";
     private SaturnScene.Geom _sg;         // Saturn ring/planet geometry (window-local DIP)
     private float[] _slotG = Array.Empty<float>();   // per-slot icon draw size (Saturn rings differ)
     private double _spinAngle, _innerAngle, _outerAngle, _saturnTime;   // Saturn animation phases
@@ -2204,37 +2191,25 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             long t0 = Stopwatch.GetTimestamp();
             double dip = _gIcon * 1.12;                       // matches the lifted drag size
             BitmapSource src = img;
-            if (UseGpuGhost)
+            int targetPx = Math.Max(1, (int)Math.Round(dip * _dpi));
+            // The GPU ghost sizes its window to the snapshot's PIXEL dimensions and draws
+            // it 1:1, so feed it a bitmap already scaled to the display size (not the icon's
+            // native full-res), otherwise the ghost renders oversized + mis-centred.
+            if (src.PixelWidth != targetPx)
             {
-                int targetPx = Math.Max(1, (int)Math.Round(dip * _dpi));
-                // The GPU ghost sizes its window to the snapshot's PIXEL dimensions and draws
-                // it 1:1, so feed it a bitmap already scaled to the display size (not the icon's
-                // native full-res), otherwise the ghost renders oversized + mis-centred.
-                if (src.PixelWidth != targetPx)
-                {
-                    double sx = targetPx / (double)src.PixelWidth, sy = targetPx / (double)src.PixelHeight;
-                    var scaled = new TransformedBitmap(src, new System.Windows.Media.ScaleTransform(sx, sy));
-                    scaled.Freeze();
-                    src = scaled;
-                }
-                // Pass the DIP size that makes the ghost's internal scale == _dpi, so MoveCenterTo
-                // maps a DIP cursor point to the correct physical centre.
-                double dipW = src.PixelWidth / _dpi, dipH = src.PixelHeight / _dpi;
-                _ghost = new DragGhostWindowGpu(src, dipW, dipH);
+                double sx = targetPx / (double)src.PixelWidth, sy = targetPx / (double)src.PixelHeight;
+                var scaled = new TransformedBitmap(src, new System.Windows.Media.ScaleTransform(sx, sy));
+                scaled.Freeze();
+                src = scaled;
             }
-            else
-            {
-                // The WPF ghost is an Image Stretch.Fill inside a tiny layered window, so it
-                // can scale the already-cached BitmapSource itself. Avoid creating a fresh
-                // TransformedBitmap on every drag start — repeated drags were allocating one
-                // more WIC/WPF bitmap each time, which is exactly the kind of cumulative churn
-                // that makes later drags feel progressively heavier.
-                _ghost = new DragGhostWindow(src, dip, dip);
-            }
+            // Pass the DIP size that makes the ghost's internal scale == _dpi, so MoveCenterTo
+            // maps a DIP cursor point to the correct physical centre.
+            double dipW = src.PixelWidth / _dpi, dipH = src.PixelHeight / _dpi;
+            _ghost = new DragGhostWindowGpu(src, dipW, dipH);
             MoveDragGhost(_dragX, _dragY);
             _ghost.Show();
             double ms = (Stopwatch.GetTimestamp() - t0) * 1000.0 / Stopwatch.Frequency;
-            DragPerfStats.GhostCreated(_dragDiagSession, UseGpuGhost ? "gpu" : "wpf", ms);
+            DragPerfStats.GhostCreated(_dragDiagSession, "gpu", ms);
         }
         catch (Exception ex) { Log.Warn("MainDockGpu", "drag ghost start failed: " + ex.Message); _ghost = null; }
     }
@@ -2346,7 +2321,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
                 }
                 if (startDrag)
                 {
-                    _dragDiagSession = DragPerfStats.Begin("main", _slots.Count, UseRenderThread, UseGpuGhost);
+                    _dragDiagSession = DragPerfStats.Begin("main", _slots.Count, UseRenderThread, true);
                     GlassDragActiveChanged?.Invoke(true);   // keep the side dock shown as a drop target
                     StartDragGhost(_pressIdx);   // lift the icon into an independent desktop overlay
                 }
@@ -3388,7 +3363,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             _notch?.HideNotch();
             return;
         }
-        _notch ??= UseGpuNotch ? new NotchClockWindowGpu() : (INotchClock)new NotchClockWindow();
+        _notch ??= new NotchClockWindowGpu();
         bool atBottom = _config.Settings.DockPosition == Models.DockSide.Top;
         _notch.ShowNotch(atBottom);
     }

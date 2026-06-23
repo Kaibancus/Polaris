@@ -12,11 +12,9 @@ using FontStyle = Vortice.DirectWrite.FontStyle;
 
 namespace Polaris.Views;
 
-/// <summary>GPU-rendered Saturn notch clock (per-window migration): the trapezoid
-/// "notch" plate, its soft dark halo and the 3-D pale-gold lettering drawn in
-/// Direct2D + DirectWrite under DirectComposition, replacing the WPF
-/// <c>AllowsTransparency</c> layered <see cref="NotchClockWindow"/>. Selected when
-/// <c>POLARIS_GPU_NOTCH=1</c>.</summary>
+/// <summary>GPU-rendered Saturn notch clock: the trapezoid "notch" plate, its soft
+/// dark halo and the 3-D pale-gold lettering drawn in Direct2D + DirectWrite under
+/// DirectComposition.</summary>
 internal sealed class NotchClockWindowGpu : INotchClock
 {
     private const float PlateWidth = 240, PlateHeight = 30, Slant = 20, SidePad = 16, FreePad = 14;

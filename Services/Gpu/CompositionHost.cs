@@ -11,7 +11,7 @@ using D2DAlphaMode = Vortice.DCommon.AlphaMode;
 
 namespace Polaris.Services.Gpu;
 
-/// <summary>GPU composition host for a per-pixel-alpha window (GPU-rendering spike):
+/// <summary>GPU composition host for a per-pixel-alpha window:
 /// D3D11 device → DXGI <b>composition</b> swap chain (premultiplied alpha) →
 /// DirectComposition device/target/visual → a D2D device context bound to the back
 /// buffer. Unlike a WPF <c>AllowsTransparency</c> layered window (Tier-0 software

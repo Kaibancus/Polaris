@@ -473,6 +473,15 @@
 
 ## 🔧 重构 / 工程质量
 
+- **删除 WPF 旧版回退 docks,GPU 成为唯一 dock 渲染器(瘦身 33 文件 / 11,247 行)**：
+  - **背景**：GPU(DirectComposition + Direct2D)docks 自 v3.0.0 起已是默认且稳定,WPF 版仅作为 `POLARIS_GPU_MAINDOCK/SIDEDOCK=0` 的回退,维护两套实现的视觉对齐成本高。
+  - **删除**：WPF 主 dock `RadialWindow.*`(12 分部 + xaml)、WPF 侧 dock `SideDockWindow.*`(10 分部 + xaml)、`RadialIcon`(两 WPF dock 共用);随之孤立的 WPF 专属服务 `DockBounce`、`GlassOrbitLight`、`FpsProfiler`;GPU spike 评估遗留物 `GpuBenchmark`(`POLARIS_GPU_BENCH`)、`GlassPrototypeWindow`(`POLARIS_GLASS_PROTO`)。
+  - **App.xaml.cs**:移除 `POLARIS_GPU_MAINDOCK/SIDEDOCK` 门控,硬编码 `new MainDockWindowGpu` / `new SideDockWindowGpu`;移除 `FpsProfiler`、benchmark、prototype 启动钩子。
+  - **notch 时钟 + 拖拽幽灵翻转为 GPU**:这两者原本默认用小型 WPF 版(`NotchClockWindow`/`DragGhostWindow`,GPU 版藏在 `POLARIS_GPU_NOTCH/GHOST=1` 后做 A/B)。按"GPU 唯一渲染器"目标翻转:`MainDockWindowGpu`/`SideDockWindowGpu` 硬编码 GPU notch/ghost,删除 WPF 两版 + `UseGpuNotch`/`UseGpuGhost` 门控(GPU 实现后续再打磨)。
+  - **清理**:`AttentionBadges` 删除仅 WPF 用的 `ForIcon(RadialIcon,…)` 重载(保留 GPU 的 `ForEntry`);移除接口/类头注释里指向已删类型的 spike/Stage/标志(`POLARIS_GPU_*`、"A/B"、"Stage A–E")过时描述;顺带修掉预存 `PushLayer(lp, null)` 的 CS8625(`null!`)。
+  - **保留(GPU 共享核心)**:`PanelTheme`/`ThemeRegistry`、`GlassChrome`(`FrostStrengthFor`)、`IMainDock`/`ISideDock`/`INotchClock`/`IDragGhost` 接口(各剩单一 GPU 实现,留作干净接缝)。
+  - **验证**:`dotnet build -c Release` 0 警告 0 错误;42 个单元测试全过。
+
 - **重命名 LeftDock* → SideDock***（`7da1198`）：Dock 可停靠任意边，原 `Left` 命名误导；
   重命名类型、10 个分部文件及所有相关标识符。`AppConfig.SideDockApps` 用
   `[JsonPropertyName("LeftDockApps")]` 保留 JSON key，旧配置无损升级。

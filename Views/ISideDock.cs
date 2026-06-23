@@ -5,10 +5,8 @@ using Polaris.Models;
 namespace Polaris.Views;
 
 /// <summary>
-/// The surface the host (App) drives the secondary "side dock" through, so the
-/// WPF (<see cref="SideDockWindow"/>) and GPU (<see cref="SideDockWindowGpu"/>)
-/// implementations are interchangeable behind the <c>POLARIS_GPU_SIDEDOCK</c>
-/// flag — the same A/B pattern used for the drag ghost and notch clock.
+/// The surface the host (App) drives the secondary "side dock" through, implemented
+/// by the GPU <see cref="SideDockWindowGpu"/>.
 /// </summary>
 internal interface ISideDock
 {

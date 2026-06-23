@@ -25,9 +25,8 @@
     <Resource Include="Assets\app.ico" />
   </ItemGroup>
 
-  <!-- GPU-rendering spike (代码重构 branch): per-pixel-alpha window via
-       DirectComposition + Direct2D, evaluated on DragGhostWindow. Vortice are
-       thin managed wrappers over the OS D3D11/DXGI/D2D/DComp DLLs. -->
+  <!-- GPU rendering: per-pixel-alpha dock windows via DirectComposition + Direct2D.
+       Vortice are thin managed wrappers over the OS D3D11/DXGI/D2D/DComp DLLs. -->
   <ItemGroup>
     <PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />
     <PackageReference Include="Vortice.DXGI" Version="3.8.3" />

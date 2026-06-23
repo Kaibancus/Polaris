@@ -17,14 +17,12 @@ using FontStyle = Vortice.DirectWrite.FontStyle;
 
 namespace Polaris.Views;
 
-/// <summary>GPU side dock (spike) — Stage A static render, Stage B hover hit-test +
-/// floating name label, Stage C macOS-style magnify wave, Stage D running-app strip.
-/// Draws the liquid-glass slab, the pinned icon column, a light-split divider and the
-/// running-but-unpinned strip (Polaris tile first, green running dots, "+N" overflow)
-/// in Direct2D under DirectComposition; a cursor poll drives a continuous magnify wave
-/// across both halves and shows the hovered icon's name. Per-monitor DPI aware (layout
-/// in DIPs, window + swap chain in physical px, D2D target DPI = 96 x scale). The window
-/// stays click-through — launch/drag come in Stage E. Shown behind POLARIS_GPU_SIDEDOCK=1.</summary>
+/// <summary>GPU side dock: the liquid-glass slab, the pinned icon column, a light-split
+/// divider and the running-but-unpinned strip (Polaris tile first, green running dots,
+/// "+N" overflow) drawn in Direct2D under DirectComposition; a cursor poll drives a
+/// continuous magnify wave across both halves and shows the hovered icon's name.
+/// Per-monitor DPI aware (layout in DIPs, window + swap chain in physical px, D2D target
+/// DPI = 96 × scale).</summary>
 internal sealed class SideDockWindowGpu : IDisposable, ISideDock
 {
     private const float GlassIconScale = 1.32f;
@@ -87,11 +85,6 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     // to the legacy UI-thread FrameClock path (_loop stays null).
     private static readonly bool UseRenderThread =
         Environment.GetEnvironmentVariable("POLARIS_GPU_RENDERTHREAD") != "0";
-    // See MainDockWindowGpu: the drag ghost is tiny and short-lived, so the stable WPF
-    // ghost is the better default. The GPU ghost stays available behind POLARIS_GPU_GHOST=1
-    // for explicit A/B experiments.
-    private static readonly bool UseGpuGhost =
-        Environment.GetEnvironmentVariable("POLARIS_GPU_GHOST") == "1";
     private RenderLoop? _loop;
     private bool _gcActive;   // balances RenderGcScope Enter/Leave across show/hide
     private int[]? _orderBuf;            // reused draw-order scratch (avoids a per-frame alloc)
@@ -942,23 +935,16 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         {
             double dip = _gIcon * 1.12;
             BitmapSource src = img;
-            if (UseGpuGhost)
+            int targetPx = Math.Max(1, (int)Math.Round(dip * _dpi));
+            if (src.PixelWidth != targetPx)
             {
-                int targetPx = Math.Max(1, (int)Math.Round(dip * _dpi));
-                if (src.PixelWidth != targetPx)
-                {
-                    double sx = targetPx / (double)src.PixelWidth, sy = targetPx / (double)src.PixelHeight;
-                    var scaled = new TransformedBitmap(src, new System.Windows.Media.ScaleTransform(sx, sy));
-                    scaled.Freeze();
-                    src = scaled;
-                }
-                double dipW = src.PixelWidth / _dpi, dipH = src.PixelHeight / _dpi;
-                _ghost = new DragGhostWindowGpu(src, dipW, dipH);
+                double sx = targetPx / (double)src.PixelWidth, sy = targetPx / (double)src.PixelHeight;
+                var scaled = new TransformedBitmap(src, new System.Windows.Media.ScaleTransform(sx, sy));
+                scaled.Freeze();
+                src = scaled;
             }
-            else
-            {
-                _ghost = new DragGhostWindow(src, dip, dip);
-            }
+            double dipW = src.PixelWidth / _dpi, dipH = src.PixelHeight / _dpi;
+            _ghost = new DragGhostWindowGpu(src, dipW, dipH);
             MoveDragGhost(_dragMain, _dragCross);
             _ghost.Show();
         }
@@ -1662,7 +1648,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
                         MaskTransform = Matrix3x2.Identity,
                         Opacity = op,
                     };
-                    ctx.PushLayer(lp, null);
+                    ctx.PushLayer(lp, null!);
                     ctx.DrawImage(_satBlurEffect, new Vector2(0, 0), InterpolationMode.Linear, CompositeMode.SourceOver);
                     ctx.PopLayer();
                 }

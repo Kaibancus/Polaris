@@ -7,13 +7,11 @@ using Vortice.Direct2D1;
 
 namespace Polaris.Views;
 
-/// <summary>GPU-rendering spike: a per-pixel-alpha drag ghost rendered through
+/// <summary>A per-pixel-alpha drag ghost rendered through
 /// <b>DirectComposition + Direct2D</b> instead of a WPF <c>AllowsTransparency</c>
 /// layered window. A borderless <c>WS_EX_NOREDIRECTIONBITMAP</c> top-level window
 /// hosts a composition swap chain the DWM composites on the GPU — no per-frame
-/// CPU <c>UpdateLayeredWindow</c> upload. Drop-in API-compatible with
-/// <see cref="DragGhostWindow"/> via <see cref="IDragGhost"/> so the two can be
-/// A/B compared. Used only when <c>POLARIS_GPU_GHOST=1</c>.</summary>
+/// CPU <c>UpdateLayeredWindow</c> upload. Implements <see cref="IDragGhost"/>.</summary>
 internal sealed class DragGhostWindowGpu : IDragGhost
 {
     private readonly IntPtr _hwnd;
