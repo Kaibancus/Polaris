@@ -213,9 +213,9 @@ internal static class SaturnScene
         if (!outer)
         {
             // --- Inner group: D, C, B -------------------------------------------
-            DrawRingZone(ctx, g, MapR(RDin), MapR(RDout), faintD, 0.12, 0.20, icon);
+            DrawRingZone(ctx, g, MapR(RDin), MapR(RDout), faintD, 0.14, 0.22, icon);
             DrawRingZone(ctx, g, MapR(RCin), MapR(RCout), dimC, 0.18, 0.35, icon);
-            DrawRingZone(ctx, g, MapR(RBin), MapR(RBout), paleB, 0.52, 0.58, icon);
+            DrawRingZone(ctx, g, MapR(RBin), MapR(RBout), paleB, 0.50, 0.56, icon);
 
             if (extra)
             {
@@ -244,13 +244,13 @@ internal static class SaturnScene
             }
 
             DrawRingZone(ctx, g, MapR(RRoche), MapR(RF) - icon * 0.06, faintD, 0.03, 0.05, icon);
-            DrawRingZone(ctx, g, rF - icon * 0.09, rF + icon * 0.09, paleB, 0.09, 0.12, icon * 0.42);
+            DrawRingZone(ctx, g, rF - icon * 0.09, rF + icon * 0.09, paleB, 0.11, 0.14, icon * 0.42);
 
             double gIn = rF + outerIcon * 0.34;
-            DrawRingZone(ctx, g, gIn, gIn + icon * 0.06, icyG, 0.05, 0.08, icon * 0.5);
+            DrawRingZone(ctx, g, gIn, gIn + icon * 0.06, icyG, 0.07, 0.10, icon * 0.5);
             double eIn = gIn + outerIcon * 0.18;
             double eOut = r - icon * 0.04;
-            DrawRingZone(ctx, g, eIn, eOut, icyG, 0.14, 0.012, icon, crispRim: false);
+            DrawRingZone(ctx, g, eIn, eOut, icyG, 0.15, 0.012, icon, crispRim: false);
 
             // Soft outer bloom over the faint G/E rings. Kept fully inside the disc
             // (width = G→E span, no extra spill past the rim) so the icy halo never
