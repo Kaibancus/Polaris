@@ -141,6 +141,11 @@
 
 ## 🐛 BUG 修复
 
+- **多屏：鼠标从侧 dock 外侧移到相邻屏幕，侧 dock 不隐藏（GPU）**：
+  - **现象**：多显示器下，鼠标触发侧 dock 显示后，从 dock 所贴的那条屏幕边缘越过、移到相邻的另一块屏幕，侧 dock 没有隐藏（一直停留）。单屏无此问题。
+  - **根因**：边缘轮询 `App.StartEdgePoll` 的「保持显示」判定 `inDock`（以及「触发」判定 `inTrigger`）在**朝屏幕外侧的那个方向只有单边不等式、没有外侧边界**。例如底部 dock 的 `inDock` 是 `y >= b.Top - Far`，竖直 dock 是 `x <= b.Right + Far` 之类——只限制了「朝屏幕内侧能伸多远」，没限制外侧。单屏时屏幕物理边缘就是光标极限（系统把光标 clamp 在屏内），这个缺失的外侧界永远不会被触及；但**多屏且 dock 外侧还有相邻屏幕**时，slab 紧贴屏幕边（`slabCross≈1px`），光标越过屏幕边缘进入相邻屏后，该不等式对相邻屏上的每个点都恒成立 → `inDock` 永远为真 → dock 不隐藏。
+  - **修复**：给 `inTrigger` 和 `inDock` 的外侧方向补上**外侧边界**，clamp 到 dock 所在显示器的物理边缘（+2px 极小 over-travel）。`inTrigger` 直接用其 `mon`（dock 召唤所在显示器 rect）的对应边；`inDock` 用 dock slab 中心经新增 `TryGetMonitorDipBounds`（`MonitorFromPoint`+`GetMonitorInfo`，DIP）求得 dock 真实所在显示器，查询失败则回退 slab 外边缘（也贴边，仍正确）。**单屏时光标被系统 clamp 在屏内，这些外侧界恒成立 → 零回归**；多屏时光标一越过屏幕边缘到相邻屏，外侧界立即不成立 → dock 正常隐藏。四个停靠边对称处理。已用户实测：单屏触发/隐藏照旧、多屏移到相邻屏会隐藏。
+
 - **开机自启后主/侧 dock 尺寸与位置错误（GPU）**：
   - **现象**：电脑重启、Polaris 随登录自启动后，两个 dock 召唤出来尺寸偏小、位置偏移（截图中 dock 明显比正常小且未贴合屏幕中下）。手动重启 Polaris 或显示稳定后再召唤则正常。
   - **根因**：①两 dock 是裸 Win32（`WS_EX_NOREDIRECTIONBITMAP`）合成窗口，**不是 WPF 窗口**；而 dock 布局所依赖的 `MonitorLayout`（`UsePrimary`）与各自的 `DpiScale()` 取自 WPF `SystemParameters`（`PrimaryScreenWidth`/`WorkArea`）。WPF 的 `SystemParameters` 是**进程级缓存**，仅在某个 WPF 窗口收到 `WM_DISPLAYCHANGE`/`WM_SETTINGCHANGE` 时才失效。Polaris 静止态只有托盘 `NotifyIcon`（WinForms）+ 裸 Win32 dock，**没有常驻 WPF 窗口**（设置窗按需创建）。②登录自启时机极早：GPU 尚未套用真实显示模式/DPI、任务栏尚未占好工作区，此时读到的 `SystemParameters` 是**未稳定的临时值并被永久冻结**，dock 按错值布局。③**全代码无任何显示变化监听**，显示稳定后不会重算——错误布局一直保持到手动重启。

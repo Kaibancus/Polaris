@@ -568,20 +568,25 @@ public partial class App : Application
 
             const double Reach = 8.0;        // edge sensitivity in DIPs
             const double Band = 0.25;        // exclude the outer 25% at each end
+            const double Edge = 2.0;         // tiny outward over-travel; keeps the trigger / keep-shown
+                                             // band from extending across the screen edge onto an
+                                             // adjacent monitor (the multi-monitor "won't hide" bug)
             double bandV = mon.Height * Band;
             double bandH = mon.Width * Band;
 
             // Trigger band: a strip along the dock's anchored edge, covering the
             // centre 50% of that edge. The threshold is generous (and a touch of
             // over-travel past the physical edge also counts) so the dock pops
-            // without landing the pointer exactly on the edge.
+            // without landing the pointer exactly on the edge. The outward side is
+            // bounded by the monitor edge (+Edge) so a point on a neighbouring
+            // screen past that edge does NOT count as "at the trigger".
             DockSide side = _sideDock.DockSidePosition;
             bool inTrigger = side switch
             {
-                DockSide.Right => x >= mon.Right - Reach && y >= mon.Top + bandV && y <= mon.Bottom - bandV,
-                DockSide.Top => y <= mon.Top + Reach && x >= mon.Left + bandH && x <= mon.Right - bandH,
-                DockSide.Bottom => y >= mon.Bottom - Reach && x >= mon.Left + bandH && x <= mon.Right - bandH,
-                _ => x <= mon.Left + Reach && y >= mon.Top + bandV && y <= mon.Bottom - bandV,
+                DockSide.Right => x >= mon.Right - Reach && x <= mon.Right + Edge && y >= mon.Top + bandV && y <= mon.Bottom - bandV,
+                DockSide.Top => y <= mon.Top + Reach && y >= mon.Top - Edge && x >= mon.Left + bandH && x <= mon.Right - bandH,
+                DockSide.Bottom => y >= mon.Bottom - Reach && y <= mon.Bottom + Edge && x >= mon.Left + bandH && x <= mon.Right - bandH,
+                _ => x <= mon.Left + Reach && x >= mon.Left - Edge && y >= mon.Top + bandV && y <= mon.Bottom - bandV,
             };
 
             // Once shown by the edge, keep it shown while the cursor stays near
@@ -594,12 +599,19 @@ public partial class App : Application
                 Rect b = _sideDock.GetDockScreenBounds();
                 const double Far = 28;       // interior reach beyond the slab
                 const double Slack = 14;     // slack along the edge
+                // Outward bound = the dock's OWN monitor edge (+Edge), so the keep-shown region
+                // can't spill across the screen edge onto an adjacent monitor. The slab sits
+                // flush to the edge, so the lone outward inequality below would otherwise stay
+                // true across the whole neighbouring screen and the dock would never hide when
+                // the cursor crossed onto it (the reported multi-monitor bug). Falls back to the
+                // slab edge if the monitor query fails (also flush, so still correct).
+                Rect dm = TryGetMonitorDipBounds((b.Left + b.Right) / 2, (b.Top + b.Bottom) / 2, scale, out Rect r) ? r : b;
                 inDock = side switch
                 {
-                    DockSide.Right => x >= b.Left - Far && y >= b.Top - Slack && y <= b.Bottom + Slack,
-                    DockSide.Top => y <= b.Bottom + Far && x >= b.Left - Slack && x <= b.Right + Slack,
-                    DockSide.Bottom => y >= b.Top - Far && x >= b.Left - Slack && x <= b.Right + Slack,
-                    _ => x <= b.Right + Far && y >= b.Top - Slack && y <= b.Bottom + Slack,
+                    DockSide.Right => x >= b.Left - Far && x <= dm.Right + Edge && y >= b.Top - Slack && y <= b.Bottom + Slack,
+                    DockSide.Top => y <= b.Bottom + Far && y >= dm.Top - Edge && x >= b.Left - Slack && x <= b.Right + Slack,
+                    DockSide.Bottom => y >= b.Top - Far && y <= dm.Bottom + Edge && x >= b.Left - Slack && x <= b.Right + Slack,
+                    _ => x <= b.Right + Far && x >= dm.Left - Edge && y >= b.Top - Slack && y <= b.Bottom + Slack,
                 };
             }
 
@@ -800,6 +812,7 @@ public partial class App : Application
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetWindowRect(IntPtr hWnd, out FSRECT lpRect);
     [DllImport("user32.dll")] private static extern IntPtr MonitorFromWindow(IntPtr hWnd, uint dwFlags);
+    [DllImport("user32.dll")] private static extern IntPtr MonitorFromPoint(POINT pt, uint dwFlags);
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
     [DllImport("user32.dll")] private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
 
@@ -873,6 +886,27 @@ public partial class App : Application
         const int T = 2;   // a couple of pixels of slack
         return wr.Left <= mi.rcMonitor.Left + T && wr.Top <= mi.rcMonitor.Top + T
             && wr.Right >= mi.rcMonitor.Right - T && wr.Bottom >= mi.rcMonitor.Bottom - T;
+    }
+
+    /// <summary>Bounds (DIP) of the monitor containing the given DIP point, or false if the
+    /// query fails. Used to clamp the side dock's edge trigger / keep-shown region to its own
+    /// monitor so it doesn't extend onto an adjacent screen. Assumes a uniform display scale
+    /// (one global physical→DIP factor), matching <see cref="Polaris.Services.MonitorLayout"/>.</summary>
+    private static bool TryGetMonitorDipBounds(double dipX, double dipY, double scale, out Rect bounds)
+    {
+        bounds = default;
+        if (scale <= 0) scale = 1.0;
+        const uint MONITOR_DEFAULTTONEAREST = 2;
+        var p = new POINT { X = (int)Math.Round(dipX * scale), Y = (int)Math.Round(dipY * scale) };
+        IntPtr mon = MonitorFromPoint(p, MONITOR_DEFAULTTONEAREST);
+        if (mon == IntPtr.Zero)
+            return false;
+        var mi = new MONITORINFO { cbSize = Marshal.SizeOf<MONITORINFO>() };
+        if (!GetMonitorInfo(mon, ref mi))
+            return false;
+        bounds = new Rect(mi.rcMonitor.Left / scale, mi.rcMonitor.Top / scale,
+            (mi.rcMonitor.Right - mi.rcMonitor.Left) / scale, (mi.rcMonitor.Bottom - mi.rcMonitor.Top) / scale);
+        return true;
     }
 
     /// <summary>Primary monitor's vertical refresh rate in Hz (falls back to 60
