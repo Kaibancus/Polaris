@@ -166,14 +166,26 @@ internal sealed class TaskbarGuard
                             // to the whole virtual desktop leaves the upward path free
                             // (the cursor is still kept on real display surface) while
                             // only the bottom edge stays clamped.
+                            //
+                            // The LEFT/RIGHT are likewise the virtual-screen bounds, not
+                            // this monitor's: confining them to mi.rcMonitor traps the
+                            // cursor horizontally inside the current monitor while it is
+                            // in the centre band, so it can't cross LEFT/RIGHT onto an
+                            // adjacent monitor (the "mouse blocked at the secondary
+                            // monitor's sides" bug). Spanning the full virtual width
+                            // keeps horizontal motion free; only the current monitor's
+                            // bottom rows are cut. On the next ~10ms tick the cursor's
+                            // new monitor is re-evaluated and the clip recomputed.
                             if (pt.X >= bandStart && pt.X <= bandEnd)
                             {
-                                const int SM_YVIRTUALSCREEN = 77;
+                                const int SM_XVIRTUALSCREEN = 76, SM_YVIRTUALSCREEN = 77,
+                                          SM_CXVIRTUALSCREEN = 78;
+                                int vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
                                 var clip = new RECT
                                 {
-                                    Left = mi.rcMonitor.Left,
+                                    Left = vx,
                                     Top = GetSystemMetrics(SM_YVIRTUALSCREEN),
-                                    Right = mi.rcMonitor.Right,
+                                    Right = vx + GetSystemMetrics(SM_CXVIRTUALSCREEN),
                                     Bottom = floor,
                                 };
                                 ClipCursor(ref clip);
