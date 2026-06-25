@@ -26,7 +26,7 @@ internal enum PreviewPlacement { Above, Below, Right, Left }
 internal sealed class WindowPreviewPopup
 {
     internal const int PreviewThumbWidth = 220;   // px capture width per window
-    private const double PreviewOpenDelayMs = 160;
+    private const double PreviewOpenDelayMs = 180;
     private const double PreviewCloseDelayMs = 220;
 
     private readonly FrameworkElement _target;
