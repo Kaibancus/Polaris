@@ -26,7 +26,7 @@ internal enum PreviewPlacement { Above, Below, Right, Left }
 internal sealed class WindowPreviewPopup
 {
     internal const int PreviewThumbWidth = 220;   // px capture width per window
-    private const double PreviewOpenDelayMs = 420;
+    private const double PreviewOpenDelayMs = 160;
     private const double PreviewCloseDelayMs = 220;
 
     private readonly FrameworkElement _target;
@@ -98,6 +98,35 @@ internal sealed class WindowPreviewPopup
             Close();
         _openTimer.Stop();
         _openTimer.Start();
+        PrewarmThumbnails();
+    }
+
+    /// <summary>During the open-delay dwell, enumerate the target's windows and capture their
+    /// thumbnails into the shared cache off the UI thread, so when the popup actually opens its
+    /// tiles render the FRESH frame immediately (TryGetCachedThumbnail hits) instead of popping
+    /// blank/stale and only sharpening once the post-open background capture finishes. Cheap and
+    /// idempotent — the capture loop already writes _thumbCache (thread-safe), and a hover-away
+    /// before the dwell elapses just leaves a warmed cache for next time.</summary>
+    private void PrewarmThumbnails()
+    {
+        Task.Run(() =>
+        {
+            if (!_pointerInside)
+                return;
+            try
+            {
+                var windows = _getWindows();
+                if (windows.Count < _minWindows)
+                    return;
+                foreach (var w in windows)
+                {
+                    if (!_pointerInside)
+                        return;   // pointer left — stop warming the cache
+                    WindowPreviewService.CaptureThumbnail(w.Handle, PreviewThumbWidth);
+                }
+            }
+            catch { /* best-effort warm-up */ }
+        });
     }
 
     /// <summary>Call from the target's MouseLeave.</summary>

@@ -101,6 +101,8 @@
 
 ## ⚡ 性能优化 / 健壮性
 
+- **悬停缩略图预览加载提速（dwell 减半 + dwell 期间预热缩略图）**：用户反馈预览「弹出慢 + 弹出后缩略图先空白/模糊再变清晰」。两处优化（`Views/WindowPreviewPopup.cs`）：①`PreviewOpenDelayMs` 420→160ms，弹窗出现明显更快；②新增 `PrewarmThumbnails`：`OnPointerEnter` 一悬停就在后台（`Task.Run`）枚举该图标的窗口并 `CaptureThumbnail` 抓帧进**线程安全的共享 `_thumbCache`**（`ConcurrentDictionary`），这样 160ms dwell 结束、`OnOpenTimerTick` 用 `TryGetCachedThumbnail` 播种 tile 时**首帧已是新帧**（缓存命中），而非弹出后才开始抓。`_pointerInside` 守护：悬停未满 dwell 就离开则停止预热、只留暖好的缓存供下次用，无 UI 线程访问、不开弹窗。弹出后原有的后台再抓新帧逻辑不变（覆盖预热到弹出之间的窗口内容变化）。
+
 - **拖拽预览图标每帧在渲染线程做同步 shell/磁盘 I/O（code review 发现并修复）**：
   - **现象/根因**：`DrawDragPreview`（拖入预览）每帧执行 `GetBitmap(ctx, key, IconExtractor.GetCached(key, _iconCache))`。`IconExtractor.GetCached` **故意不缓存 null**（为冷启动重试），所以当被拖项图标解析失败时，每帧都重调 `GetIcon`（`SHGetFileInfo`/`ExtractAssociatedIcon` + `File.Exists`）。拖拽以 60–144Hz 渲染 → 每秒数十~上百次同步 shell+磁盘探测**卡在渲染线程上**。最坏场景具体：从**断连网络共享 / 已拔出 U 盘**拖文件，`File.Exists` 每帧阻塞，整个悬停期渲染线程硬卡顿。注意 `GetBitmap` 内部虽把 null 也缓存进 `_bmpCache`，但它作为**实参先求值**，拦不住重复的 `GetIcon`。
   - **修复**：`DrawDragPreview` 先 `_bmpCache.TryGetValue(key, …)`，命中（含 null）直接用，只在 miss 时才走 `GetCached`/`GetBitmap`。因 `_bmpCache` 同时缓存命中与未命中，每个 key 至多解析/探测一次。集中在 `GpuDockBase.DrawDragPreview` 一处（见重构节）。仅影响新引入的拖入预览（原 `DrawDragMarker` 画静态环无图标解析）。
