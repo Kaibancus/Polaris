@@ -2042,6 +2042,7 @@ internal sealed class SideDockWindowGpu : GpuDockBase, IDisposable, ISideDock
         CloseSlotMenu();
         ClosePreview();
         if (_anchorWin != null) { try { _anchorWin.Close(); } catch { } _anchorWin = null; _anchorEl = null; _preview = null; }
+        _calClock?.Dispose(); _calClock = null;
         // Dispose all GPU resources on the render thread (their owner) and wait, then stop +
         // join the render thread, all BEFORE the HWND is destroyed. Inline on the default path.
         InvokeOnRender(DisposeHostResources);
@@ -2471,6 +2472,7 @@ internal sealed class SideDockWindowGpu : GpuDockBase, IDisposable, ISideDock
     private WindowPreviewPopup? _preview;
     private Func<List<WindowPreview>>? _previewSource;
     private int _prevHover = -1;
+    private CalendarClockPopupGpu? _calClock;   // hover popup on the Polaris tile (glass theme)
 
     /// <summary>Names of OTHER pinned shell-namespace folders (This PC, Recycle Bin…) so the
     /// generic File Explorer preview can drop the windows those sibling pins already claim.</summary>
@@ -2506,6 +2508,34 @@ internal sealed class SideDockWindowGpu : GpuDockBase, IDisposable, ISideDock
         return null;
     }
 
+    /// <summary>True for the dock's own Polaris tile in the running strip (the first running
+    /// slot, keyed "polaris:&lt;exe&gt;"). It has no window preview; instead it shows the
+    /// calendar/clock hover popup.</summary>
+    private static bool IsPolarisTile(in Slot s) =>
+        s.Kind == SlotKind.Run && s.IconKey != null
+        && s.IconKey.StartsWith("polaris:", StringComparison.Ordinal);
+
+    /// <summary>Shows the calendar/clock popup above the Polaris tile while it is hovered, and
+    /// hides it otherwise. The popup adopts the dock's theme (liquid glass or feathered Saturn
+    /// black). Called on every hover change from <see cref="DrivePreview"/>.</summary>
+    private void UpdateCalendarClock(int hover)
+    {
+        bool show = hover >= 0 && hover < _slots.Count && IsPolarisTile(_slots[hover]);
+        if (!show)
+        {
+            _calClock?.Hide();
+            return;
+        }
+        var s = _slots[hover];
+        float scale = HoverScale;
+        Vector2 po = PopOffset((scale - 1f) * _gIcon * 1.18f);
+        double size = _gIcon * scale;
+        double cx = _winX + s.Center.X + po.X;
+        double cy = _winY + s.Center.Y + po.Y;
+        _calClock ??= new CalendarClockPopupGpu();
+        _calClock.ShowFor(cx, cy, size, _side, _opacity, _frost, _saturn);
+    }
+
     /// <summary>Called every Tick with the slot under the cursor (or -1). Drives the
     /// reusable thumbnail popup: re-anchors and re-enters on a slot change, leaves on
     /// exit. The popup's own dwell timers handle the open/close delays and the
@@ -2521,6 +2551,7 @@ internal sealed class SideDockWindowGpu : GpuDockBase, IDisposable, ISideDock
         if (_prevHover >= 0)
             _preview?.OnPointerLeave();
         _prevHover = hover;
+        UpdateCalendarClock(hover);
         if (hover < 0 || hover >= _slots.Count)
             return;
         var s = _slots[hover];
@@ -2614,6 +2645,7 @@ internal sealed class SideDockWindowGpu : GpuDockBase, IDisposable, ISideDock
     private void ClosePreview()
     {
         _preview?.Close();
+        _calClock?.Hide();
         _prevHover = -1;
     }
 

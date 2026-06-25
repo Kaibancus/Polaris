@@ -422,6 +422,12 @@
 
 ## ✨ 功能优化 / 新增
 
+- **侧 dock Polaris 图标悬停弹出「台历 + 时钟」浮窗（液态玻璃 + 土星双主题）**：
+  - **需求**：鼠标停留在侧 dock 运行区的 Polaris 图标上时，在图标旁弹出一个包含仿真撕历台历 + 动态指针时钟的窗口，离开即收起。
+  - **实现**：新增 `Views/CalendarClockPopupGpu.cs`——一个独立的 GPU `NOREDIRECTIONBITMAP` 置顶点击穿透窗口（plumbing 仿 `NotchClockWindowGpu`，`CompositionHost` + Direct2D 渲染），由 ~33ms（30fps）`DispatcherTimer` 驱动以让秒针**连续扫动**（分数秒）；隐藏 8s 后释放 GPU 设备（再显示时惰性重建）。内容：**左**＝撕历式台历（红色渐变页头「YYYY 年 M 月」+ 大号日期 + 星期 + 两枚装订环，白纸 + 投影做仿真桌面台历）；**右**＝指针表盘（奶白表面 + 外圈 bezel、60 刻度、12 个数字、时/分/秒针，秒针红色连续扫动，圆头描边 `CapStyle.Round`）。
+  - **主题适配**：背景框随 dock 主题——液态玻璃用共享的 `GlassSlab.DrawGlass`（同 dock 的 opacity/frost，外加高斯模糊投影）；土星用与侧 dock 暗色板一致的近黑 `rgb(6,8,12)`（透明度烘焙进源 alpha）+ 单次高斯模糊**羽化边缘**（同 `PrepareSaturnSilhouette` 手法），不画灰投影。
+  - **接线**：`SideDockWindowGpu` 用 `IsPolarisTile`（运行槽且 `IconKey` 前缀 `polaris:`）在 `DrivePreview`（每次 hover 变化、已 marshal 到 UI 线程）调 `UpdateCalendarClock`：命中即按放大后图标的屏幕坐标 + 停靠边定位（朝屏幕内侧弹出、底部 dock 则在上方，间距 3px 与缩略图预览一致，clamp 到所在显示器），离开/隐藏/重建即收起；`Dispose` 释放。Polaris 图标本无窗口缩略图预览，故此浮窗占用其 hover 反馈。
+
 - **GPU 液态玻璃主 dock 图标放大时的「水珠透镜」效果（移植自重构前 WPF `RadialIcon` HoverGlow）**：
   - **背景**：重构前 WPF 液态玻璃图标 hover 放大时叠加一层水珠/凸透镜质感（`RadialIcon.xaml` 的 `HoverGlow`）；GPU 主 dock 迁移后只放大、缺这层透镜，观感偏「干」。
   - **实现**：`MainDockWindowGpu.DrawIcon` 在画完图标位图后、徽标前插入透镜，**仅液态玻璃**(`!_saturn`，土星有自己的 hover 样式)且 `scale>1` 时绘制。`ctx.Transform=wave` 让透镜随图标一起放大；不透明度 `lensOp=clamp((scale−1)/(MagnifyPeak−1))×opacity`，**随放大程度淡入**（光标正下方焦点图标最强，邻居渐弱），比 WPF 的二值 hover 更连续。4 层 D2D（按 WPF z 序）：①圆顶折射 tint（圆角矩形 + 径向渐变，亮肩 0.36,0.28→透明→冷底）②湿润 rim（圆角矩形描边，左上亮→右下冷）③镜面高光（左上小椭圆径向）④右下焦散光池（椭圆径向）。渐变 `using var stops`/`using var br` 释放（遵循 GlassSlab 的 stops 必须 dispose 防原生泄漏）。
