@@ -143,6 +143,11 @@
 
 ## 🐛 BUG 修复
 
+- **某些窗口（如 Surface「Pen Communication Tool」）无法通过预览的关闭按钮 / 右键「关闭窗口」关闭**：
+  - **现象**：部分应用（实测 `Microsoft.Surface.Pen.GUI`「Pen Communication Tool」）点预览缩略图右上角的关闭按钮、或右键菜单「关闭窗口」都关不掉，窗口纹丝不动。多数普通窗口正常。
+  - **根因**：所有关闭路径（`WindowPreviewPopup` 的关闭按钮、主/侧 dock 右键「关闭窗口」`CloseSlotWindows`）都汇聚到 `WindowPreviewService.CloseWindow`，它用的是**阻塞式 `SendMessageW(hWnd, WM_CLOSE)`**。跨进程**同步发送**的 WM_CLOSE 既会把 Polaris UI 线程**阻塞**到目标关完为止，又对某些应用**不可靠**——尤其 **WPF 窗口**（`HwndWrapper[...]` / HwndSource 消息泵）只对**投递（Post）**的 WM_CLOSE 走 `Window.Closing/Close` 关闭流程（与任务栏「关闭窗口」、标题栏 X 一致），却可能忽略**同步发送**的那一条。实测该工具是**中完整性**（`S-1-16-8192`，与 Polaris 同级，非提权 → 非 UIPI 问题）：对其主窗口 `SendMessage(WM_CLOSE)` 无效，而 `PostMessage(WM_CLOSE)` 即刻关闭（窗口销毁、进程退出）。
+  - **修复**：`CloseWindow` 改用**非阻塞的 `PostMessageW(hWnd, WM_CLOSE, …)`**（新增该 P/Invoke 声明）。投递即返回、不阻塞 UI 线程，且与任务栏/标题栏 X 同路径，覆盖 WPF 等对同步 WM_CLOSE 不响应的应用。关闭按钮与右键「关闭窗口」两条路径共用此方法，一并修复。（WM_GETICON 等同步查询仍保留 `SendMessageW`，不受影响。）
+
 - **悬停 Polaris 图标弹出日历/钟表时，上一个图标的缩略图预览变空白并延迟关闭（GPU）**：
   - **现象**：鼠标从某个运行中应用的图标（已弹出窗口缩略图预览）移到侧 dock 运行区的 **Polaris 图标**、弹出日历/钟表时，**旧的缩略图预览先变成空白，再延迟一段时间才关闭**。
   - **根因**：`SideDockWindowGpu.DrivePreview` 在 hover 变化时先对上一个图标 `OnPointerLeave()`（启动 220ms 关闭 dwell），再 `UpdateCalendarClock` 弹出日历/钟表——但**没有为 Polaris 图标短路缩略图预览逻辑**。Polaris 图标是 `SlotKind.Run` 且带 `RunPath`，故 `PreviewSourceFor` 返回**非空**（指向 Polaris 自己的窗口列表），于是 `DrivePreview` 继续 `AnchorOverSlot` + `_preview.OnPointerEnter()`，把**共享的**缩略图弹窗**重定向到 Polaris 自身（实际为空）的窗口列表**：`OnPointerEnter` 立即关掉旧内容、150ms 后以空列表重开 → 旧预览先空白、再随 dwell 滞留。（`IsPolarisTile` 注释本就声明 Polaris tile「无窗口预览、只显示日历/钟表」，是 `DrivePreview` 漏判。）
@@ -434,7 +439,7 @@
 
 ## ✨ 功能优化 / 新增
 
-- **日历/时钟弹窗增加淡入淡出（GPU）**：Polaris 图标的日历/时钟浮窗原先瞬时显隐。改为整窗在 GPU 合成器上**淡入淡出**——复用 `CompositionHost.SetIntro` 的 `IDCompositionVisual3.SetOpacity`，由既有 ~33ms 计时器按真实流逝时间把整窗不透明度缓动到目标（淡入 150ms / 淡出 120ms，短促不拖沓）。显示前先 `SetIntro(0,0,0)` 提交透明首帧再 `SW_SHOWNOACTIVATE`，避免「整窗全不透明地弹出」（同主/侧 dock 的预显 `SetIntro` 手法）；`Hide` 改为**延迟隐藏**——置目标 0、保持计时器驱动淡出，待不透明度归零后才真正 `SW_HIDE` 并停表（惰性 GPU 释放计时器照常 8s 后回收）。淡出途中再次悬停 Polaris 会从当前不透明度直接淡回，不闪。`AdvanceFade` 在全显示态(opacity==target)为空操作，不增加常显时的提交开销。
+- **日历/时钟弹窗增加淡入淡出（GPU）**：Polaris 图标的日历/时钟浮窗原先瞬时显隐。改为整窗在 GPU 合成器上**淡入淡出**——复用 `CompositionHost.SetIntro` 的 `IDCompositionVisual3.SetOpacity`，由既有 ~33ms 计时器按真实流逝时间把整窗不透明度缓动到目标（淡入 180ms / 淡出 150ms，短促不拖沓）。显示前先 `SetIntro(0,0,0)` 提交透明首帧再 `SW_SHOWNOACTIVATE`，避免「整窗全不透明地弹出」（同主/侧 dock 的预显 `SetIntro` 手法）；`Hide` 改为**延迟隐藏**——置目标 0、保持计时器驱动淡出，待不透明度归零后才真正 `SW_HIDE` 并停表（惰性 GPU 释放计时器照常 8s 后回收）。淡出途中再次悬停 Polaris 会从当前不透明度直接淡回，不闪。`AdvanceFade` 在全显示态(opacity==target)为空操作，不增加常显时的提交开销。
 
 - **侧 dock Polaris 图标悬停弹出「台历 + 时钟」浮窗（液态玻璃 + 土星双主题）**：
   - **需求**：鼠标停留在侧 dock 运行区的 Polaris 图标上时，在图标旁弹出一个包含仿真撕历台历 + 动态指针时钟的窗口，离开即收起。

@@ -78,6 +78,10 @@ public static class WindowPreviewService
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern IntPtr SendMessageW(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
 
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool PostMessageW(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+
     private const uint WM_CLOSE = 0x0010;
 
     // Window-icon retrieval — exactly how the taskbar gets a tile's glyph: ask the
@@ -1397,7 +1401,14 @@ public static class WindowPreviewService
             return;
         try
         {
-            SendMessageW(hWnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+            // POST (don't SEND) WM_CLOSE. A blocking cross-process SendMessage(WM_CLOSE)
+            // both stalls Polaris's UI thread until the target finishes closing AND is
+            // unreliable for some apps: WPF windows (HwndSource message pump) in particular
+            // close on a POSTED WM_CLOSE — exactly like the taskbar's "Close window" and the
+            // title-bar X — but can ignore a synchronously SENT one, so e.g. the Surface "Pen
+            // Communication Tool" could not be closed from the preview's X / right-click menu.
+            // PostMessage queues it like a real close and returns immediately.
+            PostMessageW(hWnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
         }
         catch
         {

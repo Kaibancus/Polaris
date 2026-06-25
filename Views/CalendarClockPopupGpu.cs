@@ -28,7 +28,7 @@ internal sealed class CalendarClockPopupGpu : IDisposable
     private const float Pad = 16f;
     private const float CardW = 268f, CardH = 150f, CornerR = 15f, Gap = 3f;
     // Whole-popup fade durations (ms) on the GPU compositor. Short — a brief soften, not a drag.
-    private const float FadeInMs = 150f, FadeOutMs = 120f;
+    private const float FadeInMs = 180f, FadeOutMs = 150f;
     private static readonly int WinW = (int)(CardW + Pad * 2);
     private static readonly int WinH = (int)(CardH + Pad * 2);
 
