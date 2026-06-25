@@ -4,9 +4,11 @@ using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 using System.Windows;
 using System.Windows.Interop;
 using System.Windows.Media.Imaging;
+using System.Windows.Threading;
 using Drawing = System.Drawing;
 
 namespace Polaris.Services;
@@ -78,11 +80,15 @@ public static class WindowPreviewService
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern IntPtr SendMessageW(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
 
+    // Closes a window the same way the taskbar's "Close window" does: the request is
+    // routed through the window manager (CSRSS), which lets it BYPASS UIPI and reach
+    // higher-integrity (elevated) windows that a plain PostMessage/SendMessage from a
+    // Medium-integrity process can't. fForce=FALSE delivers a polite WM_CLOSE (no
+    // forced terminate) so the app still runs its normal close / save path.
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool PostMessageW(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
-
-    private const uint WM_CLOSE = 0x0010;
+    private static extern bool EndTask(IntPtr hWnd, [MarshalAs(UnmanagedType.Bool)] bool fShutDown,
+        [MarshalAs(UnmanagedType.Bool)] bool fForce);
 
     // Window-icon retrieval — exactly how the taskbar gets a tile's glyph: ask the
     // window itself (WM_GETICON), then fall back to its window-class icon. This
@@ -1399,20 +1405,70 @@ public static class WindowPreviewService
     {
         if (hWnd == IntPtr.Zero)
             return;
+        // Mirror the taskbar's "Close window" by routing the close through EndTask
+        // instead of a plain PostMessage(WM_CLOSE). EndTask asks the window manager
+        // (CSRSS) to deliver the close, which BYPASSES UIPI — so it also closes
+        // higher-integrity (elevated) windows. A Medium-integrity Polaris posting
+        // WM_CLOSE to a High-integrity app (e.g. NetEase UU 加速器) is silently
+        // dropped by UIPI, leaving the window open; the taskbar avoids this with
+        // EndTask, so we do too. EndTask(hwnd, FALSE, FALSE) sends a polite WM_CLOSE
+        // (no forced terminate), so the app still runs its normal close / save path
+        // — verified to close a High-integrity window from a Medium-integrity caller
+        // where PostMessage was a no-op, while a responsive window exits cleanly.
+        //
+        // EndTask must be called from a GUI thread (one with a message queue): from a
+        // thread-pool or plain background thread it fails with ERROR_INVALID_HANDLE
+        // (verified). It can also block until the target acknowledges (or times out),
+        // which would stall the UI thread. So we marshal it onto a dedicated private
+        // STA message-pump thread — a GUI thread that absorbs any blocking off the
+        // dock's UI thread. InvokeAsync returns immediately.
         try
         {
-            // POST (don't SEND) WM_CLOSE. A blocking cross-process SendMessage(WM_CLOSE)
-            // both stalls Polaris's UI thread until the target finishes closing AND is
-            // unreliable for some apps: WPF windows (HwndSource message pump) in particular
-            // close on a POSTED WM_CLOSE — exactly like the taskbar's "Close window" and the
-            // title-bar X — but can ignore a synchronously SENT one, so e.g. the Surface "Pen
-            // Communication Tool" could not be closed from the preview's X / right-click menu.
-            // PostMessage queues it like a real close and returns immediately.
-            PostMessageW(hWnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+            EnsureCloseDispatcher().InvokeAsync(() =>
+            {
+                try { EndTask(hWnd, false, false); }
+                catch { /* best effort */ }
+            });
         }
         catch
         {
-            // Best effort.
+            // Best effort; if the close thread can't be spun up, the window stays open.
+        }
+    }
+
+    private static Dispatcher? _closeDispatcher;
+    private static readonly object _closeDispatcherLock = new();
+
+    /// <summary>Lazily starts (and returns) a dedicated STA thread running a WPF
+    /// <see cref="Dispatcher"/> message loop, used solely to run <c>EndTask</c>.
+    /// <c>EndTask</c> requires a GUI (message-queue) thread, and may block until the
+    /// target window acknowledges the close, so it must run neither on the thread pool
+    /// (invalid-handle failure) nor on the dock's own UI thread (would stall it). This
+    /// pump thread satisfies both constraints and is created at most once.</summary>
+    private static Dispatcher EnsureCloseDispatcher()
+    {
+        var existing = _closeDispatcher;
+        if (existing != null)
+            return existing;
+        lock (_closeDispatcherLock)
+        {
+            if (_closeDispatcher != null)
+                return _closeDispatcher;
+            using var ready = new ManualResetEventSlim(false);
+            var thread = new Thread(() =>
+            {
+                _closeDispatcher = Dispatcher.CurrentDispatcher;
+                ready.Set();
+                Dispatcher.Run();
+            })
+            {
+                IsBackground = true,
+                Name = "PolarisWindowClose",
+            };
+            thread.SetApartmentState(ApartmentState.STA);
+            thread.Start();
+            ready.Wait();
+            return _closeDispatcher!;
         }
     }
 

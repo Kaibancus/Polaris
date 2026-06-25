@@ -152,6 +152,17 @@
   - **现象**：部分应用（实测 `Microsoft.Surface.Pen.GUI`「Pen Communication Tool」）点预览缩略图右上角的关闭按钮、或右键菜单「关闭窗口」都关不掉，窗口纹丝不动。多数普通窗口正常。
   - **根因**：所有关闭路径（`WindowPreviewPopup` 的关闭按钮、主/侧 dock 右键「关闭窗口」`CloseSlotWindows`）都汇聚到 `WindowPreviewService.CloseWindow`，它用的是**阻塞式 `SendMessageW(hWnd, WM_CLOSE)`**。跨进程**同步发送**的 WM_CLOSE 既会把 Polaris UI 线程**阻塞**到目标关完为止，又对某些应用**不可靠**——尤其 **WPF 窗口**（`HwndWrapper[...]` / HwndSource 消息泵）只对**投递（Post）**的 WM_CLOSE 走 `Window.Closing/Close` 关闭流程（与任务栏「关闭窗口」、标题栏 X 一致），却可能忽略**同步发送**的那一条。实测该工具是**中完整性**（`S-1-16-8192`，与 Polaris 同级，非提权 → 非 UIPI 问题）：对其主窗口 `SendMessage(WM_CLOSE)` 无效，而 `PostMessage(WM_CLOSE)` 即刻关闭（窗口销毁、进程退出）。
   - **修复**：`CloseWindow` 改用**非阻塞的 `PostMessageW(hWnd, WM_CLOSE, …)`**（新增该 P/Invoke 声明）。投递即返回、不阻塞 UI 线程，且与任务栏/标题栏 X 同路径，覆盖 WPF 等对同步 WM_CLOSE 不响应的应用。关闭按钮与右键「关闭窗口」两条路径共用此方法，一并修复。（WM_GETICON 等同步查询仍保留 `SendMessageW`，不受影响。）
+  - **后续（更彻底）**：见下一条——`PostMessage(WM_CLOSE)` 对**高完整性（提权）窗口**仍被 UIPI 拦截，最终改用 `EndTask` 彻底解决。
+
+- **提权应用（如网易 UU 加速器）无法通过预览关闭按钮 / 右键「关闭窗口」关闭**：
+  - **现象**：UU 加速器（绿灯、预览均正常）点预览关闭按钮或右键「关闭窗口」都关不掉，窗口纹丝不动；而 **Windows 任务栏右键「关闭窗口」能关**。上一条改的 `PostMessage(WM_CLOSE)` 对它无效。
+  - **根因**（实测确认）：**UIPI（User Interface Privilege Isolation）**。实测 `uu.exe` 是**高完整性**（`High`/`0x3000`，以管理员运行），而 Polaris 经 explorer 启动是**中完整性**（`Medium`/`0x2000`）。中 → 高的 `PostMessage(WM_CLOSE)` 被 UIPI **静默丢弃**（PostMessage 返回成功但消息被丢），所以窗口不关。任务栏（explorer 同为中完整性）能关，是因为它**不走窗口消息**，而是调用 `EndTask`——该 API 经由窗口管理器（CSRSS）发起关闭请求，**绕过 UIPI**，故能关高完整性窗口。
+  - **隔离验证**（自建 High 测试窗口 + 经 explorer 启动的 Medium 关闭工具，不碰 UU）：
+    - Medium→High `PostMessage(WM_CLOSE)` → 窗口 **STILL OPEN**（复现 UU 症状）；
+    - Medium→High `EndTask(hwnd,false,false)` → **CLOSED**，且测试窗口走正常 WM_CLOSE 流程优雅退出（非强杀）；
+    - 进一步实测 `EndTask` **必须在 GUI（有消息队列）线程调用**：线程池线程、普通新建后台线程上调用均返回 `False` 且 `GetLastError=6`（`ERROR_INVALID_HANDLE`）、窗口不关；主线程 / 专用消息泵线程上成功。
+  - **修复**：`CloseWindow` 改用 **`EndTask(hWnd, FALSE, FALSE)`**（礼貌关闭，不强杀，与任务栏「关闭窗口」一致），并把它**投递到一个专用的 STA + `Dispatcher` 消息泵后台线程**执行——既满足「必须 GUI 线程」（消息泵线程是 GUI 线程），又把 `EndTask` 对无响应窗口的潜在阻塞挡在 UI 线程之外（`InvokeAsync` 立即返回）。该 close-dispatcher 线程懒启动、全程仅一个。移除不再使用的 `PostMessageW` 声明与 `WM_CLOSE` 常量。
+  - **端到端验证**：用编译后的 `Polaris.dll`，从经 explorer 启动的 **Medium** 进程反射调用 `WindowPreviewService.CloseWindow(hwnd)`，成功关闭 **High** 测试窗口（`before=True after=False => CLOSED`）。彻底解决所有「比 Polaris 完整性更高的提权应用」无法从预览关闭的问题，不止 UU 一例。
 
 - **悬停 Polaris 图标弹出日历/钟表时，上一个图标的缩略图预览变空白并延迟关闭（GPU）**：
   - **现象**：鼠标从某个运行中应用的图标（已弹出窗口缩略图预览）移到侧 dock 运行区的 **Polaris 图标**、弹出日历/钟表时，**旧的缩略图预览先变成空白，再延迟一段时间才关闭**。
