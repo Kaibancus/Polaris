@@ -2555,6 +2555,19 @@ internal sealed class SideDockWindowGpu : GpuDockBase, IDisposable, ISideDock
         if (hover < 0 || hover >= _slots.Count)
             return;
         var s = _slots[hover];
+        // The Polaris tile shows the calendar/clock popup instead of a window
+        // thumbnail preview (see IsPolarisTile). Don't drive the thumbnail popup
+        // for it: PreviewSourceFor would return Polaris's OWN (effectively empty)
+        // window list, so OnPointerEnter below would re-target the shared popup to
+        // it — blanking the previous tile's thumbnails and letting the emptied
+        // popup linger through the close delay. The pointer has definitively
+        // landed on another icon, so close any open preview at once and show only
+        // the clock.
+        if (IsPolarisTile(s))
+        {
+            _preview?.Close();
+            return;
+        }
         var src = PreviewSourceFor(s);
         if (src == null)
             return;

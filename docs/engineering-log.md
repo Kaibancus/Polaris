@@ -143,6 +143,11 @@
 
 ## 🐛 BUG 修复
 
+- **悬停 Polaris 图标弹出日历/钟表时，上一个图标的缩略图预览变空白并延迟关闭（GPU）**：
+  - **现象**：鼠标从某个运行中应用的图标（已弹出窗口缩略图预览）移到侧 dock 运行区的 **Polaris 图标**、弹出日历/钟表时，**旧的缩略图预览先变成空白，再延迟一段时间才关闭**。
+  - **根因**：`SideDockWindowGpu.DrivePreview` 在 hover 变化时先对上一个图标 `OnPointerLeave()`（启动 220ms 关闭 dwell），再 `UpdateCalendarClock` 弹出日历/钟表——但**没有为 Polaris 图标短路缩略图预览逻辑**。Polaris 图标是 `SlotKind.Run` 且带 `RunPath`，故 `PreviewSourceFor` 返回**非空**（指向 Polaris 自己的窗口列表），于是 `DrivePreview` 继续 `AnchorOverSlot` + `_preview.OnPointerEnter()`，把**共享的**缩略图弹窗**重定向到 Polaris 自身（实际为空）的窗口列表**：`OnPointerEnter` 立即关掉旧内容、150ms 后以空列表重开 → 旧预览先空白、再随 dwell 滞留。（`IsPolarisTile` 注释本就声明 Polaris tile「无窗口预览、只显示日历/钟表」，是 `DrivePreview` 漏判。）
+  - **修复**：在 `DrivePreview` 中 `UpdateCalendarClock` 之后、驱动缩略图之前增加 `IsPolarisTile(s)` 短路：命中即 `_preview?.Close()` **立即关闭**旧预览并 `return`，绝不把共享弹窗重定向到 Polaris 的空窗口列表。立即关闭（而非仅靠 `OnPointerLeave` 的 220ms dwell）与「切到另一个图标即刻关旧预览」的既有语义一致——指针已明确落在另一个图标（Polaris）上，无「移向预览窗」可能。仅显示日历/钟表，旧预览不再空白、不再滞留。`PollAttention` 对 Polaris 的同一枚举仅用于检测闪烁、空列表无害，不受影响。
+
 - **多屏：鼠标无法移动到副屏的两侧，被阻挡（低概率、难复现）**：
   - **现象**：多显示器下，鼠标偶发无法移到**副屏的左右两侧**，像被一道竖直的墙挡住；概率很低、难稳定复现。
   - **根因**：`TaskbarGuard` 的轮询线程 `ClipCursor` 防护墙。该墙仅在「任务栏自动隐藏 + 侧 dock 底部停靠 + 光标处于某屏底边中央 50% 带（`CentreBandEdgeFraction=0.25`）+ 该屏下方无相邻屏（`HasNeighborBelow` 为假）」时启用，用来把光标挡在底边上方 `TaskbarGuardRows=3` 行内、避免误触自动隐藏任务栏。该 clip 矩形的 `Top` 早已扩到**整个虚拟桌面顶**（以放行向上跨屏），但 `Left`/`Right` 仍被限制在**当前显示器**（`mi.rcMonitor.Left/Right`）→ 光标一旦进入某屏中央带，就被这道墙**水平锁死在该屏内**，无法越过左右边缘到相邻屏。因触发条件苛刻（必须正好落在中央带 X 区间且满足上述全部前提），故低概率、难复现。
