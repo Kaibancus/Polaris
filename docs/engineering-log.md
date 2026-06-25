@@ -434,6 +434,8 @@
 
 ## ✨ 功能优化 / 新增
 
+- **日历/时钟弹窗增加淡入淡出（GPU）**：Polaris 图标的日历/时钟浮窗原先瞬时显隐。改为整窗在 GPU 合成器上**淡入淡出**——复用 `CompositionHost.SetIntro` 的 `IDCompositionVisual3.SetOpacity`，由既有 ~33ms 计时器按真实流逝时间把整窗不透明度缓动到目标（淡入 150ms / 淡出 120ms，短促不拖沓）。显示前先 `SetIntro(0,0,0)` 提交透明首帧再 `SW_SHOWNOACTIVATE`，避免「整窗全不透明地弹出」（同主/侧 dock 的预显 `SetIntro` 手法）；`Hide` 改为**延迟隐藏**——置目标 0、保持计时器驱动淡出，待不透明度归零后才真正 `SW_HIDE` 并停表（惰性 GPU 释放计时器照常 8s 后回收）。淡出途中再次悬停 Polaris 会从当前不透明度直接淡回，不闪。`AdvanceFade` 在全显示态(opacity==target)为空操作，不增加常显时的提交开销。
+
 - **侧 dock Polaris 图标悬停弹出「台历 + 时钟」浮窗（液态玻璃 + 土星双主题）**：
   - **需求**：鼠标停留在侧 dock 运行区的 Polaris 图标上时，在图标旁弹出一个包含仿真撕历台历 + 动态指针时钟的窗口，离开即收起。
   - **实现**：新增 `Views/CalendarClockPopupGpu.cs`——一个独立的 GPU `NOREDIRECTIONBITMAP` 置顶点击穿透窗口（plumbing 仿 `NotchClockWindowGpu`，`CompositionHost` + Direct2D 渲染），由 ~33ms（30fps）`DispatcherTimer` 驱动以让秒针**连续扫动**（分数秒）；隐藏 8s 后释放 GPU 设备（再显示时惰性重建）。内容：**左**＝撕历式台历（红色渐变页头「YYYY 年 M 月」+ 大号日期 + 星期 + 两枚装订环，白纸 + 投影做仿真桌面台历）；**右**＝指针表盘（奶白表面 + 外圈 bezel、60 刻度、12 个数字、时/分/秒针，秒针红色连续扫动，圆头描边 `CapStyle.Round`）。

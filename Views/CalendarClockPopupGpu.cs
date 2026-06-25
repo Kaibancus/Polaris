@@ -27,6 +27,8 @@ internal sealed class CalendarClockPopupGpu : IDisposable
     // shadow has room to bleed.
     private const float Pad = 16f;
     private const float CardW = 268f, CardH = 150f, CornerR = 15f, Gap = 3f;
+    // Whole-popup fade durations (ms) on the GPU compositor. Short — a brief soften, not a drag.
+    private const float FadeInMs = 150f, FadeOutMs = 120f;
     private static readonly int WinW = (int)(CardW + Pad * 2);
     private static readonly int WinH = (int)(CardH + Pad * 2);
 
@@ -45,12 +47,15 @@ internal sealed class CalendarClockPopupGpu : IDisposable
     private readonly DispatcherTimer _releaseTimer;
     private bool _built;
     private bool _visible;
+    private float _opacity;              // current composited opacity of the whole popup (0..1)
+    private float _opacityTarget = 1f;   // 1 while shown, 0 while fading out
+    private long _lastFadeTick;          // Environment.TickCount64 at the last fade step
 
     public CalendarClockPopupGpu()
     {
         // ~30fps so the second hand sweeps smoothly (the notch clock's 1s tick would jump).
         _timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(33) };
-        _timer.Tick += (_, _) => Render();
+        _timer.Tick += (_, _) => Tick();
         // Free the GPU device once hidden past the delay; a re-show within it cancels the release.
         _releaseTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(8) };
         _releaseTimer.Tick += (_, _) => { _releaseTimer.Stop(); if (!_visible) ReleaseGpu(); };
@@ -109,12 +114,21 @@ internal sealed class CalendarClockPopupGpu : IDisposable
             int pw = (int)Math.Ceiling(WinW * _dpi), ph = (int)Math.Ceiling(WinH * _dpi);
             int x = (int)Math.Round(winLeft * _dpi), y = (int)Math.Round(winTop * _dpi);
             Win32.SetWindowPos(_hwnd, Win32.HWND_TOPMOST, x, y, pw, ph, Win32.SWP_NOACTIVATE);
-            if (!_visible)
+            bool firstShow = !_visible;
+            if (firstShow)
+                _opacity = 0f;              // start transparent; the timer eases it in
+            _opacityTarget = 1f;
+            Render();
+            // Seed the visual's opacity (0 on a fresh show, or wherever a fade-out left it) and
+            // commit it BEFORE the window becomes visible, so its first composited frame is at the
+            // fade-in start instead of popping in fully opaque (mirrors the docks' pre-show SetIntro).
+            _host?.SetIntro(0f, 0f, _opacity);
+            if (firstShow)
             {
                 Win32.ShowWindow(_hwnd, Win32.SW_SHOWNOACTIVATE);
                 _visible = true;
             }
-            Render();
+            _lastFadeTick = Environment.TickCount64;
             _timer.Start();
         }
         catch (Exception ex) { Log.Warn("CalClockGpu", "show failed: " + ex.Message); }
@@ -122,14 +136,65 @@ internal sealed class CalendarClockPopupGpu : IDisposable
 
     public void Hide()
     {
-        _timer.Stop();
-        if (_visible)
-        {
-            Win32.ShowWindow(_hwnd, Win32.SW_HIDE);
-            _visible = false;
-        }
         _releaseTimer.Stop();
         _releaseTimer.Start();
+        if (!_visible)
+        {
+            _timer.Stop();
+            return;
+        }
+        // Fade out on the compositor, then SW_HIDE once the opacity reaches 0 (in AdvanceFade);
+        // keep the render timer running to drive the fade. If the GPU device is already gone
+        // there is nothing to fade, so hide at once.
+        _opacityTarget = 0f;
+        _lastFadeTick = Environment.TickCount64;
+        if (_host == null)
+        {
+            _timer.Stop();
+            Win32.ShowWindow(_hwnd, Win32.SW_HIDE);
+            _visible = false;
+            return;
+        }
+        if (!_timer.IsEnabled)
+            _timer.Start();
+    }
+
+    /// <summary>Timer tick: redraw (sweeping clock) then advance the fade.</summary>
+    private void Tick()
+    {
+        Render();
+        AdvanceFade();
+    }
+
+    /// <summary>Eases the whole-popup composited opacity toward its target (1 shown, 0 hiding)
+    /// each tick using real elapsed time, so the card fades on the GPU compositor rather than
+    /// popping. When a fade-out reaches 0 the window is hidden and the render timer stops (the
+    /// lazy GPU-release timer, started in Hide, then frees the device).</summary>
+    private void AdvanceFade()
+    {
+        if (_host == null)
+            return;
+        long now = Environment.TickCount64;
+        float dt = Math.Max(0f, now - _lastFadeTick);
+        _lastFadeTick = now;
+        if (_opacity != _opacityTarget)
+        {
+            float dur = _opacityTarget > _opacity ? FadeInMs : FadeOutMs;
+            float step = dur <= 0f ? 1f : dt / dur;
+            _opacity = _opacityTarget > _opacity
+                ? Math.Min(_opacityTarget, _opacity + step)
+                : Math.Max(_opacityTarget, _opacity - step);
+            _host.SetIntro(0f, 0f, _opacity);
+        }
+        if (_opacityTarget <= 0f && _opacity <= 0.001f)
+        {
+            _timer.Stop();
+            if (_visible)
+            {
+                Win32.ShowWindow(_hwnd, Win32.SW_HIDE);
+                _visible = false;
+            }
+        }
     }
 
     public bool IsVisible => _visible;
