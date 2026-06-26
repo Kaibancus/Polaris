@@ -97,6 +97,21 @@
   - **验证**：用编译后程序集实测 `GetWindowsForEntry("shell:AppsFolder\IQIYI.Inc.PCClient")` 由返回 0 窗口
     变为返回 1 个窗口（hwnd 0x1504B6，标题「爱奇艺」），即任务栏所预览的同一窗口。
 
+### 提权（高完整性）窗口的两个固有限制：无法通过预览前置/打开、关闭时会弹「结束程序」对话框
+- **背景**：Polaris 经 explorer 启动为**中完整性（Medium）**；提权应用（管理员终端、UU 加速器等）是**高完整性（High）**。
+  Windows 的 **UIPI（User Interface Privilege Isolation）** 禁止低完整性进程向高完整性窗口发送会改变其状态的输入/消息。
+- **限制 ①：无法通过预览「前置 / 打开」高权限窗口（典型：管理员终端）**：点击悬停预览试图把提权窗口前置时，
+  `SetForegroundWindow` 被 UIPI 拒绝、跨完整性 `AttachThreadInput` 失败。兜底的 `SwitchToThisWindow` 能前置**多数**
+  提权窗口（如任务管理器），但 **Windows Terminal 的 `CASCADIA_HOSTING_WINDOW_CLASS` 现代窗口对该 API 不响应**
+  （句柄解析正确，是窗口自身特性）→ 管理员终端等仍无法从预览前置/打开。
+- **限制 ②：关闭提权窗口会弹出「结束程序」对话框，并非无感关闭**：关闭走 `EndTask(hwnd,false,false)`（与任务栏「关闭窗口」
+  同路径，经 CSRSS 绕过 UIPI、礼貌 WM_CLOSE 不强杀），**能关掉**高完整性窗口；但若目标未在超时内自行销毁窗口，
+  系统会弹出标准的「结束程序 / End Program」对话框——这与**任务栏关闭同款行为**，是 `EndTask` 的系统级表现，Polaris 无法消除。
+- **彻底解法（均超出中完整性 dev 构建范围，故列为已知限制）**：① 给 Polaris 加 **UIAccess**（exe 数字签名 + 安装到
+  `Program Files`，清单 `uiAccess="true"`）即可豁免 UIPI、前置任意窗口；② 或**提权运行 Polaris**（但会破坏从 Explorer 的
+  drag-drop 拖拽添加）。在未签名 / 非 Program Files 的开发构建下，①②都不可行 → 上述两条为当前固有限制。
+- **GitHub Issue**：已登记为长期跟踪的 known issue → [Kaibancus/Desktop_dock#1](https://github.com/Kaibancus/Desktop_dock/issues/1)。
+
 ---
 
 ## ⚡ 性能优化 / 健壮性
