@@ -123,7 +123,7 @@ public partial class App : Application
     private static readonly TimeSpan AmbientStillDelay = TimeSpan.FromMilliseconds(700);
 
     // Masks the system auto-hide taskbar's reveal trigger under the bottom
-    // side-dock's centre-50% activation band. Self-contained subsystem (own hook
+    // side-dock's centre-60% activation band. Self-contained subsystem (own hook
     // thread + message loop + poll thread); the edge poll only toggles its
     // Active flag. See Services/TaskbarGuard.cs.
     private readonly Polaris.Services.TaskbarGuard _taskbarGuard = new();
@@ -567,7 +567,7 @@ public partial class App : Application
             }
 
             const double Reach = 10.0;       // edge sensitivity in DIPs
-            const double Band = 0.25;        // exclude the outer 25% at each end
+            const double Band = 0.20;        // exclude the outer 20% at each end
             const double Edge = 2.0;         // tiny outward over-travel; keeps the trigger / keep-shown
                                              // band from extending across the screen edge onto an
                                              // adjacent monitor (the multi-monitor "won't hide" bug)
@@ -575,7 +575,7 @@ public partial class App : Application
             double bandH = mon.Width * Band;
 
             // Trigger band: a strip along the dock's anchored edge, covering the
-            // centre 50% of that edge. The threshold is generous (and a touch of
+            // centre 60% of that edge. The threshold is generous (and a touch of
             // over-travel past the physical edge also counts) so the dock pops
             // without landing the pointer exactly on the edge. The outward side is
             // bounded by the monitor edge (+Edge) so a point on a neighbouring
@@ -707,6 +707,15 @@ public partial class App : Application
         if (now - _lastIdleTrim < IdleTrimInterval)
             return;
 
+        // Release the preview thumbnail bitmaps (the largest cached MANAGED bitmaps)
+        // as part of the idle pass, BEFORE trimming the working set, so their RAM is
+        // actually freed instead of paged out only to fault back on the next hover.
+        // Safe here: the idle trim only runs once Polaris is passive (main dock hidden
+        // AND the cursor isn't over the side dock / settings), so no preview is reading
+        // the cache. TrimThumbCacheForHide keeps minimized windows' last frames and
+        // drops re-capturable (visible / closed) ones, which the popup's prewarm
+        // re-captures on the next hover — so this is lossless.
+        WindowPreviewService.TrimThumbCacheForHide();
         MemoryTrimmer.TrimWorkingSet();
         _lastIdleTrim = now;
     }

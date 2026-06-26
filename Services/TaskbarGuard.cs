@@ -7,7 +7,7 @@ namespace Polaris.Services;
 
 /// <summary>
 /// Masks the system auto-hide taskbar's reveal trigger under the bottom
-/// side-dock's centre-50% activation band. The auto-hide bar only slides up when
+/// side-dock's centre-60% activation band. The auto-hide bar only slides up when
 /// the cursor reaches the monitor's bottom-edge pixels; holding the cursor a few
 /// rows above that edge across the dock's centre band (and swallowing the edge
 /// move) lets the dock pop there while the taskbar stays hidden. The outer 50% at
@@ -329,9 +329,9 @@ internal sealed class TaskbarGuard
 
     private const int WH_MOUSE_LL = 14;
     // Fraction of a monitor's width excluded at EACH end when defining the guarded
-    // "centre band": 0.25 leaves the central 50% guarded and the outer 50% free to
+    // "centre band": 0.20 leaves the central 60% guarded and the outer 40% free to
     // summon the taskbar. Must mirror the side dock's bottom-edge trigger band.
-    private const double CentreBandEdgeFraction = 0.25;
+    private const double CentreBandEdgeFraction = 0.20;
     // Pixel rows above the monitor's bottom edge that the cursor is held clear of
     // inside the centre band, so the auto-hide taskbar's reveal tolerance never
     // fires there. Stays below the dock's edge reach so the dock still pops.

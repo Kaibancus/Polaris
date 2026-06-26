@@ -26,9 +26,9 @@ internal sealed class CalendarClockPopupGpu : IDisposable
     // Card + window geometry (DIP). The window is padded around the card so the soft drop
     // shadow has room to bleed.
     private const float Pad = 16f;
-    private const float CardW = 268f, CardH = 150f, CornerR = 15f, Gap = 3f;
+    private const float CardW = 252f, CardH = 136f, CornerR = 15f, Gap = 3f;
     // Whole-popup fade durations (ms) on the GPU compositor. Short — a brief soften, not a drag.
-    private const float FadeInMs = 200f, FadeOutMs = 170f;
+    private const float FadeInMs = 210f, FadeOutMs = 180f;
     private static readonly int WinW = (int)(CardW + Pad * 2);
     private static readonly int WinH = (int)(CardH + Pad * 2);
 
@@ -318,7 +318,11 @@ internal sealed class CalendarClockPopupGpu : IDisposable
     /// strip with the year/month, the big day number, the weekday, and two metal binding rings.</summary>
     private void DrawCalendar(ID2D1DeviceContext ctx, float cardX, float cardY)
     {
-        float px = cardX + 13f, py = cardY + 18f, pw = 104f, pht = CardH - 36f;
+        // Calendar page keeps a FIXED size (104x114) independent of CardH, so it stays the same
+        // when the card shrinks; it just sits closer to the card edges (smaller margins). Centred
+        // vertically in the card.
+        float pw = 104f, pht = 114f;
+        float px = cardX + 10f, py = cardY + (CardH - pht) / 2f;
         float hdrH = 33f;
         var ci = CultureInfo.GetCultureInfo("zh-CN");
         var now = DateTime.Now;
@@ -371,7 +375,9 @@ internal sealed class CalendarClockPopupGpu : IDisposable
     /// continuously (fractional seconds), so it glides rather than ticks.</summary>
     private void DrawClock(ID2D1DeviceContext ctx, float cardX, float cardY)
     {
-        float cx = cardX + CardW - 76f, cy = cardY + CardH / 2f, R = 56f;
+        // Clock keeps its radius (size unchanged); only its centre shifts so it hugs the smaller
+        // card's right edge (right margin ~9px instead of ~17px).
+        float cx = cardX + CardW - 68f, cy = cardY + CardH / 2f, R = 56f;
         var c = new Vector2(cx, cy);
 
         // Bezel (light → gray) then cream face.

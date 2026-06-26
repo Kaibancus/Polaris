@@ -116,6 +116,12 @@
 
 ## ⚡ 性能优化 / 健壮性
 
+- **拖拽图标调整位置：释放卡顿 + 越拖越卡（复用拖拽残影 GPU host，不再每次拖拽重建）**：用户反馈在主/侧 dock 拖拽图标调位时，**释放瞬间略卡**，且**随拖拽次数增多画面渐卡/掉帧**（旧问题复现）。诊断（本会话实测句柄/线程/GDI 增量）：每次拖拽开始 `StartDragGhost` 都 `new DragGhostWindowGpu`——即每拖一次就**新建并销毁一整个 `CompositionHost`（含独立 DirectComposition 设备 + swap chain + 窗口）**。实测一轮约 20 次拖拽期间线程 +6、USER 对象 +8（每个残影 = 1 窗口）、句柄瞬时大涨，空闲后回落——是**瞬态资源/驱动线程 churn**：快速连续拖拽时这些一次性资源来不及回收就叠加，导致释放卡顿 + 突发掉帧（空闲即恢复，非永久泄漏）。修复：让 `DragGhostWindowGpu` **可复用**——新增 `SetSnapshot`（仅重传图标位图、尺寸变化时才 `Resize` swap chain）+ `Hide`（隐藏而非销毁）；两个 dock 改为**懒创建一个常驻残影 host 跨拖拽复用**，拖拽结束 `EndDragGhost` 只 `Hide`，仅 `Dispose` 时经 `DisposeGhost` 真正 `Close`。同实例对照实测：改后 20 次拖拽 + 空闲后 GDI 持平、USER/线程基本持平、**无泄漏**；释放卡顿与累积掉帧均减轻（残影 churn 这一来源消除）。
+  - **接续优化（缓存运行图标指示器的每帧画刷）**：进一步把**运行图标指示器**的每帧 D2D 画刷缓存为 host 生命周期资源（仿 `_satBlurEffect`，`DisposeHostResources` 置空重建）。主 dock 蓝色流光：常量颜色的 5 段渐变 stop collection + 线性画刷建一次，每帧只改画刷起止点（轴旋转）；光晕复用一个实心画刷、每帧只设颜色。侧 dock 绿色呼吸点：径向光晕的 alpha 随 `_runPulse` 脉动，因 `_runPulse` 被正弦硬限于 `[0.35,0.8]`，故用**常量 stop collection（alpha 烘焙在 0.8 峰值）+ 画刷 `Opacity=_runPulse/0.8`（恒≤1）精确复现**「每段 alpha × breath」，每帧只设圆心/半径/Opacity；实心点常量画刷复用。消除了「每个运行图标每帧新建渐变 collection + 多个画刷」这一最高频的可终结 COM 包装 churn。用户实测：视觉无回归，拖拽更顺。**残留**：玻璃面板/齿轮/时钟/水珠透镜/标签等其余每帧 D2D 资源仍未缓存，长时间连续拖拽仍有轻微累积卡顿（既有「每帧 churn ↔ gen2 延迟」权衡），全面缓存涉及多处热路径、风险较高，列为后续专项。
+
+
+- **闲时回收预览缩略图位图（接通孤立的 `TrimThumbCacheForHide`，省最大的托管位图）**：审查发现 `WindowPreviewService` 的两个缓存回收方法 `TrimThumbCacheForHide()` 与 `WarmCache()` **定义了却从未被调用**（被某次重构遗留为孤儿）；而预览缩略图 `_thumbCache`（`ConcurrentDictionary<HWND,BitmapSource>`，全进程最大的托管位图）由悬停预热 `PrewarmThumbnails`/`CaptureThumbnail` 持续填充却无人回收，长会话下按出现过的窗口句柄累积。修复：把现成的 `TrimThumbCacheForHide()` 接到既有的闲时回收点 `App.EvaluateIdleTrim`——在 `MemoryTrimmer.TrimWorkingSet()` 之前调用，使位图被**真正释放**而非仅被换页、下次悬停又换回。该点仅在 Polaris **被动**时触发（主 dock 隐藏 且 光标不在侧 dock/设置上 ≥`IdleTrimDelay`=2s），故无预览正在读缓存；`TrimThumbCacheForHide` 保留**最小化窗口**的最后一帧、只丢可重抓的（可见/已关）窗口，下次悬停由 popup 预热重抓 → **无损**。`ConcurrentDictionary` 线程安全（与后台预热抓帧并发安全）。验证：0 警告、42 单测全过。（`WarmCache` 已被 `PrewarmThumbnails` 的逐悬停预热取代、仍未接通，留作备用。）
+
 - **悬停缩略图预览加载提速（dwell 减半 + dwell 期间预热缩略图）**：用户反馈预览「弹出慢 + 弹出后缩略图先空白/模糊再变清晰」。两处优化（`Views/WindowPreviewPopup.cs`）：①`PreviewOpenDelayMs` 420→160ms，弹窗出现明显更快；②新增 `PrewarmThumbnails`：`OnPointerEnter` 一悬停就在后台（`Task.Run`）枚举该图标的窗口并 `CaptureThumbnail` 抓帧进**线程安全的共享 `_thumbCache`**（`ConcurrentDictionary`），这样 160ms dwell 结束、`OnOpenTimerTick` 用 `TryGetCachedThumbnail` 播种 tile 时**首帧已是新帧**（缓存命中），而非弹出后才开始抓。`_pointerInside` 守护：悬停未满 dwell 就离开则停止预热、只留暖好的缓存供下次用，无 UI 线程访问、不开弹窗。弹出后原有的后台再抓新帧逻辑不变（覆盖预热到弹出之间的窗口内容变化）。
 
 - **拖拽预览图标每帧在渲染线程做同步 shell/磁盘 I/O（code review 发现并修复）**：
@@ -470,7 +476,7 @@
 
 ## ✨ 功能优化 / 新增
 
-- **日历/时钟弹窗增加淡入淡出（GPU）**：Polaris 图标的日历/时钟浮窗原先瞬时显隐。改为整窗在 GPU 合成器上**淡入淡出**——复用 `CompositionHost.SetIntro` 的 `IDCompositionVisual3.SetOpacity`，由既有 ~33ms 计时器按真实流逝时间把整窗不透明度缓动到目标（淡入 200ms / 淡出 170ms，短促不拖沓）。显示前先 `SetIntro(0,0,0)` 提交透明首帧再 `SW_SHOWNOACTIVATE`，避免「整窗全不透明地弹出」（同主/侧 dock 的预显 `SetIntro` 手法）；`Hide` 改为**延迟隐藏**——置目标 0、保持计时器驱动淡出，待不透明度归零后才真正 `SW_HIDE` 并停表（惰性 GPU 释放计时器照常 8s 后回收）。淡出途中再次悬停 Polaris 会从当前不透明度直接淡回，不闪。`AdvanceFade` 在全显示态(opacity==target)为空操作，不增加常显时的提交开销。
+- **日历/时钟弹窗增加淡入淡出（GPU）**：Polaris 图标的日历/时钟浮窗原先瞬时显隐。改为整窗在 GPU 合成器上**淡入淡出**——复用 `CompositionHost.SetIntro` 的 `IDCompositionVisual3.SetOpacity`，由既有 ~33ms 计时器按真实流逝时间把整窗不透明度缓动到目标（淡入 210ms / 淡出 180ms，短促不拖沓）。显示前先 `SetIntro(0,0,0)` 提交透明首帧再 `SW_SHOWNOACTIVATE`，避免「整窗全不透明地弹出」（同主/侧 dock 的预显 `SetIntro` 手法）；`Hide` 改为**延迟隐藏**——置目标 0、保持计时器驱动淡出，待不透明度归零后才真正 `SW_HIDE` 并停表（惰性 GPU 释放计时器照常 8s 后回收）。淡出途中再次悬停 Polaris 会从当前不透明度直接淡回，不闪。`AdvanceFade` 在全显示态(opacity==target)为空操作，不增加常显时的提交开销。
 
 - **侧 dock Polaris 图标悬停弹出「台历 + 时钟」浮窗（液态玻璃 + 土星双主题）**：
   - **需求**：鼠标停留在侧 dock 运行区的 Polaris 图标上时，在图标旁弹出一个包含仿真撕历台历 + 动态指针时钟的窗口，离开即收起。

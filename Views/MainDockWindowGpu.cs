@@ -588,6 +588,9 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
     private void DisposeHostResources()
     {
         DisposeSaturnCache();
+        _runHaloBrush?.Dispose(); _runHaloBrush = null;
+        _runSweepBrush?.Dispose(); _runSweepBrush = null;
+        _runSweepStops?.Dispose(); _runSweepStops = null;
         _host?.Dispose(); _host = null;
         _labelFormat?.Dispose(); _labelFormat = null;
         _clockFormat?.Dispose(); _clockFormat = null;
@@ -595,6 +598,17 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
         foreach (var b in _bmpCache.Values) b?.Dispose();
         _bmpCache.Clear();
     }
+
+    // Running-indicator brushes cached for the HOST's lifetime (nulled + recreated by
+    // DisposeHostResources, exactly like the icon _bmpCache). The running halo + flowing sweep
+    // are drawn for EVERY running icon EVERY frame; building fresh D2D brushes + a gradient-stop
+    // collection per icon per frame churned finalizable COM wrappers that pressured gen2 GC during
+    // long drag sessions (see RenderGcScope). The sweep's colours are constant — only its gradient
+    // AXIS rotates — so its stop collection + brush are built once and only the brush's start/end
+    // points are updated per draw; the halo brush's colour (alpha pulses) is set per draw.
+    private ID2D1SolidColorBrush? _runHaloBrush;
+    private ID2D1GradientStopCollection? _runSweepStops;
+    private ID2D1LinearGradientBrush? _runSweepBrush;
 
     private static Color4 Col(byte a, byte r, byte g, byte b) => new(r / 255f, g / 255f, b / 255f, a / 255f);
 
@@ -956,7 +970,7 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
             fp = _slots[focal].Center;
         }
 
-        float k = 1f - (float)Math.Exp(-frameDt / 0.045f);    // tau 45ms, refresh-rate independent
+        float k = 1f - (float)Math.Exp(-frameDt / 0.030f);    // tau 30ms, refresh-rate independent
         float influence = _iconRaw * SpreadInfluence;
         float push = _iconRaw * SpreadPush;
         float maxDelta = 0f;
@@ -1581,26 +1595,36 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
             float box = g, rr = box * 0.18f;
             var rect = new Vortice.Mathematics.Rect(cx - box / 2f, cy - box / 2f, box, box);
             var rrect = new RoundedRectangle { Rect = rect, RadiusX = rr, RadiusY = rr };
-            // Pulsing cool halo (a few falling-alpha strokes fake the blurred glow).
+            // Pulsing cool halo (a few falling-alpha strokes fake the blurred glow): reuse ONE
+            // cached solid brush, just setting its colour per stroke (see the cached-brush fields).
             float pulse = _runPulse;
-            (float w, byte a)[] ring = { (7f, (byte)(0x22 * pulse)), (4.5f, (byte)(0x44 * pulse)) };
-            foreach (var (sw, a) in ring)
-                using (var br = ctx.CreateSolidColorBrush(Col(a, 0x3F, 0xA9, 0xFF)))
-                    ctx.DrawRoundedRectangle(rrect, br, sw);
-            // Flowing sweep: a rotating linear gradient stroked around the icon.
+            _runHaloBrush ??= ctx.CreateSolidColorBrush(Col(0x22, 0x3F, 0xA9, 0xFF));
+            _runHaloBrush.Color = Col((byte)(0x22 * pulse), 0x3F, 0xA9, 0xFF);
+            ctx.DrawRoundedRectangle(rrect, _runHaloBrush, 7f);
+            _runHaloBrush.Color = Col((byte)(0x44 * pulse), 0x3F, 0xA9, 0xFF);
+            ctx.DrawRoundedRectangle(rrect, _runHaloBrush, 4.5f);
+            // Flowing sweep: a rotating linear gradient stroked around the icon. The colours are
+            // constant, so build the stop collection + brush ONCE (host lifetime) and only move
+            // the brush's gradient axis per frame, instead of recreating both every frame.
             float ang = _runSweep * MathF.PI / 180f, R = box * 0.6f;
             var dir = new Vector2(MathF.Cos(ang) * R, MathF.Sin(ang) * R);
-            using (var stops = ctx.CreateGradientStopCollection(new[]
+            if (_runSweepBrush == null)
             {
-                new Vortice.Direct2D1.GradientStop { Position = 0f,    Color = Col(0x10, 0x3D, 0xA9, 0xFF) },
-                new Vortice.Direct2D1.GradientStop { Position = 0.28f, Color = Col(0x66, 0x57, 0xC8, 0xFF) },
-                new Vortice.Direct2D1.GradientStop { Position = 0.5f,  Color = Col(0xFF, 0x6F, 0xD3, 0xFF) },
-                new Vortice.Direct2D1.GradientStop { Position = 0.72f, Color = Col(0x66, 0x57, 0xC8, 0xFF) },
-                new Vortice.Direct2D1.GradientStop { Position = 1f,    Color = Col(0x10, 0x3D, 0xA9, 0xFF) },
-            }))
-            using (var sweep = ctx.CreateLinearGradientBrush(
-                new LinearGradientBrushProperties { StartPoint = new Vector2(cx - dir.X, cy - dir.Y), EndPoint = new Vector2(cx + dir.X, cy + dir.Y) }, stops))
-                ctx.DrawRoundedRectangle(rrect, sweep, 2.5f);
+                _runSweepStops = ctx.CreateGradientStopCollection(new[]
+                {
+                    new Vortice.Direct2D1.GradientStop { Position = 0f,    Color = Col(0x10, 0x3D, 0xA9, 0xFF) },
+                    new Vortice.Direct2D1.GradientStop { Position = 0.28f, Color = Col(0x66, 0x57, 0xC8, 0xFF) },
+                    new Vortice.Direct2D1.GradientStop { Position = 0.5f,  Color = Col(0xFF, 0x6F, 0xD3, 0xFF) },
+                    new Vortice.Direct2D1.GradientStop { Position = 0.72f, Color = Col(0x66, 0x57, 0xC8, 0xFF) },
+                    new Vortice.Direct2D1.GradientStop { Position = 1f,    Color = Col(0x10, 0x3D, 0xA9, 0xFF) },
+                });
+                _runSweepBrush = ctx.CreateLinearGradientBrush(
+                    new LinearGradientBrushProperties { StartPoint = new Vector2(cx - dir.X, cy - dir.Y), EndPoint = new Vector2(cx + dir.X, cy + dir.Y) },
+                    _runSweepStops);
+            }
+            _runSweepBrush.StartPoint = new Vector2(cx - dir.X, cy - dir.Y);
+            _runSweepBrush.EndPoint = new Vector2(cx + dir.X, cy + dir.Y);
+            ctx.DrawRoundedRectangle(rrect, _runSweepBrush, 2.5f);
             ctx.Transform = baseTf;
         }
 
@@ -2068,10 +2092,9 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
     /// dock's StartDragGhost). Falls back to the in-window draw if the icon has no bitmap.</summary>
     private void StartDragGhost(int idx)
     {
-        EndDragGhost();
-        if (idx < 0 || idx >= _slots.Count) return;
+        if (idx < 0 || idx >= _slots.Count) { EndDragGhost(); return; }
         var img = _slots[idx].Image;
-        if (img == null) return;   // no bitmap (text icon) — keep the in-window draw
+        if (img == null) { EndDragGhost(); return; }   // no bitmap (text icon) — keep the in-window draw
         try
         {
             long t0 = Stopwatch.GetTimestamp();
@@ -2091,13 +2114,19 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
             // Pass the DIP size that makes the ghost's internal scale == _dpi, so MoveCenterTo
             // maps a DIP cursor point to the correct physical centre.
             double dipW = src.PixelWidth / _dpi, dipH = src.PixelHeight / _dpi;
-            _ghost = new DragGhostWindowGpu(src, dipW, dipH);
+            // Reuse one persistent ghost host across drags (created lazily on the first drag):
+            // rebuilding a whole CompositionHost — its own DComposition device + swap chain +
+            // window — per drag spun up transient driver threads / windows that piled up during
+            // rapid repeated drags and progressively degraded the frame rate. SetSnapshot just
+            // re-uploads the icon bitmap on the reused host.
+            if (_ghost == null) _ghost = new DragGhostWindowGpu(src, dipW, dipH);
+            else _ghost.SetSnapshot(src, dipW, dipH);
             MoveDragGhost(_dragX, _dragY);
             _ghost.Show();
             double ms = (Stopwatch.GetTimestamp() - t0) * 1000.0 / Stopwatch.Frequency;
             DragPerfStats.GhostCreated(_dragDiagSession, "gpu", ms);
         }
-        catch (Exception ex) { Log.Warn("MainDockGpu", "drag ghost start failed: " + ex.Message); _ghost = null; }
+        catch (Exception ex) { Log.Warn("MainDockGpu", "drag ghost start failed: " + ex.Message); try { _ghost?.Hide(); } catch { } }
     }
 
     /// <summary>Moves the drag ghost to the window-local cursor point and fades it while the
@@ -2111,8 +2140,16 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
 
     private void EndDragGhost()
     {
-        if (_ghost == null) return;
-        try { _ghost.Close(); } catch { }
+        // Hide (not destroy) the ghost so its GPU host is reused on the next drag; the host is
+        // fully torn down only on Dispose (see DisposeGhost).
+        try { _ghost?.Hide(); } catch { }
+    }
+
+    /// <summary>Tears down the persistent drag-ghost host. Called from Dispose; per-drag end uses
+    /// <see cref="EndDragGhost"/> which only hides it.</summary>
+    private void DisposeGhost()
+    {
+        try { _ghost?.Close(); } catch { }
         _ghost = null;
     }
 
@@ -3358,7 +3395,7 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
         // runs inline. DisposeHostResources covers host, text formats, Saturn + bitmap caches.
         InvokeOnRender(DisposeHostResources);
         if (UseRenderThread) { _loop?.Stop(); _loop = null; }
-        EndDragGhost();
+        DisposeGhost();
         _dropShim?.Dispose(); _dropShim = null;
         if (_hwnd != IntPtr.Zero) { s_instances.Remove(_hwnd); DestroyWindow(_hwnd); }
     }

@@ -138,6 +138,16 @@ internal sealed class SideDockWindowGpu : GpuDockBase, IDisposable, ISideDock
     private bool _saturn;
     private float _satBaseEdge, _satSlabMain, _satSlabLen, _flameFeather, _satDriftAmp;
     private Vortice.Direct2D1.Effects.GaussianBlur? _satBlurEffect;   // cached flame-feather blur (reused per frame; recreated with the host)
+    // Running-dot brushes cached for the HOST's lifetime (nulled + recreated by DisposeHostResources,
+    // like _satBlurEffect). The green dot + breathing radial halo render for every running icon every
+    // frame; building a gradient-stop collection + two brushes per icon per frame churned finalizable
+    // COM wrappers that pressured gen2 GC during long drag sessions (see RenderGcScope). The halo's
+    // alpha pulses with _runPulse (hard-bounded to [0.35,0.8] by the sine), so a CONSTANT stop
+    // collection (alphas baked at the _runPulse=0.8 peak) plus the brush's Opacity = _runPulse/0.8
+    // (always ≤1) reproduces the old per-stop alpha × breath EXACTLY; centre/radius are set per draw.
+    private ID2D1SolidColorBrush? _runDotBrush;
+    private ID2D1GradientStopCollection? _runHaloStops;
+    private ID2D1RadialGradientBrush? _runHaloBrush;
     private bool _curActive; private float _curMain;
     private Vector2[] _stars = Array.Empty<Vector2>();
     private float[] _starSz = Array.Empty<float>();
@@ -763,6 +773,9 @@ internal sealed class SideDockWindowGpu : GpuDockBase, IDisposable, ISideDock
         _bmpCache.Clear();
         DisposeRockResources();
         _satBlurEffect?.Dispose(); _satBlurEffect = null;
+        _runDotBrush?.Dispose(); _runDotBrush = null;
+        _runHaloBrush?.Dispose(); _runHaloBrush = null;
+        _runHaloStops?.Dispose(); _runHaloStops = null;
         _labelFormat?.Dispose(); _labelFormat = null;
         _hoverFormat?.Dispose(); _hoverFormat = null;
         _fitFormat?.Dispose(); _fitFormat = null; _fitFormatFp = 0; _labelFitName = null;
@@ -873,10 +886,9 @@ internal sealed class SideDockWindowGpu : GpuDockBase, IDisposable, ISideDock
     /// clips at the narrow side-dock window's edge (parity with the main dock / WPF).</summary>
     private void StartDragGhost(int idx)
     {
-        EndDragGhost();
-        if (idx < 0 || idx >= _slots.Count) return;
+        if (idx < 0 || idx >= _slots.Count) { EndDragGhost(); return; }
         var img = _slots[idx].Image;
-        if (img == null) return;   // text/no-bitmap tile — keep the in-window draw
+        if (img == null) { EndDragGhost(); return; }   // text/no-bitmap tile — keep the in-window draw
         try
         {
             double dip = _gIcon * 1.12;
@@ -890,11 +902,15 @@ internal sealed class SideDockWindowGpu : GpuDockBase, IDisposable, ISideDock
                 src = scaled;
             }
             double dipW = src.PixelWidth / _dpi, dipH = src.PixelHeight / _dpi;
-            _ghost = new DragGhostWindowGpu(src, dipW, dipH);
+            // Reuse one persistent ghost host across drags (see the main dock for the rationale):
+            // recreating a whole CompositionHost per drag churned transient driver threads / windows
+            // that degraded the frame rate during rapid repeated drags.
+            if (_ghost == null) _ghost = new DragGhostWindowGpu(src, dipW, dipH);
+            else _ghost.SetSnapshot(src, dipW, dipH);
             MoveDragGhost(_dragMain, _dragCross);
             _ghost.Show();
         }
-        catch (Exception ex) { Log.Warn("SideDockGpu", "drag ghost start failed: " + ex.Message); _ghost = null; }
+        catch (Exception ex) { Log.Warn("SideDockGpu", "drag ghost start failed: " + ex.Message); try { _ghost?.Hide(); } catch { } }
     }
 
     private void MoveDragGhost(float lx, float ly)
@@ -915,8 +931,14 @@ internal sealed class SideDockWindowGpu : GpuDockBase, IDisposable, ISideDock
 
     private void EndDragGhost()
     {
-        if (_ghost == null) return;
-        try { _ghost.Close(); } catch { }
+        // Hide (not destroy) so the GPU host is reused on the next drag; full teardown is DisposeGhost.
+        try { _ghost?.Hide(); } catch { }
+    }
+
+    /// <summary>Tears down the persistent drag-ghost host (Dispose only; per-drag end just hides it).</summary>
+    private void DisposeGhost()
+    {
+        try { _ghost?.Close(); } catch { }
         _ghost = null;
     }
 
@@ -1002,7 +1024,7 @@ internal sealed class SideDockWindowGpu : GpuDockBase, IDisposable, ISideDock
         // the WPF dock's ResetWave + _dismissing on launch).
         if (_byBounce || _dismissing || !_shown) active = false;
 
-        float k = 1f - (float)Math.Exp(-dt / 0.045f);   // tau 45ms, refresh-rate independent
+        float k = 1f - (float)Math.Exp(-dt / 0.030f);   // tau 30ms, refresh-rate independent
         float maxDelta = 0f;
         int focal = -1; float best = float.MaxValue;
         for (int i = 0; i < _slots.Count; i++)
@@ -1688,18 +1710,31 @@ internal sealed class SideDockWindowGpu : GpuDockBase, IDisposable, ISideDock
             float breath = _runPulse / 0.575f;                 // ~0.61..1.39, centred on 1
             float gr = glow / 2f * (0.85f + 0.18f * breath);   // swell the halo radius
             var center = new Vector2(dx, dy);
-            using (var stops = ctx.CreateGradientStopCollection(new[]
+            // Breathing radial halo: cache a CONSTANT-alpha stop collection (alphas baked at the
+            // _runPulse=0.8 peak) + radial brush ONCE (host lifetime); per draw move the brush to this
+            // icon and scale its alpha via Opacity = _runPulse/0.8 (always ≤1) — exactly equal to the
+            // old per-stop alpha × breath since _runPulse is bounded to ≤0.8. Avoids rebuilding the
+            // gradient + brush every running icon every frame.
+            if (_runHaloBrush == null)
             {
-                new Vortice.Direct2D1.GradientStop { Position = 0f, Color = new Color4(0x5C / 255f, 1f, 0x7A / 255f, 0.45f * breath) },
-                new Vortice.Direct2D1.GradientStop { Position = 0.5f, Color = new Color4(0x5C / 255f, 1f, 0x7A / 255f, 0.18f * breath) },
-                new Vortice.Direct2D1.GradientStop { Position = 1f, Color = new Color4(0x5C / 255f, 1f, 0x7A / 255f, 0f) },
-            }))
-            using (var gl = ctx.CreateRadialGradientBrush(
-                new RadialGradientBrushProperties { Center = center, GradientOriginOffset = Vector2.Zero, RadiusX = gr, RadiusY = gr },
-                stops))
-                ctx.FillEllipse(new Ellipse(center, gr, gr), gl);
-            using (var co = ctx.CreateSolidColorBrush(new Color4(0x4C / 255f, 0xE0 / 255f, 0x6B / 255f, 1f)))
-                ctx.FillEllipse(new Ellipse(center, dot / 2f, dot / 2f), co);
+                const float peak = 0.8f / 0.575f;   // breath at _runPulse = 0.8
+                _runHaloStops = ctx.CreateGradientStopCollection(new[]
+                {
+                    new Vortice.Direct2D1.GradientStop { Position = 0f, Color = new Color4(0x5C / 255f, 1f, 0x7A / 255f, 0.45f * peak) },
+                    new Vortice.Direct2D1.GradientStop { Position = 0.5f, Color = new Color4(0x5C / 255f, 1f, 0x7A / 255f, 0.18f * peak) },
+                    new Vortice.Direct2D1.GradientStop { Position = 1f, Color = new Color4(0x5C / 255f, 1f, 0x7A / 255f, 0f) },
+                });
+                _runHaloBrush = ctx.CreateRadialGradientBrush(
+                    new RadialGradientBrushProperties { Center = center, GradientOriginOffset = Vector2.Zero, RadiusX = gr, RadiusY = gr },
+                    _runHaloStops);
+            }
+            _runHaloBrush.Center = center;
+            _runHaloBrush.RadiusX = gr;
+            _runHaloBrush.RadiusY = gr;
+            _runHaloBrush.Opacity = _runPulse / 0.8f;
+            ctx.FillEllipse(new Ellipse(center, gr, gr), _runHaloBrush);
+            _runDotBrush ??= ctx.CreateSolidColorBrush(new Color4(0x4C / 255f, 0xE0 / 255f, 0x6B / 255f, 1f));
+            ctx.FillEllipse(new Ellipse(center, dot / 2f, dot / 2f), _runDotBrush);
         }
 
         // New-message attention dot: a small pulsing red disc hugging the icon's
@@ -2047,7 +2082,7 @@ internal sealed class SideDockWindowGpu : GpuDockBase, IDisposable, ISideDock
         // join the render thread, all BEFORE the HWND is destroyed. Inline on the default path.
         InvokeOnRender(DisposeHostResources);
         if (UseRenderThread) { _loop?.Stop(); _loop = null; }
-        EndDragGhost();
+        DisposeGhost();
         _dropShim?.Dispose(); _dropShim = null;
         if (_hwnd != IntPtr.Zero) { s_instances.Remove(_hwnd); DestroyWindow(_hwnd); }
     }

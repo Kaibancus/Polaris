@@ -16,31 +16,65 @@ internal sealed class DragGhostWindowGpu : IDragGhost
 {
     private readonly IntPtr _hwnd;
     private readonly CompositionHost _host;
-    private readonly ID2D1Bitmap _bitmap;
-    private readonly int _pxW, _pxH;
-    private readonly double _scale;     // device px per DIP
+    private ID2D1Bitmap _bitmap;
+    private int _pxW, _pxH;
+    private double _scale;               // device px per DIP
     private float _opacity = 1f;
     private bool _disposed;
 
     public DragGhostWindowGpu(ImageSource snapshot, double dipWidth, double dipHeight)
     {
-        var src = (BitmapSource)snapshot;
-        if (src.Format != PixelFormats.Pbgra32)
-            src = new FormatConvertedBitmap(src, PixelFormats.Pbgra32, null, 0);
-
-        _pxW = Math.Max(1, src.PixelWidth);
-        _pxH = Math.Max(1, src.PixelHeight);
+        var (pixels, pw, ph, stride) = ToPixels(snapshot);
+        _pxW = pw;
+        _pxH = ph;
         _scale = dipWidth > 0 ? _pxW / dipWidth : 1.0;
 
         _hwnd = CreateGhostWindow(_pxW, _pxH);
         _host = new CompositionHost(_hwnd, _pxW, _pxH);
-
-        int stride = _pxW * 4;
-        var pixels = new byte[stride * _pxH];
-        src.CopyPixels(pixels, stride, 0);
         _bitmap = _host.CreateBitmap(_pxW, _pxH, pixels, stride);
 
         Render();
+    }
+
+    /// <summary>Reuses this ghost for a NEW dragged icon WITHOUT tearing down the (expensive)
+    /// composition host / DirectComposition device / swap chain: it just re-uploads the snapshot
+    /// bitmap, resizing the swap chain only if the pixel size actually changed. This lets a drag
+    /// session create ONE ghost host and reuse it for every drag, instead of building and
+    /// destroying a whole <see cref="CompositionHost"/> (its own DComposition device + swap chain
+    /// + window) per drag — which spun up transient driver threads / windows that piled up during
+    /// rapid repeated drags and progressively degraded the frame rate.</summary>
+    public void SetSnapshot(ImageSource snapshot, double dipWidth, double dipHeight)
+    {
+        if (_disposed)
+            return;
+        var (pixels, pw, ph, stride) = ToPixels(snapshot);
+        _scale = dipWidth > 0 ? pw / dipWidth : 1.0;
+        if (pw != _pxW || ph != _pxH)
+        {
+            _pxW = pw;
+            _pxH = ph;
+            SetWindowPos(_hwnd, HWND_TOPMOST, 0, 0, _pxW, _pxH,
+                SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOREDRAW);
+            _host.Resize(_pxW, _pxH);
+        }
+        _bitmap.Dispose();
+        _bitmap = _host.CreateBitmap(_pxW, _pxH, pixels, stride);
+        Render();
+    }
+
+    /// <summary>Extracts premultiplied-BGRA pixels (and dimensions) from a WPF image, converting
+    /// the format if needed. Shared by the constructor and <see cref="SetSnapshot"/>.</summary>
+    private static (byte[] pixels, int pw, int ph, int stride) ToPixels(ImageSource snapshot)
+    {
+        var src = (BitmapSource)snapshot;
+        if (src.Format != PixelFormats.Pbgra32)
+            src = new FormatConvertedBitmap(src, PixelFormats.Pbgra32, null, 0);
+        int pw = Math.Max(1, src.PixelWidth);
+        int ph = Math.Max(1, src.PixelHeight);
+        int stride = pw * 4;
+        var pixels = new byte[stride * ph];
+        src.CopyPixels(pixels, stride, 0);
+        return (pixels, pw, ph, stride);
     }
 
     private void Render()
@@ -78,6 +112,15 @@ internal sealed class DragGhostWindowGpu : IDragGhost
             return;
         ShowWindow(_hwnd, SW_SHOWNOACTIVATE);
         Render();   // present after the window is visible
+    }
+
+    /// <summary>Hides the ghost between drags WITHOUT destroying it, so the same host can be
+    /// reused on the next drag (see <see cref="SetSnapshot"/>). Full teardown is <see cref="Close"/>.</summary>
+    public void Hide()
+    {
+        if (_disposed)
+            return;
+        ShowWindow(_hwnd, SW_HIDE);
     }
 
     public void Close()
@@ -141,8 +184,10 @@ internal sealed class DragGhostWindowGpu : IDragGhost
     private const int WS_EX_NOACTIVATE = 0x08000000;
     private const uint WS_POPUP = 0x80000000;
     private const int SW_SHOWNOACTIVATE = 4;
+    private const int SW_HIDE = 0;
     private static readonly IntPtr HWND_TOPMOST = new(-1);
     private const uint SWP_NOSIZE = 0x0001;
+    private const uint SWP_NOMOVE = 0x0002;
     private const uint SWP_NOACTIVATE = 0x0010;
     private const uint SWP_NOREDRAW = 0x0008;
 
