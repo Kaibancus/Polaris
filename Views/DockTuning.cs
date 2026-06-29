@@ -17,7 +17,7 @@ internal static class DockTuning
 
     /// <summary>Neighbour-spread "push" distance as a multiple of the icon size:
     /// how far the icon next to the hovered/focal one is shoved aside.</summary>
-    public const double SpreadPush = 1.1;
+    public const double SpreadPush = 1.2;
 
     /// <summary>Neighbour-spread influence radius as a multiple of the icon size:
     /// icons further than this from the hovered/focal one are not pushed.</summary>

@@ -27,7 +27,7 @@ internal sealed class WindowPreviewPopup
 {
     internal const int PreviewThumbWidth = 220;   // px capture width per window
     private const double PreviewOpenDelayMs = 180;
-    private const double PreviewCloseDelayMs = 500;
+    private const double PreviewCloseDelayMs = 300;
 
     private readonly FrameworkElement _target;
     private readonly Func<List<WindowPreview>> _getWindows;
@@ -258,7 +258,7 @@ internal sealed class WindowPreviewPopup
         // cursor leaves the icon toward the preview it is already "inside" the popup (no neighbour
         // icon switch / close can fire). Fixes diagonal travel collapsing the preview. The visible
         // card is unchanged; the placement callback subtracts the bridge so the card stays put.
-        double bridge = ExtraTopLift + 27;   // gap(3) + lift + ~half icon: corridor reaches the icon
+        double bridge = ExtraTopLift + 40;   // gap(3) + lift + ~icon: corridor reaches the icon, with extra slack
         var outer = new Border
         {
             Background = System.Windows.Media.Brushes.Transparent,   // transparent but hit-testable

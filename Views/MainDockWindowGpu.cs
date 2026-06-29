@@ -37,7 +37,7 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
     // Magnify wave constants — kept in lockstep with DockTuning so the GPU dock
     // feels identical to the WPF glass dock.
     private const float MagnifyPeak = (float)DockTuning.HoverScale;       // 1.8x under the cursor
-    private const float SpreadPush = (float)DockTuning.SpreadPush;        // 1.1 * iconSize
+    private const float SpreadPush = (float)DockTuning.SpreadPush;        // 1.2 * iconSize
     private const float SpreadInfluence = (float)DockTuning.SpreadInfluence; // 2.7 * iconSize
 
     private readonly AppConfig _config;
