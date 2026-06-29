@@ -476,6 +476,8 @@
 
 ## ✨ 功能优化 / 新增
 
+- **悬停预览防误收(透明走廊 + 关闭延迟)+ 放大曲线微调**：解决「鼠标斜向移到预览图时易误收」。①`WindowPreviewPopup` 在预览卡片朝 dock 一侧加一条**透明命中走廊**(宽=ExtraTopLift+27,按 Above/Below/Left/Right 选边),并以 bridge 量反向补偿放置回调使可见卡片位置不变——鼠标一离开图标即落入弹窗命中区(`_pointerInPopup`),不再被判为悬停相邻图标/离开,斜穿不误收;②关闭延迟 220→500ms 作兜底。两个 dock 共用。③放大曲线微调(`DockTuning`):`HoverScale` 1.7→1.8(焦点更大)、`SpreadPush` 0.75→1.1(相邻图标推得更远)。
+
 - **主 dock 点击图标的「按下缩小 / 释放放大 / 启动定格」动画**：把主 dock 点击启动动画改为更具触感的三段式:鼠标左键**按下**图标时,图标连同水珠透镜框一起缩小回 1.0x(`_pressShrink` 缓动 tau 90ms,glyph 与透镜同用 `gScale` 缩放、透镜不透明度仍按 hover scale 计算故不消失);**释放**时从 1.0x 放大到鼠标正上方的 hover 峰值(MagnifyPeak)再启动(`PressLaunchMs=320`,`PressScale` 从 rest 直接长到峰值);**启动**后保持 `_launching` 不清,把图标**定格在放大峰值**随 dock 淡出,而非缩回原大小(`Summon` 时清除该定格)。按下即 `RequestRender` 让收缩有动画;`DrawIcon` 加 `glyphMul` 参数(仅缩 glyph,透镜随 gScale 同缩)。
 
 - **日历/时钟弹窗增加淡入淡出（GPU）**：Polaris 图标的日历/时钟浮窗原先瞬时显隐。改为整窗在 GPU 合成器上**淡入淡出**——复用 `CompositionHost.SetIntro` 的 `IDCompositionVisual3.SetOpacity`，由既有 ~33ms 计时器按真实流逝时间把整窗不透明度缓动到目标（淡入 210ms / 淡出 180ms，短促不拖沓）。显示前先 `SetIntro(0,0,0)` 提交透明首帧再 `SW_SHOWNOACTIVATE`，避免「整窗全不透明地弹出」（同主/侧 dock 的预显 `SetIntro` 手法）；`Hide` 改为**延迟隐藏**——置目标 0、保持计时器驱动淡出，待不透明度归零后才真正 `SW_HIDE` 并停表（惰性 GPU 释放计时器照常 8s 后回收）。淡出途中再次悬停 Polaris 会从当前不透明度直接淡回，不闪。`AdvanceFade` 在全显示态(opacity==target)为空操作，不增加常显时的提交开销。

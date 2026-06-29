@@ -13,11 +13,11 @@ internal static class DockTuning
     /// <summary>Peak magnification an icon reaches directly under the pointer.
     /// Shared so the per-icon hover zoom and the continuous magnify loop reach the
     /// same maximum size.</summary>
-    public const double HoverScale = 1.7;
+    public const double HoverScale = 1.8;
 
     /// <summary>Neighbour-spread "push" distance as a multiple of the icon size:
     /// how far the icon next to the hovered/focal one is shoved aside.</summary>
-    public const double SpreadPush = 0.75;
+    public const double SpreadPush = 1.1;
 
     /// <summary>Neighbour-spread influence radius as a multiple of the icon size:
     /// icons further than this from the hovered/focal one are not pushed.</summary>

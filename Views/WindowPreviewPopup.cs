@@ -27,7 +27,7 @@ internal sealed class WindowPreviewPopup
 {
     internal const int PreviewThumbWidth = 220;   // px capture width per window
     private const double PreviewOpenDelayMs = 180;
-    private const double PreviewCloseDelayMs = 220;
+    private const double PreviewCloseDelayMs = 500;
 
     private readonly FrameworkElement _target;
     private readonly Func<List<WindowPreview>> _getWindows;
@@ -258,6 +258,25 @@ internal sealed class WindowPreviewPopup
             },
         };
 
+        // Transparent "bridge" wrapping the card on the side facing the dock: it makes the
+        // popup window's hit area reach back over the gap toward the icon, so the moment the
+        // cursor leaves the icon toward the preview it is already "inside" the popup (no neighbour
+        // icon switch / close can fire). Fixes diagonal travel collapsing the preview. The visible
+        // card is unchanged; the placement callback subtracts the bridge so the card stays put.
+        double bridge = ExtraTopLift + 27;   // gap(3) + lift + ~half icon: corridor reaches the icon
+        var outer = new Border
+        {
+            Background = System.Windows.Media.Brushes.Transparent,   // transparent but hit-testable
+            Padding = Placement switch
+            {
+                PreviewPlacement.Below => new Thickness(0, bridge, 0, 0),
+                PreviewPlacement.Right => new Thickness(bridge, 0, 0, 0),
+                PreviewPlacement.Left => new Thickness(0, 0, bridge, 0),
+                _ => new Thickness(0, 0, 0, bridge),   // Above: corridor hangs down toward the icon
+            },
+            Child = shell,
+        };
+
         _previewPopup = new Popup
         {
             PlacementTarget = _target,
@@ -277,22 +296,22 @@ internal sealed class WindowPreviewPopup
                 {
                     case PreviewPlacement.Below:
                         x = (targetSize.Width - popupSize.Width) / 2.0;
-                        y = targetSize.Height + gap;
+                        y = targetSize.Height + gap - bridge;   // bridge corridor reaches up to the icon
                         axis = PopupPrimaryAxis.Horizontal;
                         break;
                     case PreviewPlacement.Right:
-                        x = targetSize.Width + gap;
+                        x = targetSize.Width + gap - bridge;
                         y = (targetSize.Height - popupSize.Height) / 2.0;
                         axis = PopupPrimaryAxis.Vertical;
                         break;
                     case PreviewPlacement.Left:
-                        x = -popupSize.Width - gap;
+                        x = -popupSize.Width - gap + bridge;
                         y = (targetSize.Height - popupSize.Height) / 2.0;
                         axis = PopupPrimaryAxis.Vertical;
                         break;
                     default: // Above
                         x = (targetSize.Width - popupSize.Width) / 2.0;
-                        y = -popupSize.Height - gap - ExtraTopLift;
+                        y = -popupSize.Height - gap - ExtraTopLift + bridge;   // card unchanged; corridor hangs to icon
                         axis = PopupPrimaryAxis.Horizontal;
                         break;
                 }
@@ -301,10 +320,10 @@ internal sealed class WindowPreviewPopup
             AllowsTransparency = true,
             PopupAnimation = PopupAnimation.Fade,
             StaysOpen = true,
-            Child = shell,
+            Child = outer,
         };
-        shell.MouseEnter += (_, _) => { _pointerInPopup = true; _closeTimer.Stop(); };
-        shell.MouseLeave += (_, _) => { _pointerInPopup = false; _closeTimer.Stop(); _closeTimer.Start(); };
+        outer.MouseEnter += (_, _) => { _pointerInPopup = true; _closeTimer.Stop(); };
+        outer.MouseLeave += (_, _) => { _pointerInPopup = false; _closeTimer.Stop(); _closeTimer.Start(); };
 
         _previewPopup.IsOpen = true;
 
