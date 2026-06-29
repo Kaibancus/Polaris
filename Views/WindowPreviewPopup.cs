@@ -134,15 +134,10 @@ internal sealed class WindowPreviewPopup
     {
         _pointerInside = false;
         _openTimer.Stop();
-        // The DWM thumbnails are opaque overlays that don't fade with the WPF popup,
-        // so on hover-away / icon switch they'd stay lit for the close-delay (and on
-        // a switch, for the next open-delay) — looking like the old preview lingers.
-        // Hide them at once. If the pointer is actually travelling onto the popup,
-        // _pointerInPopup is already set (the popup's MouseEnter fires first), so we
-        // keep them shown in that case.
-        if (!_pointerInPopup)
-            HideDwmThumbnails();
-        // Defer closing so the pointer can travel from the target onto the popup.
+        // Defer closing so the pointer can travel from the target onto the popup. Keep the DWM
+        // thumbnails shown through the close delay so a plain hover-away lingers for the full
+        // delay instead of looking like an instant close (the thumbnails are dropped when the
+        // popup actually closes). An icon SWITCH still hides them at once via OnPointerEnter→Close.
         _closeTimer.Stop();
         _closeTimer.Start();
     }
