@@ -32,6 +32,12 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
     // Mirror the WPF glass theme scale factors (see RadialWindow: _uiScale=1, _themeScale=0.9
     // for glass; glyphs drawn at icon*GlassIconScale).
     private const double ThemeScale = 0.9;
+    // Extra whole-dock shrink applied ONLY to the liquid-glass theme (Saturn uses its own
+    // BuildSaturnLayout and is untouched). Multiplied into the glass EffectiveIconSize, so every
+    // icon-derived measure (icons, grid pitch, slab size, paddings, gear, clock, drag headroom)
+    // scales with it; the one fixed pixel value that also defines the dock's size — the slab corner
+    // radius — is scaled by it too, keeping the smaller dock's proportions intact. 0.9 == 10% smaller.
+    private const double GlassSizeScale = 0.9;
     private const float GlassIconScale = 1.32f;
     // Corner radius of every per-icon glass frame (running-app sweep border, the resting 3D glass
     // rim and the hover water-lens), as a fraction of the icon box. Kept in one place so those three
@@ -172,9 +178,6 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
 
     // ---- Saturn theme state ----
     private bool _saturn;                 // active theme is the Saturn ring system
-    // Phone-notch date/time panel shown at the screen top while the Saturn theme is
-    // summoned (mirrors RadialWindow._notch / ShowNotchIfSaturn).
-    private INotchClock? _notch;
     private SaturnScene.Geom _sg;         // Saturn ring/planet geometry (window-local DIP)
     private float[] _slotG = Array.Empty<float>();   // per-slot icon draw size (Saturn rings differ)
     private double _spinAngle, _innerAngle, _outerAngle, _saturnTime;   // Saturn animation phases
@@ -294,7 +297,7 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
         }
         else
         {
-        double icon = _config.Settings.IconSize * ThemeScale;   // EffectiveIconSize (glass)
+        double icon = _config.Settings.IconSize * ThemeScale * GlassSizeScale;   // EffectiveIconSize (glass, incl. whole-dock GlassSizeScale)
         double gIcon = icon * GlassIconScale;
         double cellW = icon * LiquidGlassTheme.ColumnPitch;
         double cellH = icon * LiquidGlassTheme.RowPitch;
@@ -330,7 +333,7 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
         // so 0.5*gIcon = icon*0.66; ThemeScale=0.9, so this factor must be >= 0.66/0.9 ≈
         // 0.74. Use 0.9 (icon*0.81 > icon*0.66) for a safety margin while still trimming
         // far below the original 1.8. The icon-pop / hover-label headroom is untouched.
-        double glassDragHeadroom = _config.Settings.IconSize * ThemeScale * 0.9;
+        double glassDragHeadroom = _config.Settings.IconSize * ThemeScale * GlassSizeScale * 0.9;
         double w = Math.Min(dockW + shadowPad * 2 + scrollPad + glassDragHeadroom * 2, sw);
         double h = Math.Min(totalHeight + bottomMargin + hoverHeadroom + shadowPad + glassDragHeadroom, sh);
 
@@ -357,7 +360,7 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
         _slabY = (float)slabTop;
         _slabW = (float)dockW;
         _slabH = (float)slabTotalH;
-        _radius = 28f;
+        _radius = (float)(28.0 * GlassSizeScale);
         _gIcon = (float)gIcon;
         _effIcon = (float)icon;
         _iconRaw = (float)_config.Settings.IconSize;
@@ -3386,7 +3389,6 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
         SetWindowPos(_hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE);
         Rebuild();                 // pick up config / running changes; rebuilds visible
         RunOnRender(() => _host?.SetIntro(0f, 0f, 0f));   // first frame fully transparent before the fade-in
-        ShowNotchIfSaturn();
         if (!_weatherHooked) { _weather.Updated += OnWeatherUpdated; _weatherHooked = true; }
         _ = _weather.RefreshAsync();   // fetch weather promptly on show (self-throttled)
         StartDriver();
@@ -3399,22 +3401,6 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
     /// <summary>Repaint the clock line as soon as fresh weather arrives (the perpetual
     /// render loop picks the new suffix up on its next frame while shown).</summary>
     private void OnWeatherUpdated() => _lastClockMin = -1;
-
-    /// <summary>Shows the phone-notch date/time panel when the Saturn theme is active
-    /// (hidden for any other theme), sitting on the active monitor's top edge — or its
-    /// bottom edge when the side dock is anchored to the top. Mirrors
-    /// RadialWindow.ShowNotchIfSaturn so the GPU main dock owns the notch too.</summary>
-    private void ShowNotchIfSaturn()
-    {
-        if (!_saturn)
-        {
-            _notch?.HideNotch();
-            return;
-        }
-        _notch ??= new NotchClockWindowGpu();
-        bool atBottom = _config.Settings.DockPosition == Models.DockSide.Top;
-        _notch.ShowNotch(atBottom);
-    }
 
     public void HidePanel() => HidePanel(null);
 
@@ -3432,7 +3418,6 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
         _pressIdx = -1; _dragging = false; _hover = -1;
         CloseSlotMenu();
         ClosePreview();
-        _notch?.HideNotch();        // retract the Saturn notch with the dock
         PanelDismissed?.Invoke();   // retract the side dock together with the main dock
         _onFaded = onFaded;
         // Dismiss is a PURE fade-out in both themes (no slide / scale) — mirrors the
@@ -3525,7 +3510,6 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
         CloseSlotMenu();
         ClosePreview();
         if (_anchorWin != null) { try { _anchorWin.Close(); } catch { } _anchorWin = null; _anchorEl = null; _preview = null; }
-        _notch?.HideNotch();
         // Dispose all GPU resources on the render thread (their owner) and wait, then stop +
         // join the render thread, all BEFORE the HWND is destroyed. On the default path this
         // runs inline. DisposeHostResources covers host, text formats, Saturn + bitmap caches.

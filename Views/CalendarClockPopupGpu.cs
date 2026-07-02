@@ -17,8 +17,7 @@ namespace Polaris.Views;
 /// A hover popup shown above the side dock's Polaris tile (liquid-glass theme): a frosted glass
 /// card holding a skeuomorphic tear-off desk-calendar page (today's day / weekday / month-year)
 /// and an analog clock whose hands sweep live. Rendered in Direct2D under DirectComposition in
-/// its own NOREDIRECTIONBITMAP click-through window (modeled on <see cref="NotchClockWindowGpu"/>),
-/// driven by a ~30fps <see cref="DispatcherTimer"/> while visible so the second hand sweeps
+/// its own NOREDIRECTIONBITMAP click-through window, driven by a ~30fps <see cref="DispatcherTimer"/> while visible so the second hand sweeps
 /// smoothly. The GPU device is released after the popup stays hidden a while (re-built lazily).
 /// </summary>
 internal sealed class CalendarClockPopupGpu : IDisposable

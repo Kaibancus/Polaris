@@ -20,9 +20,10 @@ using FontStyle = Vortice.DirectWrite.FontStyle;
 namespace Polaris.Views;
 
 /// <summary>GPU side dock: the liquid-glass slab, the pinned icon column, a light-split
-/// divider and the running-but-unpinned strip (Polaris tile first, green running dots,
-/// "+N" overflow) drawn in Direct2D under DirectComposition; a cursor poll drives a
-/// continuous magnify wave across both halves and shows the hovered icon's name.
+/// divider and the running-but-unpinned strip (green running dots on up to 12 running apps,
+/// Polaris app tile + permanent date/time widget at the right end) drawn in Direct2D under
+/// DirectComposition; a cursor poll drives a continuous magnify wave across both halves and
+/// shows the hovered icon's name.
 /// Per-monitor DPI aware (layout in DIPs, window + swap chain in physical px, D2D target
 /// DPI = 96 × scale).</summary>
 internal sealed class SideDockWindowGpu : GpuDockBase, IDisposable, ISideDock
@@ -73,6 +74,19 @@ internal sealed class SideDockWindowGpu : GpuDockBase, IDisposable, ISideDock
     private float _fitFormatFp;
     private string? _labelFitName;
     private float _labelFitFp, _labelFitW;
+    // Permanent date/time widget pinned at the far (right) end of a horizontal running
+    // strip: a classic calendar page (red header "YYYY年M月" + big bold day number) plus
+    // two text lines beside it (bold weekday over the 24-hour time). Replaces the Polaris
+    // tile's old hover calendar/clock popup. Horizontal docks lay the text to the right;
+    // vertical (Left/Right) docks stack it below. The widget stays static (no hover wave).
+    private bool _dateWidget;
+    private float _dateIconCX, _dateIconCY, _dateIconG;
+    private IDWriteTextFormat? _calMonthFormat, _calDayFormat, _weekFormat, _timeFormat;
+    // Custom DirectWrite rendering params (NaturalSymmetric → no grid-fitting) giving the
+    // date/time widget's weekday + time lines smoother, sub-pixel glyph edges. Shared by both
+    // themes (the widget is theme-independent; only its ink colour differs).
+    private IDWriteRenderingParams? _smoothText;
+    private float _dateFmtG;   // gIcon the calendar formats were last built for
     private DispatcherTimer? _persistTimer;   // debounce config writes so repeated drags don't block the UI thread
     private DispatcherTimer? _mainDockChangedTimer;   // debounce host main-dock refresh notifications across rapid drags
 
@@ -541,6 +555,14 @@ internal sealed class SideDockWindowGpu : GpuDockBase, IDisposable, ISideDock
         double gIcon = effIcon * GlassIconScale;
         double cellH = effIcon * 1.46;
 
+        // Permanent date/time widget reserve: one calendar-page cell past the last running
+        // icon, then a two-line text block — to the RIGHT on horizontal docks, or stacked
+        // BELOW on vertical (Left/Right) docks. gIcon-based so it is known before the window
+        // is sized; the cell term is added after cellH settles.
+        double widgetGap = 0;                                  // calendar sits one normal icon-pitch (cellH) past the last running icon
+        double widgetTextW = !vertical ? gIcon * 1.00 : 0;     // horizontal: text block to the right
+        double widgetTextH = vertical ? gIcon * 0.90 : 0;      // vertical: two text lines stacked below
+
         double crossGap = 1 * uiScale;
         double padCross = gIcon * (HoverScale - 1.0) / 2.0 + effIcon * 0.12;
         double slabCrossLen = gIcon + padCross * 2.0;
@@ -558,9 +580,10 @@ internal sealed class SideDockWindowGpu : GpuDockBase, IDisposable, ISideDock
         // matching the real dock's DesiredContentMain (incl. the running-area
         // reserve), so the GPU dock has the same footprint.
         double defCell = effIcon * 1.46;
-        const int maxRunSlots = 1 + 10 + 1;   // Polaris + RunningMaxComplete + overflow
+        const int maxRunSlots = 1 + 12;   // Polaris + RunningMaxComplete (extras dropped, no overflow tile)
         double desiredMain = 12 * uiScale + startPad + pinnedCount * defCell
-                           + effIcon * 0.55 + maxRunSlots * defCell + endPad + 12 * uiScale;
+                           + effIcon * 0.55 + maxRunSlots * defCell + endPad + 12 * uiScale
+                           + (!vertical ? widgetGap + defCell + widgetTextW : 0);
         double winMain = vertical ? wa.Height : Math.Min(desiredMain, wa.Width);
         _winW = (int)Math.Ceiling(vertical ? thickness : winMain);
         _winH = (int)Math.Ceiling(vertical ? wa.Height : thickness);
@@ -582,23 +605,39 @@ internal sealed class SideDockWindowGpu : GpuDockBase, IDisposable, ISideDock
         if (totalCells > 0 && totalCells * cellH > availForCells)
             cellH = Math.Max(gIcon * 1.04, availForCells / totalCells);
 
+        // Now that the cell pitch is final, size the widget: gap + one calendar cell + text.
+        double widgetMain = widgetGap + cellH + (vertical ? widgetTextH : widgetTextW);
+
         double runningBlockH = runSlots * cellH;          // RunStep == cellH
         int maxVisible = Math.Max(1, (int)Math.Floor((availForCells - runningBlockH) / cellH));
         int pinnedVisible = Math.Min(pinnedCount, maxVisible);
         double pinnedBlockH = pinnedVisible * cellH;
-        double slabMainLen = startPad + pinnedBlockH + seam + runningBlockH + endPad;
+        double slabMainLen = startPad + pinnedBlockH + seam + runningBlockH + widgetMain + endPad;
 
-        // Centre the VISIBLE ICON CLUSTER (pinned + running, incl. the seam gap),
-        // not the slab box, on the usable band — same correction as the real dock.
+        // Centre the VISIBLE ICON CLUSTER (pinned + running, incl. the seam gap and the
+        // trailing date widget), not the slab box, on the usable band — same correction as
+        // the real dock. The widget extends the cluster on the running end, so its half-width
+        // shifts the centroid toward that end to keep the whole thing balanced.
         int visibleCells = pinnedVisible + runSlots;
         double centroidFromSlab = startPad
             + (visibleCells > 0 ? cellH * visibleCells / 2.0 : 0)
-            + (visibleCells > 0 ? seam * runSlots / (double)visibleCells : 0);
+            + (visibleCells > 0 ? seam * runSlots / (double)visibleCells : 0)
+            + widgetMain / 2.0;
         double slabMain = (startReserve + usableMain / 2.0) - centroidFromSlab;
         slabMain = Math.Min(slabMain, mainExtent - endReserve - slabMainLen);
         slabMain = Math.Max(slabMain, startReserve);
         double pinnedAreaMain = slabMain + startPad;
         double runAreaMain = pinnedAreaMain + pinnedBlockH + seam;
+
+        // Date/time widget: the calendar page occupies the cell right after the last running
+        // icon (aligned to the icon row/column on the cross axis); the text is drawn to its
+        // right (horizontal) or stacked below it (vertical) in DrawDateWidget.
+        {
+            double calCenterMain = runAreaMain + runningBlockH + widgetGap + cellH / 2.0;
+            (float dcx, float dcy) = ToLocal(_side, calCenterMain, colCenterCross, _winW, _winH);
+            _dateIconCX = dcx; _dateIconCY = dcy; _dateIconG = (float)gIcon;
+            _dateWidget = true;
+        }
 
         double lastPinnedEnd = pinnedAreaMain + pinnedBlockH - (cellH - gIcon) / 2.0;
         double firstRunStart = runAreaMain + (cellH - gIcon) / 2.0;
@@ -679,20 +718,22 @@ internal sealed class SideDockWindowGpu : GpuDockBase, IDisposable, ISideDock
         {
             double mainC = runAreaMain + k * cellH + cellH / 2.0;
             (float cx, float cy) = ToLocal(_side, mainC, colCenterCross, _winW, _winH);
-            if (k == 0)
+            if (k == runSlots - 1)
             {
+                // The Polaris tile sits at the RIGHT end of the running strip, just left of the
+                // date widget; shows Polaris's own app icon with a green running dot. Click toggles docks.
                 string exe = Environment.ProcessPath ?? "";
                 _slots.Add(new Slot(new Vector2(cx, cy), (float)gIcon, "Polaris", true,
                     SlotKind.Run, "polaris:" + exe, SafeIcon(exe), null, IntPtr.Zero));
             }
-            else if (overflow > 0 && k == runSlots - 1)
+            else if (overflow > 0 && k == runItems.Count)
             {
                 _slots.Add(new Slot(new Vector2(cx, cy), (float)gIcon, "+" + overflow, false,
                     SlotKind.Overflow, "", null, null, IntPtr.Zero));
             }
             else
             {
-                var it = runItems[k - 1];
+                var it = runItems[k];
                 _slots.Add(new Slot(new Vector2(cx, cy), (float)gIcon, it.Name, true,
                     SlotKind.Run, it.IconKey, it.Image, null, it.Window, it.Path, it.Aumid));
             }
@@ -777,6 +818,16 @@ internal sealed class SideDockWindowGpu : GpuDockBase, IDisposable, ISideDock
         _host = new CompositionHost(_hwnd, pw, ph, (float)(96.0 * _dpi), waitable: UseRenderThread);
         _animLastMs = 0;
         _dwrite = DWrite.DWriteCreateFactory<IDWriteFactory>();
+        _smoothText?.Dispose(); _smoothText = null;
+        try
+        {
+            // Keep the system gamma/contrast/pixel-geometry, but switch to NaturalSymmetric so
+            // glyph edges are anti-aliased without hard grid-fitting → smoother on the glass.
+            using var def = _dwrite.CreateRenderingParams();
+            _smoothText = _dwrite.CreateCustomRenderingParams(def.Gamma, def.EnhancedContrast,
+                def.ClearTypeLevel, def.PixelGeometry, Vortice.DirectWrite.RenderingMode.NaturalSymmetric);
+        }
+        catch { _smoothText = null; }
         _labelFormat?.Dispose();
         _hoverFormat?.Dispose();
         _fitFormat?.Dispose(); _fitFormat = null; _fitFormatFp = 0; _labelFitName = null;   // geometry changed → re-fit on next hover
@@ -816,6 +867,11 @@ internal sealed class SideDockWindowGpu : GpuDockBase, IDisposable, ISideDock
         _labelFormat?.Dispose(); _labelFormat = null;
         _hoverFormat?.Dispose(); _hoverFormat = null;
         _fitFormat?.Dispose(); _fitFormat = null; _fitFormatFp = 0; _labelFitName = null;
+        _calMonthFormat?.Dispose(); _calMonthFormat = null;
+        _calDayFormat?.Dispose(); _calDayFormat = null;
+        _weekFormat?.Dispose(); _weekFormat = null;
+        _timeFormat?.Dispose(); _timeFormat = null; _dateFmtG = 0;
+        _smoothText?.Dispose(); _smoothText = null;
         _dwrite?.Dispose(); _dwrite = null;
         _host?.Dispose(); _host = null;
     }
@@ -1668,6 +1724,9 @@ internal sealed class SideDockWindowGpu : GpuDockBase, IDisposable, ISideDock
             DrawIcon(ctx, _slots[i], scale + BounceScale(i), pop);
         }
 
+        // Permanent date/time widget at the far end of the running strip (horizontal docks).
+        DrawDateWidget(ctx);
+
         if (dragIdx >= 0 && dragIdx < _slots.Count && _ghost == null)
         {
             // The dragged icon follows the cursor, lifted 1.12x with no pop.
@@ -1685,6 +1744,140 @@ internal sealed class SideDockWindowGpu : GpuDockBase, IDisposable, ISideDock
         _host.Present();
         satSrc?.Dispose();   // the cached _satBlurEffect is reused (disposed with the host)
         Polaris.Services.GpuFrameStats.Frame("side");
+    }
+
+    /// <summary>(Re)creates the four DirectWrite formats for the date widget, scaled to the
+    /// current icon size. Cheap to skip: only rebuilds when the icon size changes.</summary>
+    private void EnsureDateFormats(float g)
+    {
+        if (_dwrite == null || (_calMonthFormat != null && Math.Abs(_dateFmtG - g) < 0.5f))
+            return;
+        _calMonthFormat?.Dispose();
+        _calDayFormat?.Dispose();
+        _weekFormat?.Dispose();
+        _timeFormat?.Dispose();
+        _dateFmtG = g;
+        _calMonthFormat = _dwrite.CreateTextFormat("Microsoft YaHei UI", null, FontWeight.SemiBold,
+            FontStyle.Normal, FontStretch.Normal, g * 0.126f, "zh-cn");
+        _calMonthFormat.TextAlignment = TextAlignment.Center;
+        _calMonthFormat.ParagraphAlignment = ParagraphAlignment.Center;
+        _calDayFormat = _dwrite.CreateTextFormat("Microsoft YaHei UI", null, FontWeight.Bold,
+            FontStyle.Normal, FontStretch.Normal, g * 0.36f, "zh-cn");
+        _calDayFormat.TextAlignment = TextAlignment.Center;
+        _calDayFormat.ParagraphAlignment = ParagraphAlignment.Center;
+        _weekFormat = _dwrite.CreateTextFormat("Microsoft YaHei UI", null, FontWeight.Bold,
+            FontStyle.Normal, FontStretch.Normal, g * 0.28f, "zh-cn");
+        _weekFormat.TextAlignment = TextAlignment.Leading;
+        _weekFormat.ParagraphAlignment = ParagraphAlignment.Center;
+        _timeFormat = _dwrite.CreateTextFormat("Microsoft YaHei UI", null, FontWeight.Normal,
+            FontStyle.Normal, FontStretch.Normal, g * 0.30f, "zh-cn");
+        _timeFormat.TextAlignment = TextAlignment.Leading;
+        _timeFormat.ParagraphAlignment = ParagraphAlignment.Center;
+    }
+
+    /// <summary>Draws the permanent date/time widget pinned one icon-pitch past the last
+    /// running icon: a classic calendar page — white body, red header band with "YYYY年M月",
+    /// a big bold day number — plus two text lines (bold weekday over the 24-hour time), laid
+    /// to the RIGHT on horizontal docks or stacked BELOW on vertical ones. The dock
+    /// re-renders every frame while shown, so the date/time read DateTime.Now with no timer.</summary>
+    private void DrawDateWidget(ID2D1DeviceContext ctx)
+    {
+        if (!_dateWidget || _dwrite == null)
+            return;
+        float g = _dateIconG;
+        if (g < 1f)
+            return;
+        EnsureDateFormats(g);
+        var now = DateTime.Now;
+        bool vertical = _side is DockSide.Left or DockSide.Right;
+
+        // The widget stays static (no hover magnify/pop). Reset to identity so it never
+        // inherits a leftover wave transform from the last magnified icon.
+        ctx.Transform = Matrix3x2.Identity;
+
+        float pageG = g * 0.72f;                 // match the app-icon glyph (DrawIcon pads 0.14g → 0.72g visible)
+        float half = pageG / 2f;
+        float px = _dateIconCX - half, py = _dateIconCY - half;
+        var pageRect = new Rect(px, py, pageG, pageG);
+        float r = pageG * 0.16f;
+        float bandH = pageG * 0.34f;
+        float straight = bandH * 0.5f;
+
+        // Raised drop shadow (stronger + larger offset → more 3-D lift off the glass).
+        using (var sh = ctx.CreateSolidColorBrush(Col(0x55, 0x18, 0x1A, 0x22)))
+            ctx.FillRoundedRectangle(new RoundedRectangle { Rect = new Rect(px + pageG * 0.035f, py + pageG * 0.08f, pageG, pageG), RadiusX = r, RadiusY = r }, sh);
+        using (var page = ctx.CreateSolidColorBrush(Col(0xFF, 0xFC, 0xFC, 0xFD)))
+            ctx.FillRoundedRectangle(new RoundedRectangle { Rect = pageRect, RadiusX = r, RadiusY = r }, page);
+
+        // Red header — rounded top corners (match the page), straight bottom via an overlay
+        // rect so the band sits flat against the body (mirrors CalendarClockPopupGpu).
+        using (var hstops = ctx.CreateGradientStopCollection(new[]
+        {
+            new Vortice.Direct2D1.GradientStop { Position = 0f, Color = Col(0xFF, 0xF0, 0x55, 0x55) },
+            new Vortice.Direct2D1.GradientStop { Position = 1f, Color = Col(0xFF, 0xD7, 0x37, 0x37) },
+        }))
+        using (var red = ctx.CreateLinearGradientBrush(
+            new LinearGradientBrushProperties { StartPoint = new Vector2(px, py), EndPoint = new Vector2(px, py + bandH) }, hstops))
+        {
+            ctx.FillRoundedRectangle(new RoundedRectangle { Rect = new Rect(px, py, pageG, bandH), RadiusX = r, RadiusY = r }, red);
+            ctx.FillRectangle(new Rect(px, py + bandH - straight, pageG, straight), red);
+        }
+        if (_calMonthFormat != null)
+            using (var mt = ctx.CreateSolidColorBrush(Col(0xFF, 0xFF, 0xFF, 0xFF)))
+                ctx.DrawText($"{now.Year}年{now.Month}月", _calMonthFormat, new Rect(px, py, pageG, bandH), mt);
+
+        // Big bold day number filling the body below the band.
+        if (_calDayFormat != null)
+            using (var dk = ctx.CreateSolidColorBrush(Col(0xFF, 0x2C, 0x2E, 0x36)))
+                ctx.DrawText(now.Day.ToString(), _calDayFormat, new Rect(px, py + bandH - pageG * 0.04f, pageG, pageG - bandH), dk);
+
+        // Glossy top-edge highlight + hairline frame → a crisper, more 3-D glass edge.
+        using (var hi = ctx.CreateSolidColorBrush(Col(0x66, 0xFF, 0xFF, 0xFF)))
+            ctx.FillRectangle(new Rect(px + r, py + 0.6f, pageG - r * 2f, 1.1f), hi);
+        using (var bd = ctx.CreateSolidColorBrush(Col(0x5A, 0xFF, 0xFF, 0xFF)))
+            ctx.DrawRoundedRectangle(new RoundedRectangle { Rect = pageRect, RadiusX = r, RadiusY = r }, bd, 1f);
+
+        // Weekday (bold) over the 24-hour time. To the RIGHT (horizontal) or stacked BELOW
+        // (vertical). A faint copy offset down-right gives an embossed / letterpress 3-D look.
+        string week = "星期" + "日一二三四五六"[(int)now.DayOfWeek];
+        string time = $"{now.Hour:D2}:{now.Minute:D2}";
+        var inkCol = _saturn ? Col(0xFF, 0xF4, 0xF6, 0xFA) : Col(0xFF, 0x0A, 0x0A, 0x0A);
+        var embCol = _saturn ? Col(0x80, 0x00, 0x00, 0x00) : Col(0x9A, 0xFF, 0xFF, 0xFF);
+        Rect wkRect, tmRect;
+        if (!vertical)
+        {
+            if (_weekFormat != null) _weekFormat.TextAlignment = TextAlignment.Leading;
+            if (_timeFormat != null) _timeFormat.TextAlignment = TextAlignment.Leading;
+            float textLeft = _dateIconCX + half + g * 0.20f;
+            float lineH = g * 0.40f;
+            wkRect = new Rect(textLeft, _dateIconCY - lineH, g * 1.75f, lineH);
+            tmRect = new Rect(textLeft, _dateIconCY, g * 1.75f, lineH);
+        }
+        else
+        {
+            if (_weekFormat != null) _weekFormat.TextAlignment = TextAlignment.Center;
+            if (_timeFormat != null) _timeFormat.TextAlignment = TextAlignment.Center;
+            float lineH = g * 0.42f;
+            float colW = g * 1.7f;
+            float colLeft = _dateIconCX - colW / 2f;
+            float textTop = _dateIconCY + half + g * 0.08f;
+            wkRect = new Rect(colLeft, textTop, colW, lineH);
+            tmRect = new Rect(colLeft, textTop + lineH, colW, lineH);
+        }
+        // Smooth (non-grid-fitted) glyph edges for just the weekday + time lines.
+        if (_smoothText != null) ctx.TextRenderingParams = _smoothText;
+        using (var emb = ctx.CreateSolidColorBrush(embCol))
+        {
+            if (_weekFormat != null) ctx.DrawText(week, _weekFormat, new Rect(wkRect.X + 0.8f, wkRect.Y + 0.9f, wkRect.Width, wkRect.Height), emb);
+            if (_timeFormat != null) ctx.DrawText(time, _timeFormat, new Rect(tmRect.X + 0.8f, tmRect.Y + 0.9f, tmRect.Width, tmRect.Height), emb);
+        }
+        using (var ink = ctx.CreateSolidColorBrush(inkCol))
+        {
+            if (_weekFormat != null) ctx.DrawText(week, _weekFormat, wkRect, ink);
+            if (_timeFormat != null) ctx.DrawText(time, _timeFormat, tmRect, ink);
+        }
+        if (_smoothText != null) ctx.TextRenderingParams = null;
+        ctx.Transform = Matrix3x2.Identity;
     }
 
     /// <summary>Glass orbit light: a cool lamp drifts around the slab (one rev / 36s),
@@ -2037,12 +2230,9 @@ internal sealed class SideDockWindowGpu : GpuDockBase, IDisposable, ISideDock
                 filtered.Add(ta);
             }
 
-            const int max = 10;   // RunningMaxComplete
+            const int max = 12;   // RunningMaxComplete — hard cap; apps beyond 12 are dropped (no "+N" tile)
             if (filtered.Count > max)
-            {
-                overflow = filtered.Count - max;
                 filtered = filtered.GetRange(0, max);
-            }
             foreach (var ta in filtered)
             {
                 bool pathless = string.IsNullOrEmpty(ta.Path);
@@ -2597,25 +2787,15 @@ internal sealed class SideDockWindowGpu : GpuDockBase, IDisposable, ISideDock
         s.Kind == SlotKind.Run && s.IconKey != null
         && s.IconKey.StartsWith("polaris:", StringComparison.Ordinal);
 
-    /// <summary>Shows the calendar/clock popup above the Polaris tile while it is hovered, and
-    /// hides it otherwise. The popup adopts the dock's theme (liquid glass or feathered Saturn
-    /// black). Called on every hover change from <see cref="DrivePreview"/>.</summary>
+    /// <summary>Retired: the Polaris tile's hover calendar/clock popup has been replaced by the
+    /// permanent date/time widget pinned at the far end of the running strip (see
+    /// <see cref="DrawDateWidget"/>). Kept as a no-op that simply hides any popup left over from a
+    /// previous build, so the Polaris tile now hovers like any other icon (click still toggles
+    /// the docks). Called on every hover change from <see cref="DrivePreview"/>.</summary>
     private void UpdateCalendarClock(int hover)
     {
-        bool show = hover >= 0 && hover < _slots.Count && IsPolarisTile(_slots[hover]);
-        if (!show)
-        {
-            _calClock?.Hide();
-            return;
-        }
-        var s = _slots[hover];
-        float scale = HoverScale;
-        Vector2 po = PopOffset((scale - 1f) * _gIcon * 1.18f);
-        double size = _gIcon * scale;
-        double cx = _winX + s.Center.X + po.X;
-        double cy = _winY + s.Center.Y + po.Y;
-        _calClock ??= new CalendarClockPopupGpu();
-        _calClock.ShowFor(cx, cy, size, _side, _opacity, _frost, _saturn);
+        _ = hover;
+        _calClock?.Hide();
     }
 
     /// <summary>Called every Tick with the slot under the cursor (or -1). Drives the
@@ -2728,17 +2908,23 @@ internal sealed class SideDockWindowGpu : GpuDockBase, IDisposable, ISideDock
         }
     }
 
-    /// <summary>Positions the anchor window so its element exactly overlaps the
-    /// hovered icon's FULLY-MAGNIFIED, popped-out glyph box (screen DIPs), matching the
-    /// WPF preview which anchors to the icon visual carrying the wave's scale + pop. The
-    /// popup then opens clear of the enlarged icon (same vertical clearance as the
-    /// original) instead of overlapping it.</summary>
+    /// <summary>Positions the anchor window so its element overlaps the hovered icon's
+    /// FULLY-MAGNIFIED, popped-out glyph box (screen DIPs), then pulls it a fixed few px back
+    /// toward the icon. The preview card's thumbnails are inset from its shell edge by a tile's
+    /// worth of chrome (shell padding + tile margin/padding), so parked at the raw gap they read
+    /// as farther from the icon than the calendar/clock card's edge-filled glass. Nudging the
+    /// anchor in by that inset makes the visible thumbnails hug the icon by the same amount the
+    /// clock card does (a fixed px, not a scale factor, since the chrome is a fixed DIP inset).</summary>
     private void AnchorOverSlot(in Slot s)
     {
         if (_anchorWin == null)
             return;
         float scale = HoverScale;
-        Vector2 po = PopOffset((scale - 1f) * _gIcon * 1.18f);
+        // ~one tile's near-side chrome (border + shell padding + tile margin/padding); pulls the
+        // inset thumbnails in to the same near edge the clock card keeps beside the Polaris tile.
+        // Nudged up from 12 so the preview tail hugs the icon a touch closer still.
+        const float previewHug = 16f;
+        Vector2 po = PopOffset((scale - 1f) * _gIcon * 1.18f - previewHug);
         double size = _gIcon * scale;
         double cx = _winX + s.Center.X + po.X;
         double cy = _winY + s.Center.Y + po.Y;
