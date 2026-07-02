@@ -1508,7 +1508,7 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
     {
         if (_clockFormat == null) return;
         _lastClockMin = DateTime.Now.Minute;
-        string text = DateTime.Now.ToString("yyyy\u5e74M\u6708d\u65e5  ddd   H:mm",
+        string text = DateTime.Now.ToString("yyyy\u5e74M\u6708d\u65e5  ddd   HH:mm",
             System.Globalization.CultureInfo.GetCultureInfo("zh-CN"));
         string? wx = _weather.Summary;
         if (!string.IsNullOrEmpty(wx))

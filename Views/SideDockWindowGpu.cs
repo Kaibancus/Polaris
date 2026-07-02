@@ -1765,11 +1765,11 @@ internal sealed class SideDockWindowGpu : GpuDockBase, IDisposable, ISideDock
             FontStyle.Normal, FontStretch.Normal, g * 0.36f, "zh-cn");
         _calDayFormat.TextAlignment = TextAlignment.Center;
         _calDayFormat.ParagraphAlignment = ParagraphAlignment.Center;
-        _weekFormat = _dwrite.CreateTextFormat("Microsoft YaHei UI", null, FontWeight.Bold,
+        _weekFormat = _dwrite.CreateTextFormat("Segoe UI Semibold", null, FontWeight.Bold,
             FontStyle.Normal, FontStretch.Normal, g * 0.28f, "zh-cn");
         _weekFormat.TextAlignment = TextAlignment.Leading;
         _weekFormat.ParagraphAlignment = ParagraphAlignment.Center;
-        _timeFormat = _dwrite.CreateTextFormat("Microsoft YaHei UI", null, FontWeight.Normal,
+        _timeFormat = _dwrite.CreateTextFormat("Segoe UI Semibold", null, FontWeight.Normal,
             FontStyle.Normal, FontStretch.Normal, g * 0.30f, "zh-cn");
         _timeFormat.TextAlignment = TextAlignment.Leading;
         _timeFormat.ParagraphAlignment = ParagraphAlignment.Center;
